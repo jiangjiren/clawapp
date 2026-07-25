@@ -2043,8 +2043,8 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
                 <span class="picker-option-name">Sonnet 5</span>
                 <span class="picker-option-desc">快速均衡</span>
               </button>
-              <button class="picker-option model-option" data-model="claude-opus-4-8" data-label="Opus 4.8" role="option" aria-selected="false">
-                <span class="picker-option-name">Opus 4.8</span>
+              <button class="picker-option model-option" data-model="claude-opus-5" data-label="Opus 5" role="option" aria-selected="false">
+                <span class="picker-option-name">Opus 5</span>
                 <span class="picker-option-desc">最强推理</span>
               </button>
               <button class="picker-option model-option" data-model="claude-fable-5" data-label="Fable 5" role="option" aria-selected="false">
@@ -2302,9 +2302,12 @@ async function fetchHistory() {
 // ── Auth: 账号配置列表 ────────────────────────────────────────
 const CLAUDE_MODELS = [
   { model: "claude-sonnet-5",            label: "Sonnet 5",   name: "Sonnet 5",   desc: "快速均衡" },
-  { model: "claude-opus-4-8",            label: "Opus 4.8",   name: "Opus 4.8",   desc: "最强推理" },
+  { model: "claude-opus-5",              label: "Opus 5",     name: "Opus 5",     desc: "最强推理" },
   { model: "claude-fable-5",             label: "Fable 5",    name: "Fable 5",    desc: "旗舰最强" },
 ];
+
+// 旧模型 ID → 新模型 ID，保留用户此前选中的档位
+const MODEL_MIGRATIONS = { "claude-opus-4-8": "claude-opus-5" };
 
 let _profileData = { activeProfileId: localStorage.getItem("activeProfileId") || "p_claude", profiles: [] };
 let _claudeAuthStatus = null; // null=checking, true=ok, false=not logged in
@@ -2370,8 +2373,10 @@ function renderModelOptions(activeProfile) {
     if (!options.length) options = CLAUDE_MODELS;
   }
   const key = `model:${provider === "claude" ? "claude" : activeProfile?.id || provider}`;
-  const saved = localStorage.getItem(key);
+  const rawSaved = localStorage.getItem(key);
+  const saved = MODEL_MIGRATIONS[rawSaved] ?? rawSaved;
   selectedModel = options.some(o => o.model === saved) ? saved : options[0].model;
+  if (saved !== rawSaved && selectedModel === saved) localStorage.setItem(key, saved);
   const modelView = modelDropdown.querySelector(".model-view");
   // Rebuild only the model buttons, then re-append the divider + effort-nav row
   const modelBtnsHtml = options.map(o => `
@@ -2836,7 +2841,7 @@ const addErrorEl      = document.getElementById("add-error");
 const authFormTitle   = document.getElementById("auth-form-title");
 
 const ADD_PRESETS = {
-  anthropic:  { baseUrl: "",                                    opusModel: "claude-opus-4-8",                 sonnetModel: "claude-sonnet-5",                  haikuModel: "claude-haiku-4-5-20251001",     keyPlaceholder: "", namePlaceholder: "Anthropic API" },
+  anthropic:  { baseUrl: "",                                    opusModel: "claude-opus-5",                   sonnetModel: "claude-sonnet-5",                  haikuModel: "claude-haiku-4-5-20251001",     keyPlaceholder: "", namePlaceholder: "Anthropic API" },
   deepseek:   { baseUrl: "https://api.deepseek.com/anthropic", opusModel: "deepseek-v4-pro[1m]",            sonnetModel: "deepseek-v4-pro[1m]",             haikuModel: "deepseek-v4-flash",             keyPlaceholder: "",    namePlaceholder: "DeepSeek" },
   openrouter: { baseUrl: "https://openrouter.ai/api",          opusModel: "~anthropic/claude-opus-latest",   sonnetModel: "~anthropic/claude-sonnet-latest",  haikuModel: "~anthropic/claude-haiku-latest", keyPlaceholder: "", namePlaceholder: "OpenRouter" },
   minimax:    { baseUrl: "https://api.minimaxi.com/anthropic", opusModel: "MiniMax-M3",                      sonnetModel: "MiniMax-M3",                       haikuModel: "MiniMax-M3",                    keyPlaceholder: "",    namePlaceholder: "MiniMax" },

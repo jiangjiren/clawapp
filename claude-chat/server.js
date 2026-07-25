@@ -166,7 +166,7 @@ const CODEX_DEFAULT_MODELS = {
 };
 
 const PROVIDER_PRESETS = {
-  anthropic:  { baseUrl: "",                                    opusModel: "claude-opus-4-8",                 sonnetModel: "claude-sonnet-5",                  haikuModel: "claude-haiku-4-5-20251001" },
+  anthropic:  { baseUrl: "",                                    opusModel: "claude-opus-5",                   sonnetModel: "claude-sonnet-5",                  haikuModel: "claude-haiku-4-5-20251001" },
   deepseek:   { baseUrl: "https://api.deepseek.com/anthropic", opusModel: "deepseek-v4-pro[1m]",            sonnetModel: "deepseek-v4-pro[1m]",             haikuModel: "deepseek-v4-flash" },
   openrouter: { baseUrl: "https://openrouter.ai/api",          opusModel: "~anthropic/claude-opus-latest",   sonnetModel: "~anthropic/claude-sonnet-latest",  haikuModel: "~anthropic/claude-haiku-latest" },
   codex:      { baseUrl: "",                                    ...CODEX_DEFAULT_MODELS },
