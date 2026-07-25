@@ -2374,8 +2374,11 @@ function renderModelOptions(activeProfile) {
   }
   const key = `model:${provider === "claude" ? "claude" : activeProfile?.id || provider}`;
   const rawSaved = localStorage.getItem(key);
-  const saved = MODEL_MIGRATIONS[rawSaved] ?? rawSaved;
-  selectedModel = options.some(o => o.model === saved) ? saved : options[0].model;
+  const saved = provider === "claude" ? (MODEL_MIGRATIONS[rawSaved] ?? rawSaved) : rawSaved;
+  const defaultModel = provider === "claude"
+    ? options[0].model
+    : (activeProfile?.sonnetModel || options[0].model);
+  selectedModel = options.some(o => o.model === saved) ? saved : defaultModel;
   if (saved !== rawSaved && selectedModel === saved) localStorage.setItem(key, saved);
   const modelView = modelDropdown.querySelector(".model-view");
   // Rebuild only the model buttons, then re-append the divider + effort-nav row
@@ -2908,9 +2911,6 @@ function openAccountForm(existingProfile) {
     setAddProvider("anthropic");
     addNameInput.value   = "";
     addKeyInput.value    = "";
-    addOpusInput.value   = "";
-    addSonnetInput.value = "";
-    addHaikuInput.value  = "";
   }
   setTimeout(() => addNameInput.focus(), 300);
 }
@@ -2923,9 +2923,10 @@ addSubmitBtn.addEventListener("click", async () => {
   const provider  = _addProvider;
   const name      = addNameInput.value.trim()   || addNameInput.placeholder;
   const apiKey    = addKeyInput.value.trim();
-  const opusModel   = addOpusInput.value.trim()   || (ADD_PRESETS[provider]?.opusModel   ?? "");
-  const sonnetModel = addSonnetInput.value.trim() || opusModel;
-  const haikuModel  = addHaikuInput.value.trim()  || sonnetModel;
+  const preset      = ADD_PRESETS[provider] ?? ADD_PRESETS.custom;
+  const opusModel   = addOpusInput.value.trim()   || preset.opusModel   || "";
+  const sonnetModel = addSonnetInput.value.trim() || preset.sonnetModel || opusModel;
+  const haikuModel  = addHaikuInput.value.trim()  || preset.haikuModel  || sonnetModel;
   const baseUrl   = provider === "custom"
     ? addBaseUrlInput.value.trim()
     : (ADD_PRESETS[provider]?.baseUrl ?? "");

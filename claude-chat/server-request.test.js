@@ -156,32 +156,95 @@ test("WebSocket requests are acknowledged and duplicate IDs are not executed twi
 // 为 opt-in。少了这个变量，持久 Query 的前台轮永远不结束、后续消息全部排队。
 // server.js 顶层会 listen，所以放到子进程里跑（PORT=0 绑随机端口）。
 test("buildAgentEnv opts into session_state_changed for every provider", { timeout: 20_000 }, async () => {
-  const probe = `
-    const { buildAgentEnv } = await import(${JSON.stringify(new URL("server.js", import.meta.url).href)});
-    const KEY = "CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS";
-    const cases = {
-      claude: { activeProfileId: "p_claude", profiles: [{ id: "p_claude", provider: "claude" }] },
-      anthropic: { activeProfileId: "p_a", profiles: [{ id: "p_a", provider: "anthropic", apiKey: "k", opusModel: "m" }] },
-      deepseek: { activeProfileId: "p_d", profiles: [{ id: "p_d", provider: "deepseek", apiKey: "k", baseUrl: "https://x", opusModel: "m" }] },
-    };
-    const out = {};
-    for (const [name, data] of Object.entries(cases)) out[name] = buildAgentEnv(data, "medium", null)[KEY];
-    console.log("PROBE:" + JSON.stringify(out));
-    process.exit(0);
-  `;
-  const child = spawn(process.execPath, ["--input-type=module", "-e", probe], {
-    cwd: new URL(".", import.meta.url),
-    env: { ...process.env, PORT: "0" },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  const scratch = await mkdtemp(join(tmpdir(), "inkfellow-session-state-env-"));
+  const authFile = join(scratch, "auth-profile.json");
+  const historyFile = join(scratch, "history.json");
+  let child;
+  let childClosed = false;
   let stdout = "";
-  child.stdout.on("data", chunk => { stdout += chunk; });
-  const code = await new Promise(resolve => child.once("exit", resolve));
-  assert.equal(code, 0, `probe exited ${code}`);
-  const line = stdout.split("\n").find(l => l.startsWith("PROBE:"));
-  assert.ok(line, `probe produced no result: ${stdout}`);
-  const result = JSON.parse(line.slice("PROBE:".length));
-  for (const provider of ["claude", "anthropic", "deepseek"]) {
-    assert.equal(result[provider], "1", `${provider} profile must opt into session state events`);
+  let stderr = "";
+
+  try {
+    const probe = `
+      const { buildAgentEnv } = await import(${JSON.stringify(new URL("server.js", import.meta.url).href)});
+      const KEY = "CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS";
+      const cases = {
+        claude: { activeProfileId: "p_claude", profiles: [{ id: "p_claude", provider: "claude" }] },
+        anthropic: { activeProfileId: "p_a", profiles: [{ id: "p_a", provider: "anthropic", apiKey: "k", opusModel: "m" }] },
+        deepseek: { activeProfileId: "p_d", profiles: [{ id: "p_d", provider: "deepseek", apiKey: "k", baseUrl: "https://x", opusModel: "m" }] },
+        openrouter: { activeProfileId: "p_o", profiles: [{ id: "p_o", provider: "openrouter", apiKey: "k", baseUrl: "https://x", opusModel: "m" }] },
+        minimax: { activeProfileId: "p_m", profiles: [{ id: "p_m", provider: "minimax", apiKey: "k", baseUrl: "https://x", opusModel: "m" }] },
+        custom: { activeProfileId: "p_custom", profiles: [{ id: "p_custom", provider: "custom", apiKey: "k", baseUrl: "https://x", opusModel: "m" }] },
+        codex: { activeProfileId: "p_codex", profiles: [{ id: "p_codex", provider: "codex" }] },
+      };
+      const out = { inherited: process.env[KEY], providers: {} };
+      for (const [name, data] of Object.entries(cases)) {
+        out.providers[name] = buildAgentEnv(data, "medium", null)[KEY];
+      }
+      process.stdout.write("PROBE:" + JSON.stringify(out) + "\\n", () => process.exit(0));
+    `;
+    child = spawn(process.execPath, ["--input-type=module", "-e", probe], {
+      cwd: new URL(".", import.meta.url),
+      env: {
+        ...process.env,
+        PORT: "0",
+        HOST: "127.0.0.1",
+        CLAUDE_CHAT_DATA_DIR: scratch,
+        CLAUDE_CHAT_HISTORY_FILE: historyFile,
+        CLAUDE_CHAT_AUTH_PROFILE_FILE: authFile,
+        CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "0",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", chunk => { stdout += chunk; });
+    child.stderr.on("data", chunk => { stderr += chunk; });
+    child.once("close", () => { childClosed = true; });
+
+    const outcome = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error(`probe timed out\nstdout:\n${stdout}\nstderr:\n${stderr}`));
+      }, 10_000);
+      timer.unref?.();
+      child.once("error", error => {
+        clearTimeout(timer);
+        reject(error);
+      });
+      child.once("close", (code, signal) => {
+        clearTimeout(timer);
+        resolve({ code, signal });
+      });
+    });
+    assert.equal(
+      outcome.code,
+      0,
+      `probe exited ${outcome.code ?? `via signal ${outcome.signal}`}\nstdout:\n${stdout}\nstderr:\n${stderr}`,
+    );
+    const line = stdout.split(/\r?\n/).find(value => value.startsWith("PROBE:"));
+    assert.ok(line, `probe produced no result\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+    const result = JSON.parse(line.slice("PROBE:".length));
+    assert.equal(result.inherited, "0", "probe must start with the event flag disabled");
+    for (const provider of ["claude", "anthropic", "deepseek", "openrouter", "minimax", "custom", "codex"]) {
+      assert.equal(result.providers[provider], "1", `${provider} profile must opt into session state events`);
+    }
+  } finally {
+    if (child && !childClosed) {
+      await new Promise((resolve, reject) => {
+        const forceTimer = setTimeout(() => child.kill("SIGKILL"), 2_000);
+        const closeTimer = setTimeout(() => {
+          child.off("close", onClose);
+          reject(new Error(`probe did not close after SIGKILL\nstdout:\n${stdout}\nstderr:\n${stderr}`));
+        }, 4_000);
+        const onClose = () => {
+          clearTimeout(forceTimer);
+          clearTimeout(closeTimer);
+          resolve();
+        };
+        child.once("close", onClose);
+        child.kill();
+      });
+    }
+    await rm(scratch, { recursive: true, force: true });
   }
 });
