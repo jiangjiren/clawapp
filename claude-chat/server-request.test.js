@@ -151,3 +151,37 @@ test("WebSocket requests are acknowledged and duplicate IDs are not executed twi
     await rm(scratch, { recursive: true, force: true });
   }
 });
+
+// 回合终止依赖 system/session_state_changed state=idle，该事件自 SDK 0.2.83 起
+// 为 opt-in。少了这个变量，持久 Query 的前台轮永远不结束、后续消息全部排队。
+// server.js 顶层会 listen，所以放到子进程里跑（PORT=0 绑随机端口）。
+test("buildAgentEnv opts into session_state_changed for every provider", { timeout: 20_000 }, async () => {
+  const probe = `
+    const { buildAgentEnv } = await import(${JSON.stringify(new URL("server.js", import.meta.url).href)});
+    const KEY = "CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS";
+    const cases = {
+      claude: { activeProfileId: "p_claude", profiles: [{ id: "p_claude", provider: "claude" }] },
+      anthropic: { activeProfileId: "p_a", profiles: [{ id: "p_a", provider: "anthropic", apiKey: "k", opusModel: "m" }] },
+      deepseek: { activeProfileId: "p_d", profiles: [{ id: "p_d", provider: "deepseek", apiKey: "k", baseUrl: "https://x", opusModel: "m" }] },
+    };
+    const out = {};
+    for (const [name, data] of Object.entries(cases)) out[name] = buildAgentEnv(data, "medium", null)[KEY];
+    console.log("PROBE:" + JSON.stringify(out));
+    process.exit(0);
+  `;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", probe], {
+    cwd: new URL(".", import.meta.url),
+    env: { ...process.env, PORT: "0" },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  child.stdout.on("data", chunk => { stdout += chunk; });
+  const code = await new Promise(resolve => child.once("exit", resolve));
+  assert.equal(code, 0, `probe exited ${code}`);
+  const line = stdout.split("\n").find(l => l.startsWith("PROBE:"));
+  assert.ok(line, `probe produced no result: ${stdout}`);
+  const result = JSON.parse(line.slice("PROBE:".length));
+  for (const provider of ["claude", "anthropic", "deepseek"]) {
+    assert.equal(result[provider], "1", `${provider} profile must opt into session state events`);
+  }
+});

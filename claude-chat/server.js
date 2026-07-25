@@ -535,6 +535,12 @@ export function buildAgentEnv(profileData, effort, requestedModel) {
   const env = { ...process.env };
   for (const key of CLAUDE_COMPAT_ENV_KEYS) delete env[key];
 
+  // 持久 Query 的前台轮靠 system/session_state_changed state=idle 结束（见
+  // handlePersistentClaudeEvent）。该事件自 SDK 0.2.83 起改为 opt-in，不开启就
+  // 永远不发，回合无法结束、后续消息会一直排队。必须在下面按 provider 提前
+  // return 之前设置，否则对 Claude 会员账号不生效。
+  env.CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS = "1";
+
   const active = getActiveProfile(profileData);
   if (!active || active.provider === "claude") return env;
   if (!active.apiKey) return env;
@@ -2962,7 +2968,37 @@ function isThinkingSignatureError(error) {
   return text.includes("signature") && text.includes("thinking");
 }
 
+// 回合终止依赖 SDK 的 session_state_changed/idle，而该事件是 opt-in 的（见
+// buildAgentEnv）。上一次它静默失效时没有任何报错、日志或测试失败，只有用户
+// 手动发第二条消息才暴露。看门狗把这种失效变成可见信号：result 之后短时间内
+// 没等到 idle 就告警。纯观察，不改变回合行为。
+const TURN_IDLE_WATCHDOG_MS = 3_000;
+let turnIdleWatchdog = null;
+
+function clearTurnIdleWatchdog() {
+  clearTimeout(turnIdleWatchdog);
+  turnIdleWatchdog = null;
+}
+
+function armTurnIdleWatchdog() {
+  clearTurnIdleWatchdog();
+  if (!claudeTurnCompletionPending) return;
+  const epoch = claudeTurnEpoch;
+  turnIdleWatchdog = setTimeout(() => {
+    turnIdleWatchdog = null;
+    // 回合已经换代或已结束 → 不是失效，是正常时序
+    if (epoch !== claudeTurnEpoch || !claudeTurnCompletionPending) return;
+    console.warn(
+      `[Web Agent] result 后 ${TURN_IDLE_WATCHDOG_MS}ms 未收到 session_state_changed/idle：`
+      + "本轮无法结束，后续消息将被排队。检查 SDK 是否仍支持 "
+      + "CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS=1（见 buildAgentEnv）。"
+    );
+  }, TURN_IDLE_WATCHDOG_MS);
+  turnIdleWatchdog.unref?.();
+}
+
 function finishClaudeTurn() {
+  clearTurnIdleWatchdog();
   if (!claudeTurnCompletionPending) return;
   const wasStopped = claudeStopRequested;
   const completedRequestId = activeForegroundRequestId;
@@ -3029,6 +3065,9 @@ async function handlePersistentClaudeEvent(ev) {
   }
 
   send(ev);
+  // origin 非空表示这条 result 来自后台任务的自动续写，不是用户轮的收尾，
+  // 此时前台轮可能仍在正常运行 —— 不进入看门狗，避免误报。
+  if (ev.type === "result" && !ev.origin) armTurnIdleWatchdog();
 }
 
 async function handlePersistentClaudeError(error) {
