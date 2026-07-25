@@ -1,0 +1,1604 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>派生子 Agent · 交互原型 · inkfellow</title>
+<style>
+/* ══════════════════════════════════════════════════════════════
+   Design tokens —— 直接取自 claude-chat/public/index.html
+   原型与产品共用同一套 token，保证搬回去时视觉零漂移
+   ══════════════════════════════════════════════════════════════ */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Segoe UI", "Helvetica Neue", sans-serif;
+  --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, Courier, monospace;
+
+  --bg: #f5f4ef;
+  --bg2: #eae9e4;
+  --bg3: rgba(120, 120, 128, 0.09);
+  --bg-document: #ffffff;
+  --border: rgba(0, 0, 0, 0.08);
+  --border-strong: rgba(0, 0, 0, 0.14);
+  --text: #1d1d1f;
+  --text-dim: #86868b;
+  --accent: #0071e3;
+  --accent-hover: #0066cc;
+  --accent-bg: rgba(0, 113, 227, 0.06);
+  --accent-bg-hover: rgba(0, 113, 227, 0.12);
+  --accent-ring: rgba(0, 113, 227, 0.1);
+  --fellow: #7c3aed;
+  --green: #1a7a3f;
+  --yellow: #c4521c;
+  --red: #c0392b;
+  --tool-bg: rgba(120, 120, 128, 0.07);
+  --user-bubble: rgba(120, 120, 128, 0.12);
+  --radius-card: 12px;
+  --radius-item: 8px;
+  --shadow-soft: 0 1px 3px rgba(0, 0, 0, 0.05);
+
+  /* 苹果标准减速曲线 —— 合流/展开/滑入统一用它 */
+  --ease-out: cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+:root[data-theme="dark"] {
+  --bg: #09090b;
+  --bg2: #151516;
+  --bg3: rgba(255, 255, 255, 0.05);
+  --bg-document: #18181b;
+  --border: rgba(255, 255, 255, 0.08);
+  --border-strong: rgba(255, 255, 255, 0.15);
+  --text: #f5f5f7;
+  --text-dim: #86868b;
+  --accent: #2997ff;
+  --accent-hover: #54adff;
+  --accent-bg: rgba(41, 151, 255, 0.12);
+  --accent-bg-hover: rgba(41, 151, 255, 0.2);
+  --accent-ring: rgba(41, 151, 255, 0.15);
+  --fellow: #a78bfa;
+  --green: #58c77c;
+  --yellow: #d05a22;
+  --red: #ff6961;
+  --tool-bg: rgba(255, 255, 255, 0.05);
+  --user-bubble: rgba(255, 255, 255, 0.1);
+  --shadow-soft: 0 1px 3px rgba(0, 0, 0, 0.25);
+}
+
+html, body { height: 100%; overflow: hidden; }
+body {
+  font-family: var(--font-sans);
+  font-size: 13px;
+  background: var(--bg2);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  display: flex;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   演播控制台 —— 不是产品的一部分，视觉上刻意与面板拉开距离
+   ══════════════════════════════════════════════════════════════ */
+#console {
+  width: 268px;
+  flex-shrink: 0;
+  background: #131316;
+  color: #d4d4d8;
+  padding: 20px 18px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  border-right: 1px solid rgba(255,255,255,0.08);
+}
+#console h1 { font-size: 12px; font-weight: 650; letter-spacing: 0.02em; color: #fafafa; }
+#console .sub { font-size: 10.5px; line-height: 1.55; color: #71717a; margin-top: 5px; }
+.con-group { display: flex; flex-direction: column; gap: 7px; }
+.con-label {
+  font-size: 9.5px; font-weight: 650; letter-spacing: 0.09em;
+  text-transform: uppercase; color: #52525b;
+}
+.scn {
+  text-align: left; width: 100%;
+  padding: 9px 11px;
+  background: rgba(255,255,255,0.045);
+  border: 1px solid rgba(255,255,255,0.07);
+  border-radius: 7px;
+  color: #e4e4e7;
+  font-family: inherit; font-size: 12px; font-weight: 550;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.scn:hover { background: rgba(255,255,255,0.09); border-color: rgba(255,255,255,0.14); }
+.scn.on { background: rgba(41,151,255,0.16); border-color: rgba(41,151,255,0.45); color: #fff; }
+.scn .d { display: block; font-size: 10px; font-weight: 400; color: #8b8b94; margin-top: 3px; line-height: 1.45; }
+.scn.on .d { color: #a8c8ea; }
+
+.con-row { display: flex; gap: 7px; }
+.con-row .scn { flex: 1; text-align: center; padding: 7px 8px; font-size: 11px; }
+
+.probe {
+  font-family: var(--font-mono); font-size: 10px; line-height: 1.75;
+  color: #71717a; background: rgba(0,0,0,0.35);
+  border-radius: 6px; padding: 9px 10px;
+  max-height: 156px; overflow-y: auto;
+}
+.probe b { color: #a1a1aa; font-weight: 500; }
+.probe .hl { color: #7dd3a0; }
+
+.note { font-size: 10.5px; line-height: 1.6; color: #71717a; }
+.note b { color: #a1a1aa; font-weight: 600; }
+
+/* ══════════════════════════════════════════════════════════════
+   舞台 + 面板外壳（模拟 NotesExplorer 右侧 assistant panel）
+   ══════════════════════════════════════════════════════════════ */
+#stage {
+  flex: 1; min-width: 0;
+  display: flex; align-items: stretch; justify-content: center;
+  padding: 26px 30px;
+  position: relative;
+  background:
+    radial-gradient(ellipse 60% 50% at 50% 0%, rgba(0,0,0,0.035), transparent 70%),
+    var(--bg2);
+}
+:root[data-theme="dark"] #stage {
+  background: radial-gradient(ellipse 60% 50% at 50% 0%, rgba(255,255,255,0.03), transparent 70%), var(--bg2);
+}
+
+#shell {
+  display: flex; align-items: stretch;
+  border-radius: 14px; overflow: hidden;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.13), 0 0 0 1px var(--border);
+  background: var(--bg-document);
+}
+:root[data-theme="dark"] #shell { box-shadow: 0 12px 40px rgba(0,0,0,0.5), 0 0 0 1px var(--border); }
+
+/* 笔记正文区 —— 只是让面板有真实语境，不是设计重点，刻意做哑光 */
+#editor {
+  width: 300px; flex-shrink: 0;
+  background: var(--bg-document);
+  padding: 26px 24px;
+  border-right: 1px solid var(--border);
+  overflow: hidden;
+  position: relative;
+  transition: width 0.34s var(--ease-out);
+}
+#editor .doc-t { font-size: 15px; font-weight: 650; margin-bottom: 12px; letter-spacing: -0.01em; }
+#editor .ln { height: 7px; border-radius: 3px; background: var(--bg3); margin-bottom: 9px; }
+#editor .ln.s { width: 62%; }
+#editor .ln.m { width: 86%; }
+
+/* —— 后台活动条：面板收起后，活动降级到编辑区边缘（灵动岛思路）—— */
+/* 紧凑胶囊，贴右下角 —— 面板是从右侧收起的，活动退到右下才有空间连续性 */
+#bgbar {
+  position: absolute; right: 16px; bottom: 16px;
+  height: 34px; max-width: 320px;
+  display: none; align-items: center; gap: 9px;
+  padding: 0 14px;
+  background: var(--bg-document);
+  border: 1px solid var(--border-strong);
+  border-radius: 17px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.12);
+  font-size: 11.5px;
+  cursor: pointer;
+  transform: translateY(10px) scale(0.97);
+  opacity: 0;
+  transition: transform 0.34s var(--ease-out), opacity 0.28s ease;
+}
+#bgbar.show { display: flex; transform: none; opacity: 1; }
+#bgbar .bt { color: var(--text); font-weight: 500; white-space: nowrap; }
+#bgbar .ba { color: var(--text-dim); font-size: 10.5px; white-space: nowrap; }
+#bgbar.ok .bt { color: var(--green); }
+/* 完成即停止脉冲：还在动的点意味着还在忙 */
+#bgbar.ok .chip-dot { background: var(--green); animation: none; opacity: 1; }
+
+/* —— 面板本体 —— */
+#panel {
+  width: 384px; flex-shrink: 0;
+  background: var(--bg);
+  display: flex; flex-direction: column;
+  transition: width 0.34s var(--ease-out), opacity 0.24s ease;
+  position: relative;
+}
+#panel.collapsed { width: 0; opacity: 0; pointer-events: none; }
+
+#phead {
+  flex-shrink: 0; height: 42px;
+  display: flex; align-items: center; gap: 8px;
+  padding: 0 12px 0 14px;
+  border-bottom: 1px solid var(--border);
+}
+#phead .pt { flex: 1; font-size: 12.5px; font-weight: 600; }
+#phead .pb {
+  width: 26px; height: 26px; border: 0; background: transparent;
+  border-radius: 6px; color: var(--text-dim); cursor: pointer;
+  display: grid; place-items: center;
+}
+#phead .pb:hover { background: var(--bg3); color: var(--text); }
+
+#messages {
+  flex: 1; min-height: 0; overflow-y: auto;
+  padding: 14px 14px 6px;
+  display: flex; flex-direction: column; gap: 16px;
+  scroll-behavior: smooth;
+}
+.msg { display: flex; flex-direction: column; gap: 4px; }
+.msg-user { align-items: flex-end; }
+.msg-user .msg-body {
+  max-width: 78%; padding: 8px 12px;
+  border-radius: 17px; border-bottom-right-radius: 6px;
+  background: var(--user-bubble);
+  line-height: 1.55;
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+.msg-body { line-height: 1.6; word-break: break-word; }
+
+/* ══════════════════════════════════════════════════════════════
+   ★ 编队卡 Squad Card —— 本原型的主角
+   ══════════════════════════════════════════════════════════════ */
+.squad {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--tool-bg);
+  overflow: hidden;
+  animation: squadIn 0.3s var(--ease-out) both;
+}
+@keyframes squadIn {
+  from { opacity: 0; transform: translateY(6px) scale(0.985); }
+  to   { opacity: 1; transform: none; }
+}
+
+.sq-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 9px 10px 9px 12px;
+  cursor: pointer;
+  user-select: none;
+}
+.sq-head:hover { background: var(--bg3); }
+.sq-title { font-size: 12px; font-weight: 600; letter-spacing: -0.005em; }
+.sq-count { font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.sq-spacer { flex: 1; }
+.sq-stopall {
+  border: 0; background: transparent; padding: 3px 7px;
+  border-radius: 5px; font-family: inherit; font-size: 10.5px;
+  color: var(--text-dim); cursor: pointer; opacity: 0;
+  transition: opacity 0.15s;
+}
+.squad:hover .sq-stopall { opacity: 1; }
+.sq-stopall:hover { background: var(--bg3); color: var(--red); }
+.sq-chev {
+  width: 14px; height: 14px; flex-shrink: 0; color: var(--text-dim);
+  transition: transform 0.24s var(--ease-out);
+}
+.squad.folded .sq-chev { transform: rotate(-90deg); }
+
+/* —— 分叉轨：容器 ——
+   用 grid 0fr/1fr 而非 height：内容高度会随 L2 展开变化，手工测高必然拿到
+   transition 中途的值，把内容裁掉。 */
+.sq-body {
+  display: grid; grid-template-rows: 1fr;
+  transition: grid-template-rows 0.32s var(--ease-out), opacity 0.24s ease;
+}
+/* clip 层不带 padding —— grid row 收到 0fr 时，padding 不归零会留下残影 */
+.sq-body > .sq-clip { min-height: 0; overflow: hidden; }
+.squad.folded .sq-body { grid-template-rows: 0fr; opacity: 0; }
+
+.sq-rows {
+  position: relative;
+  padding: 2px 8px 10px;
+}
+/* rail —— 真实元素而非 ::before，这样 JS 能直接驱动"分叉 → 合流"两段动画。
+   用 CSS animation 做入场会因 fill-mode: both 锁死 transform，导致收拢失效。 */
+.sq-rail {
+  position: absolute;
+  left: 18px; top: 0; bottom: 13px;
+  width: 1.5px;
+  background: var(--border-strong);
+  transform: scaleY(0);
+  transform-origin: top;
+  transition: transform 0.26s var(--ease-out);
+}
+.sq-rail.grown { transform: scaleY(1); }
+.sq-rail.joined { transform-origin: bottom; transform: scaleY(0); }
+
+/* —— 单行 —— */
+.sq-row {
+  position: relative;
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 6px 6px 34px;
+  border-radius: 6px;
+  cursor: pointer;
+  animation: rowIn 0.26s var(--ease-out) both;
+  transition: background 0.15s;
+}
+.sq-row:hover { background: var(--bg3); }
+@keyframes rowIn {
+  from { opacity: 0; transform: translateX(-5px); }
+  to   { opacity: 1; transform: none; }
+}
+/* connector：从 rail 横向接到状态点。同样用真实元素以便 JS 驱动收拢 */
+.sq-conn {
+  position: absolute;
+  left: 19px; top: 50%;
+  width: 7px; height: 1.5px;
+  background: var(--border-strong);
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform 0.22s var(--ease-out);
+}
+.sq-conn.grown { transform: scaleX(1); }
+.sq-conn.joined { transform-origin: right; transform: scaleX(0); }
+
+/* —— 状态点：色彩纪律的落点 —— */
+.sq-dot {
+  position: absolute; left: 24px; top: 50%;
+  width: 8px; height: 8px; margin-top: -4px;
+  border-radius: 50%;
+  display: grid; place-items: center;
+  flex-shrink: 0;
+}
+/* 排队：空心 */
+.sq-row[data-s="queued"] .sq-dot { box-shadow: inset 0 0 0 1.5px var(--border-strong); }
+/* 运行中：呼吸的灰点 —— 刻意无色，避免三个彩点变圣诞树 */
+.sq-row[data-s="running"] .sq-dot {
+  background: var(--text-dim);
+  animation: breathe 1.6s ease-in-out infinite;
+}
+@keyframes breathe { 0%,100% { opacity: 0.35; transform: scale(0.8); } 50% { opacity: 1; transform: scale(1); } }
+/* 需要你：唯一的注意力色 */
+.sq-row[data-s="asking"] .sq-dot { background: var(--accent); }
+.sq-row[data-s="asking"] .sq-dot::after {
+  content: ''; position: absolute; inset: -4px;
+  border-radius: 50%; border: 1.5px solid var(--accent);
+  animation: ring 1.4s ease-out infinite;
+}
+@keyframes ring {
+  0%   { opacity: 0.7; transform: scale(0.6); }
+  100% { opacity: 0;   transform: scale(1.25); }
+}
+/* 排队等你回答：同色但不脉冲 —— 屏幕上同时只能有一个注意力焦点 */
+.sq-row[data-s="waiting"] .sq-dot { background: var(--accent); opacity: 0.4; }
+.sq-row[data-s="waiting"] .sq-label { color: var(--accent); opacity: 0.65; }
+/* 完成：无色，退到背景。去掉圆圈只留勾 —— 8px 里塞圈+勾会糊成一团 */
+.sq-row[data-s="done"] .sq-dot { background: transparent; }
+.sq-row[data-s="done"] .sq-dot::after {
+  content: ''; width: 3px; height: 6.5px; margin-top: -2px; margin-left: 1px;
+  border: solid var(--text-dim); border-width: 0 1.5px 1.5px 0;
+  transform: rotate(42deg);
+}
+/* 失败：橙（红留给破坏性操作） */
+.sq-row[data-s="failed"] .sq-dot { background: var(--yellow); }
+.sq-row[data-s="failed"] .sq-dot::after {
+  content: ''; width: 1.5px; height: 4px; background: var(--bg);
+  border-radius: 1px;
+}
+
+.sq-label {
+  flex: 1; min-width: 0;
+  font-size: 12px; line-height: 1.4;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  transition: color 0.3s ease;
+}
+/* 完成即降权 */
+.sq-row[data-s="done"] .sq-label { color: var(--text-dim); }
+.sq-row[data-s="failed"] .sq-label { color: var(--text); }
+.sq-row[data-s="asking"] .sq-label { color: var(--accent); font-weight: 550; }
+
+/* 成果摘要 —— 用 sans 不用 mono：mono 排中文会散架，等宽只留给时间和数字 */
+.sq-meta {
+  flex-shrink: 0; max-width: 52%;
+  font-size: 10.5px; color: var(--text-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  transition: opacity 0.15s;
+}
+.sq-meta.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.sq-stop {
+  position: absolute; right: 6px;
+  border: 0; background: var(--bg); padding: 2px 7px;
+  border-radius: 5px; font-family: inherit; font-size: 10px;
+  color: var(--text-dim); cursor: pointer;
+  opacity: 0; transition: opacity 0.15s;
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+.sq-row:hover .sq-stop { opacity: 1; }
+/* 只有还能停止的行才在 hover 时让位；完成行的成果摘要必须一直可读 */
+.sq-row[data-s="running"]:hover .sq-meta,
+.sq-row[data-s="queued"]:hover .sq-meta { opacity: 0; }
+.sq-stop:hover { color: var(--red); }
+.sq-row[data-s="done"] .sq-stop, .sq-row[data-s="failed"] .sq-stop { display: none; }
+
+/* —— L2：就地展开的工具流。一次只开一个 —— */
+.sq-detail {
+  display: grid; grid-template-rows: 0fr;
+  transition: grid-template-rows 0.28s var(--ease-out);
+}
+.sq-detail > * { min-height: 0; overflow: hidden; }
+.sq-detail.open { grid-template-rows: 1fr; }
+.sq-detail-in {
+  margin: 0 6px 6px 34px;
+  padding: 7px 9px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-item);
+  font-family: var(--font-mono); font-size: 10.5px; line-height: 1.85;
+  color: var(--text-dim);
+}
+.sq-detail-in .st { display: block; }
+.sq-detail-in .st.now { color: var(--text); }
+.sq-detail-in .rs {
+  display: block; margin-top: 5px; padding-top: 5px;
+  border-top: 1px dashed var(--border);
+  font-family: var(--font-sans); font-size: 11px; color: var(--text);
+}
+
+/* —— 合流后：整卡塌成一行摘要 —— */
+.sq-summary {
+  display: none;
+  align-items: center; gap: 7px;
+  padding: 9px 12px;
+  font-size: 11.5px; color: var(--text-dim);
+}
+.squad.done .sq-summary { display: flex; }
+.squad.done .sq-head { display: none; }
+/* 合流后整卡塌成一行 —— 完成的东西不该继续占注意力 */
+.squad.done .sq-body { grid-template-rows: 0fr; opacity: 0; }
+.squad.done { background: transparent; border-color: var(--border); }
+.sq-summary .sq-re {
+  margin-left: auto; font-size: 10.5px; color: var(--accent); cursor: pointer;
+}
+.sq-summary .jd {
+  width: 8px; height: 8px; border-radius: 50%;
+  box-shadow: inset 0 0 0 1.5px var(--border-strong);
+  display: grid; place-items: center;
+}
+.sq-summary .jd::after {
+  content: ''; width: 3px; height: 6px; margin-top: -1.5px;
+  border: solid var(--text-dim); border-width: 0 1.5px 1.5px 0;
+  transform: rotate(42deg);
+}
+
+/* ══════════════════════════════════════════════════════════════
+   Codex todo_list —— 串行计划，刻意长得跟编队卡不一样。
+   没有分叉轨、没有并行进度、没有 L2：因为它根本不是分头处理。
+   ══════════════════════════════════════════════════════════════ */
+.todo {
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--text-dim);
+  border-radius: var(--radius-item);
+  background: var(--tool-bg);
+  padding: 8px 11px;
+  animation: squadIn 0.3s var(--ease-out) both;
+}
+.todo-h {
+  font-size: 10.5px; font-weight: 650; color: var(--text-dim);
+  letter-spacing: 0.04em; margin-bottom: 6px;
+}
+.todo-i {
+  display: flex; align-items: center; gap: 8px;
+  padding: 3px 0; font-size: 12px; line-height: 1.4;
+  transition: color 0.3s ease, opacity 0.3s ease;
+}
+.todo-b {
+  width: 11px; height: 11px; flex-shrink: 0;
+  border-radius: 3px; box-shadow: inset 0 0 0 1.5px var(--border-strong);
+  display: grid; place-items: center;
+  transition: background 0.2s, box-shadow 0.2s;
+}
+.todo-i.on .todo-b { background: var(--text-dim); box-shadow: none; }
+.todo-i.on .todo-b::after {
+  content: ''; width: 2.5px; height: 5.5px; margin-top: -1.5px;
+  border: solid var(--bg); border-width: 0 1.5px 1.5px 0;
+  transform: rotate(42deg);
+}
+.todo-i.on { color: var(--text-dim); }
+/* 当前这一步：唯一被强调的行 —— 串行的意义就在于"现在只做这一件" */
+.todo-i.now { font-weight: 550; }
+.todo-i.now .todo-b { box-shadow: inset 0 0 0 1.5px var(--accent); }
+.todo-i.now .todo-b::after {
+  content: ''; width: 4px; height: 4px; border-radius: 50%;
+  background: var(--accent); animation: breathe 1.6s ease-in-out infinite;
+}
+
+/* ══════════════════════════════════════════════════════════════
+   提问队列 —— 同时只呈现一个，其余排队
+   ══════════════════════════════════════════════════════════════ */
+#askwrap {
+  flex-shrink: 0;
+  padding: 0 14px;
+  overflow: hidden;
+  height: 0;
+  transition: height 0.3s var(--ease-out);
+}
+#ask {
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-card);
+  background: var(--accent-bg);
+  margin-bottom: 10px;
+  overflow: hidden;
+}
+#ask.slide { animation: askSlide 0.22s var(--ease-out) both; }
+@keyframes askSlide {
+  from { opacity: 0; transform: translateX(16px); }
+  to   { opacity: 1; transform: none; }
+}
+.ask-head {
+  display: flex; align-items: baseline; gap: 7px;
+  padding: 9px 11px 0;
+}
+.ask-src { flex: 1; font-size: 10.5px; font-weight: 650; color: var(--accent); }
+.ask-idx {
+  font-family: var(--font-mono); font-size: 10px; color: var(--accent);
+  opacity: 0.75; font-variant-numeric: tabular-nums;
+}
+.ask-q { padding: 5px 11px 9px; font-size: 12.5px; line-height: 1.45; }
+.ask-opts { display: grid; gap: 5px; padding: 0 11px 11px; }
+.ask-opt {
+  text-align: left; padding: 7px 10px;
+  background: var(--bg-document);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-item);
+  font-family: inherit; font-size: 12px; color: var(--text);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.ask-opt:hover { border-color: var(--accent); background: var(--accent-bg-hover); }
+
+/* ══════════════════════════════════════════════════════════════
+   L0 状态 chip + 输入区
+   ══════════════════════════════════════════════════════════════ */
+#chipwrap { flex-shrink: 0; padding: 0 14px; height: 0; overflow: hidden; transition: height 0.24s var(--ease-out); }
+.chip {
+  display: flex; align-items: center; gap: 6px;
+  padding: 7px 0 5px;
+  color: var(--text-dim); font-size: 11px;
+}
+.chip-dot {
+  width: 5px; height: 5px; border-radius: 50%;
+  background: var(--accent); flex-shrink: 0;
+  animation: genPulse 1.5s ease-in-out infinite;
+}
+@keyframes genPulse { 0%,100% { opacity: 0.2; transform: scale(0.7); } 50% { opacity: 1; transform: scale(1); } }
+.chip-txt { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 极细并行进度：只表达"几分之几已回来"，不假装预测百分比 */
+.chip-bar { display: flex; gap: 2px; flex-shrink: 0; }
+.chip-seg { width: 12px; height: 2px; border-radius: 1px; background: var(--border-strong); transition: background 0.3s ease; }
+.chip-seg.f { background: var(--accent); }
+
+#composer {
+  flex-shrink: 0;
+  padding: 8px 14px 14px;
+  display: flex; align-items: flex-end; gap: 8px;
+}
+#ta {
+  flex: 1;
+  background: var(--bg-document);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  padding: 9px 14px;
+  font-family: inherit; font-size: 13px; color: var(--text);
+  resize: none; outline: none; height: 36px;
+}
+#ta::placeholder { color: var(--text-dim); }
+#send {
+  width: 32px; height: 32px; flex-shrink: 0;
+  border: 0; border-radius: 50%;
+  background: var(--accent); color: #fff;
+  cursor: pointer; display: grid; place-items: center;
+}
+
+/* 打字光标 */
+.caret {
+  display: inline-block; width: 2px; height: 13px;
+  background: var(--accent); vertical-align: -2px;
+  margin-left: 1px; animation: caretB 1s steps(2) infinite;
+}
+@keyframes caretB { 0%,50% { opacity: 1; } 50.01%,100% { opacity: 0; } }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
+</style>
+</head>
+<body>
+
+<!-- ══════════ 演播控制台（不是产品的一部分） ══════════ -->
+<aside id="console">
+  <div>
+    <h1>派生子 Agent · 交互原型</h1>
+    <div class="sub">右侧是 inkfellow 的 assistant panel，token 取自 <code style="font-size:9.5px">claude-chat/public/index.html</code>。选一个场景播放。</div>
+  </div>
+
+  <div class="con-group">
+    <div class="con-label">场景</div>
+    <button class="scn" data-scn="parallel">A · 正常并行
+      <span class="d">3 项分头处理 → 依次回来 → 合流塌成摘要</span></button>
+    <button class="scn" data-scn="fast">B · 太快了
+      <span class="d">全部 600ms 内结束 → 卡片不出现，验证防闪烁阈值</span></button>
+    <button class="scn" data-scn="ask">C · 提问队列
+      <span class="d">两项同时要你回答 → 串行呈现，绝不并发弹两个</span></button>
+    <button class="scn" data-scn="fail">D · 一项失败
+      <span class="d">不阻断，最终回答里显式承认置信度下降</span></button>
+    <button class="scn" data-scn="bg">E · 转入后台
+      <span class="d">收起面板 → 活动降级为编辑区边缘状态条</span></button>
+  </div>
+
+  <div class="con-group">
+    <div class="con-label">另两种真实形态</div>
+    <button class="scn" data-scn="tool">F · Task 工具派生 · Claude
+      <span class="d">最常见的一种。子 agent 的工具调用靠 parent_tool_use_id 归位，不再交错混进主流</span></button>
+    <button class="scn" data-scn="codex">G · Codex todo_list
+      <span class="d">串行计划 → checklist，不套编队卡。Codex 的 subagent 走独立 thread，SDK 暂未透传</span></button>
+  </div>
+
+  <div class="con-group">
+    <div class="con-label">对照</div>
+    <div class="con-row">
+      <button class="scn" id="btn-before">看现状</button>
+      <button class="scn" id="btn-theme">深色</button>
+    </div>
+  </div>
+
+  <div class="con-group">
+    <div class="con-label">事件流（与真实 WS 同构）</div>
+    <div class="probe" id="probe"><span style="color:#52525b">等待场景…</span></div>
+  </div>
+
+  <div class="note">
+    <b>可以点：</b>编队卡的每一行（展开 L2 工具流）、卡片标题（折叠）、行尾「停止」、合流后的「展开」。
+  </div>
+</aside>
+
+<!-- ══════════ 舞台 ══════════ -->
+<main id="stage">
+  <div id="shell">
+    <div id="editor">
+      <div class="doc-t">昆明旅居 · 支出复盘</div>
+      <div class="ln m"></div><div class="ln"></div><div class="ln s"></div>
+      <div class="ln m"></div><div class="ln"></div><div class="ln m"></div>
+      <div class="ln s"></div><div class="ln"></div><div class="ln m"></div>
+      <div class="ln"></div><div class="ln s"></div>
+      <div id="bgbar">
+        <span class="chip-dot"></span>
+        <span class="bt">AI 仍在处理 3 项</span>
+        <span class="ba">点击查看</span>
+      </div>
+    </div>
+
+    <div id="panel">
+      <div id="phead">
+        <span class="pt">inkfellow</span>
+        <button class="pb" id="btn-collapse" title="收起面板">
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+            <path d="M10 3.5 5.5 8l4.5 4.5"/>
+          </svg>
+        </button>
+      </div>
+
+      <div id="messages"></div>
+
+      <div id="askwrap"><div id="ask"></div></div>
+      <div id="chipwrap"><div class="chip">
+        <span class="chip-dot"></span>
+        <span class="chip-txt" id="chiptxt"></span>
+        <span class="chip-bar" id="chipbar"></span>
+      </div></div>
+
+      <div id="composer">
+        <textarea id="ta" placeholder="问点什么…" readonly></textarea>
+        <button id="send">
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M8 13V3M3.5 7.5 8 3l4.5 4.5"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+  </div>
+</main>
+
+<script>
+/* ══════════════════════════════════════════════════════════════
+   时序常量 —— 设计文档里的三档时间，全部可调
+   ══════════════════════════════════════════════════════════════ */
+const SHOW_DELAY = 800;    // 卡片延迟出现阈值：更快结束的派生不出卡
+const MIN_DWELL  = 1200;   // 一旦出现，最少驻留，防 900ms 完成导致闪现
+const BG_AFTER   = 8000;   // 超过此时长仍未完成 → 提示可转后台（原型里缩短了）
+
+const $ = (s) => document.querySelector(s);
+const msgs = $('#messages'), probe = $('#probe');
+const panel = $('#panel'), bgbar = $('#bgbar');
+
+let timers = [];
+const later = (fn, ms) => timers.push(setTimeout(fn, ms));
+const clearAll = () => { timers.forEach(clearTimeout); timers = []; };
+
+function log(type, id, extra) {
+  const t = String(Date.now() - t0).padStart(4, ' ');
+  const el = document.createElement('div');
+  el.innerHTML = `<b>${t}ms</b> <span class="hl">${type}</span> ${id || ''} ${extra ? '· ' + extra : ''}`;
+  probe.appendChild(el);
+  probe.scrollTop = probe.scrollHeight;
+}
+let t0 = Date.now();
+
+/* ══════════════════════════════════════════════════════════════
+   ★ 事件 reducer —— 这一段是设计给「原样搬进 index.html」的
+   三种真实形态收敛成同一套编队状态：
+     A  Claude · Task 工具派生（同步）  tool_use{name:"Task"} + parent_tool_use_id
+     B  Claude · 后台异步任务          system/task_*  + task_id
+     C  Codex  · 单线程 todo_list      tool_progress{itemType:"todo_list"}
+   返回 true = 已被子 agent UI 消费，主对话流不要再渲染这条。
+   ══════════════════════════════════════════════════════════════ */
+const TASK_SUBTYPES = new Set(['task_started', 'task_progress', 'task_updated', 'task_notification']);
+const TERMINAL_STATUS = new Set(['completed', 'complete', 'success', 'failed', 'error', 'stopped', 'killed', 'cancelled', 'canceled']);
+
+const shortPath = (p) => String(p || '').split(/[\\/]/).pop() || '';
+const hostOf = (u) => { try { return new URL(u).host; } catch { return String(u || '').slice(0, 30); } };
+
+/* 工具调用 → 人话。子 agent 的 L2 工具流用它，主流的 tool-call 也能复用 */
+function toolLabel(b) {
+  const n = b.name, i = b.input || {};
+  if (n === 'Read')       return `读取 ${shortPath(i.file_path)}`;
+  if (n === 'Edit' || n === 'Write') return `写入 ${shortPath(i.file_path)}`;
+  if (n === 'Grep')       return `检索 "${String(i.pattern).slice(0, 24)}"`;
+  if (n === 'Glob')       return `匹配 ${i.pattern}`;
+  if (n === 'Bash')       return i.description || `执行 ${String(i.command).slice(0, 36)}`;
+  if (n === 'WebFetch')   return `抓取 ${hostOf(i.url)}`;
+  if (n === 'WebSearch')  return `搜索 "${String(i.query).slice(0, 24)}"`;
+  if (n === 'Task')       return i.description || '子任务';
+  return n || 'tool';
+}
+
+/* tool_result 的内容 → 一句成果摘要。取首行，避免把整段 dump 塞进行尾 */
+function resultSummary(content) {
+  const text = Array.isArray(content)
+    ? content.map(c => (typeof c === 'string' ? c : c?.text || '')).join(' ')
+    : String(content ?? '');
+  const first = text.trim().split('\n').find(l => l.trim());
+  return first ? first.trim().slice(0, 40) : '已完成';
+}
+
+/* 后台任务事件的描述字段散落在好几处，沿用产品里已有的候选顺序 */
+function taskDesc(ev) {
+  return [ev.description, ev.summary, ev.subject, ev.task?.description, ev.task?.summary,
+          ev.patch?.description, ev.data?.description, ev.last_tool_name]
+    .find(v => typeof v === 'string' && v.trim())?.trim();
+}
+function taskStatus(ev) {
+  return String(ev.status ?? ev.patch?.status ?? ev.task?.status ?? '').trim().toLowerCase();
+}
+
+function subagentIngest(ev, sink) {
+  // ── A · Task 工具派生：主 agent 发起
+  if (ev.type === 'assistant' && !ev.parent_tool_use_id) {
+    let hit = false;
+    for (const b of ev.message?.content ?? []) {
+      if (b.type === 'tool_use' && b.name === 'Task') {
+        sink.spawn(b.id, b.input?.description || b.input?.subagent_type || '子任务');
+        hit = true;
+      }
+    }
+    if (hit) return true;
+  }
+
+  // ── A2 · 子 agent 自己的工具调用：靠 parent_tool_use_id 归属到对应分支。
+  //        默认 forwardSubagentText:false 时这里只有 tool_use/tool_result，
+  //        已经够喂 L2 的工具流了；开了才有 text/thinking。
+  if (ev.parent_tool_use_id) {
+    for (const b of ev.message?.content ?? []) {
+      if (b.type === 'tool_use') sink.step(ev.parent_tool_use_id, toolLabel(b));
+      else if (b.type === 'text' && b.text?.trim()) sink.step(ev.parent_tool_use_id, b.text.trim().slice(0, 52));
+    }
+    return true;   // 子 agent 的任何事件都不该再漏进主对话流
+  }
+
+  // ── A3 · Task 返回 → 该分支合流
+  if (ev.type === 'user' && !ev.parent_tool_use_id) {
+    let hit = false;
+    for (const b of ev.message?.content ?? []) {
+      if (b.type === 'tool_result' && sink.has(b.tool_use_id)) {
+        sink.settle(b.tool_use_id, b.is_error ? 'failed' : 'done', resultSummary(b.content));
+        hit = true;
+      }
+    }
+    if (hit) return true;
+  }
+
+  // ── B · 后台异步任务
+  if (ev.type === 'system' && TASK_SUBTYPES.has(ev.subtype)) {
+    const id = String(ev.task_id ?? ev.taskId ?? ev.tool_use_id ?? 'task');
+    const st = taskStatus(ev);
+    const desc = taskDesc(ev);
+    if (!sink.has(id)) sink.spawn(id, desc || '后台任务');
+    if (ev.subtype === 'task_notification' || TERMINAL_STATUS.has(st)) {
+      sink.settle(id, (st === 'failed' || st === 'error') ? 'failed' : 'done', desc || '已完成');
+    } else if (desc) {
+      sink.step(id, desc);
+    }
+    return true;
+  }
+
+  // ── C · Codex 的 todo_list。它是串行计划不是并行派生 —— 不套编队卡，
+  //        套了就是用 UI 撒谎（把顺序执行画成分头处理）。
+  if (ev.type === 'tool_progress' && ev.itemType === 'todo_list') {
+    sink.todo(ev.raw?.items ?? []);
+    return true;
+  }
+
+  return false;   // 与子 agent 无关，交回原有渲染
+}
+
+/* ══════════════════════════════════════════════════════════════
+   场景脚本 —— 全部发射「真实事件形状」，由上面的 reducer 消费
+   ══════════════════════════════════════════════════════════════ */
+const SCENARIOS = {
+  parallel: {
+    prompt: '把我这半年在昆明的支出理一理，跟去年在深圳比一下',
+    tasks: [
+      { id: 't1', label: '查找相关笔记',
+        steps: [[400,'读取 2026-旅居账本.md'],[1400,'读取 昆明-房租.md'],[2600,'grep "月支出"'],[3800,'读取 深圳-2025-支出.md']],
+        done: 5000, result: '读了 12 篇，挑出 3 篇相关' },
+      { id: 't2', label: '核对时间线',
+        steps: [[600,'扫描笔记日期字段'],[1900,'对齐 2025-08 ~ 2026-07']],
+        done: 3200, result: '11 个月完整，缺 2026-02' },
+      { id: 't3', label: '汇总两地房租',
+        steps: [[900,'提取昆明 6 笔'],[2400,'提取深圳 12 笔'],[4200,'按月折算']],
+        done: 6400, result: '昆明月均 ¥2,400，深圳 ¥6,800' },
+    ],
+    answer: '两边差得比你以为的多。**房租**是最大头——昆明月均 ¥2,400，深圳同期 ¥6,800，一年就差出 5.3 万。\n\n2026-02 那个月的记录是缺的，我按前后两月取了中位数补，所以年度总额有 ±3% 的误差。'
+  },
+
+  fast: {
+    prompt: '这篇笔记里我提到过几次「臣服」？',
+    tasks: [
+      { id: 'f1', label: '检索关键词', steps: [[200,'grep "臣服"']], done: 520, result: '4 处' },
+      { id: 'f2', label: '统计上下文', steps: [[240,'提取段落']], done: 580, result: '3 个语境' },
+    ],
+    answer: '4 处，集中在三个语境：一次讲《臣服实验》的读后感，两次讲裸辞那段时间，还有一次是在写小红书文案时提到的。'
+  },
+
+  ask: {
+    prompt: '帮我把去年的旅居笔记整理成一篇公众号长文',
+    tasks: [
+      { id: 'a1', label: '筛选素材范围',
+        steps: [[500,'扫描 vault/旅居/'],[1600,'按时间排序 34 篇']],
+        ask: { at: 2600, q: '找到 34 篇旅居笔记，跨度 14 个月。要全收，还是只取昆明这一段？',
+               opts: ['全部 34 篇', '只要昆明（19 篇）', '让我先看看目录'] },
+        done: 1400, result: '锁定 19 篇' },
+      { id: 'a2', label: '确定文章结构',
+        steps: [[700,'分析既往爆款结构']],
+        ask: { at: 1800, q: '按时间线走，还是按主题分块？',
+               opts: ['时间线（更像游记）', '主题分块（更像方法论）'] },
+        done: 1200, result: '主题分块 · 4 个模块' },
+      { id: 'a3', label: '提取金句',
+        steps: [[800,'扫描高亮段落'],[2200,'按情绪密度排序']],
+        done: 3600, result: '挑出 7 句可做小标题' },
+    ],
+    answer: '结构定好了，四个模块：**为什么走**、**钱怎么算**、**孩子怎么办**、**回不去了吗**。\n\n每个模块我从你自己的笔记里挑了一句原话当小标题——比我替你写的更像你。'
+  },
+
+  fail: {
+    prompt: '对比一下我记的房租和现在的市场价',
+    tasks: [
+      { id: 'x1', label: '读取本地房租记录',
+        steps: [[500,'读取 昆明-房租.md'],[1800,'提取 6 笔']],
+        done: 3000, result: '6 笔，月均 ¥2,400' },
+      { id: 'x2', label: '抓取当前市场价',
+        steps: [[600,'请求 链家·昆明'],[2200,'重试 1/2'],[4000,'重试 2/2']],
+        fail: 5200, result: '连接超时' },
+      { id: 'x3', label: '核对户型与面积',
+        steps: [[700,'解析笔记字段']],
+        done: 2400, result: '两室一厅 · 89㎡' },
+    ],
+    answer: '**抓取市场价那步没成功**（链家连了三次都超时），所以下面这段只基于你自己的记录。\n\n你记的是两室一厅 89㎡、月均 ¥2,400。要比市场价的话，你手动发我两个在租链接，我来对。'
+  },
+
+  bg: {
+    prompt: '把整个 vault 里跟「一人公司」有关的内容做个梳理',
+    tasks: [
+      { id: 'b1', label: '全库语义检索',
+        steps: [[600,'索引 412 篇'],[2400,'向量召回 top 60'],[5000,'重排'],[8000,'去重']],
+        done: 11000, result: '命中 23 篇' },
+      { id: 'b2', label: '聚类成主题',
+        steps: [[900,'构建相似度矩阵'],[4000,'层次聚类'],[7500,'命名簇']],
+        done: 10000, result: '5 个主题簇' },
+      { id: 'b3', label: '抽取可复用结论',
+        steps: [[1200,'逐簇摘要'],[6000,'交叉验证']],
+        done: 12500, result: '9 条结论' },
+    ],
+    answer: '梳理完了，五个主题：**现金流结构**、**内容作为入口**、**交付标准化**、**能量管理**、**定价实验**。\n\n其中「定价实验」那一簇只有 2 篇，是你想得最少的一块。'
+  },
+
+  /* ── F · Claude Task 工具派生：日常最常见的形态 ──
+     这里发的是 SDK 真实事件，不是简化模型。子 agent 的工具调用带
+     parent_tool_use_id —— 现状下它们会交错平铺进主对话流。 */
+  tool: {
+    prompt: '看看我这三篇旅居笔记有没有互相矛盾的地方',
+    provider: 'claude',
+    events: [
+      [200, { type:'assistant', message:{ content:[
+        { type:'tool_use', id:'toolu_A', name:'Task', input:{ subagent_type:'Explore', description:'通读三篇笔记' } },
+        { type:'tool_use', id:'toolu_B', name:'Task', input:{ subagent_type:'Explore', description:'核对时间与金额' } },
+        { type:'tool_use', id:'toolu_C', name:'Task', input:{ subagent_type:'general-purpose', description:'比对结论差异' } },
+      ]}}],
+      // ↓ 三个子 agent 的工具调用交错到达，全靠 parent_tool_use_id 归位
+      [700,  { type:'assistant', parent_tool_use_id:'toolu_A', message:{ content:[{ type:'tool_use', name:'Read', input:{ file_path:'vault/旅居/昆明-第一个月.md' } }]}}],
+      [1050, { type:'assistant', parent_tool_use_id:'toolu_B', message:{ content:[{ type:'tool_use', name:'Grep', input:{ pattern:'¥[0-9,]+' } }]}}],
+      [1400, { type:'assistant', parent_tool_use_id:'toolu_C', message:{ content:[{ type:'tool_use', name:'Read', input:{ file_path:'vault/旅居/大理-三个月.md' } }]}}],
+      [1900, { type:'assistant', parent_tool_use_id:'toolu_A', message:{ content:[{ type:'tool_use', name:'Read', input:{ file_path:'vault/旅居/大理-三个月.md' } }]}}],
+      [2400, { type:'assistant', parent_tool_use_id:'toolu_B', message:{ content:[{ type:'tool_use', name:'Bash', input:{ description:'汇总每月支出' } }]}}],
+      [2900, { type:'assistant', parent_tool_use_id:'toolu_A', message:{ content:[{ type:'tool_use', name:'Read', input:{ file_path:'vault/旅居/昆明-回访.md' } }]}}],
+      [3400, { type:'user', message:{ content:[{ type:'tool_result', tool_use_id:'toolu_B', content:'金额口径不一致：一处含押金一处不含' }]}}],
+      [3900, { type:'assistant', parent_tool_use_id:'toolu_C', message:{ content:[{ type:'tool_use', name:'Grep', input:{ pattern:'结论|所以' } }]}}],
+      [4600, { type:'user', message:{ content:[{ type:'tool_result', tool_use_id:'toolu_A', content:'三篇通读完成，共 4200 字' }]}}],
+      [5600, { type:'user', message:{ content:[{ type:'tool_result', tool_use_id:'toolu_C', content:'发现 2 处结论互相打架' }]}}],
+    ],
+    answer: '有两处对不上。\n\n**一是房租口径**——昆明那篇算的是含押金的首月支出，大理那篇是不含押金的月均，直接比会显得昆明贵 40%。\n\n**二是结论**：第一篇你写「旅居比深圳省」，第三篇写「算上机票其实持平」。后一篇是对的，前一篇没算交通。'
+  },
+
+  /* ── G · Codex 的 todo_list ──
+     Codex 自 2026-03 起有 subagent（default/worker/explorer），但它们是独立的
+     spawned thread；@openai/codex-sdk 到 0.146.0-alpha 的 ThreadItem union 都没
+     暴露对应事件，所以经 SDK 这条路看不到。
+     todo_list 是当前 thread 的串行计划，跟 subagent 是两回事 —— 它该走 checklist，
+     套编队卡会把顺序执行画成分头处理。 */
+  codex: {
+    prompt: '帮我把这个 vault 的重复笔记清理掉',
+    provider: 'codex',
+    events: [
+      [300,  { type:'tool_progress', provider:'codex', itemType:'todo_list', raw:{ id:'t_1', type:'todo_list', items:[
+        { text:'扫描 vault 找出重复标题', completed:false },
+        { text:'按内容相似度分组', completed:false },
+        { text:'保留最新的一份', completed:false },
+      ]}}],
+      [1600, { type:'server_tool_use', provider:'codex', name:'Bash', input:{ command:'find vault -name "*.md"' } }],
+      [2600, { type:'tool_progress', provider:'codex', itemType:'todo_list', raw:{ id:'t_1', type:'todo_list', items:[
+        { text:'扫描 vault 找出重复标题', completed:true },
+        { text:'按内容相似度分组', completed:false },
+        { text:'保留最新的一份', completed:false },
+      ]}}],
+      [4200, { type:'tool_progress', provider:'codex', itemType:'todo_list', raw:{ id:'t_1', type:'todo_list', items:[
+        { text:'扫描 vault 找出重复标题', completed:true },
+        { text:'按内容相似度分组', completed:true },
+        { text:'保留最新的一份', completed:false },
+      ]}}],
+      [6000, { type:'tool_progress', provider:'codex', itemType:'todo_list', raw:{ id:'t_1', type:'todo_list', items:[
+        { text:'扫描 vault 找出重复标题', completed:true },
+        { text:'按内容相似度分组', completed:true },
+        { text:'保留最新的一份', completed:true },
+      ]}}],
+    ],
+    answer: '清掉 7 篇重复的，都是同一篇笔记在不同设备上同步出的副本。保留了每组里最后修改的那份，删掉的清单我写进 `_trash/dedupe-2026-07.md` 了，不放心可以回滚。'
+  },
+};
+
+/* ══════════════════════════════════════════════════════════════
+   渲染
+   ══════════════════════════════════════════════════════════════ */
+function addUser(text) {
+  const m = document.createElement('div');
+  m.className = 'msg msg-user';
+  m.innerHTML = `<div class="msg-body"></div>`;
+  m.querySelector('.msg-body').textContent = text;
+  msgs.appendChild(m); scrollDown();
+}
+
+function scrollDown() { msgs.scrollTop = msgs.scrollHeight; }
+
+/* —— L0 chip —— */
+function setChip(text, filled, total) {
+  $('#chipwrap').style.height = text ? '30px' : '0px';
+  if (!text) return;
+  $('#chiptxt').textContent = text;
+  const bar = $('#chipbar');
+  bar.innerHTML = '';
+  if (total) for (let i = 0; i < total; i++) {
+    const s = document.createElement('span');
+    s.className = 'chip-seg' + (i < filled ? ' f' : '');
+    bar.appendChild(s);
+  }
+}
+
+/* —— 编队卡 —— */
+class SquadCard {
+  constructor() {
+    this.state  = new Map();   // id -> {status, elapsed, result, steps:[]}
+    this.labels = new Map();   // id -> 人话标题
+    this.order  = [];          // 保持派生顺序
+    this.el = null;
+    this.openId = null;
+    this.shownAt = 0;
+    this.startAt = Date.now();
+    this.mountArmed = false;
+  }
+
+  /* ── sink 接口：供 reducer 调用，生产里也是这四个 ── */
+  has(id) { return this.state.has(id); }
+
+  spawn(id, label) {
+    if (this.state.has(id)) return;
+    this.state.set(id, { status: 'running', steps: [], result: null });
+    this.labels.set(id, label);
+    this.order.push(id);
+    log('spawn', id, label);
+    if (this.el) this.addRow(id, this.order.length - 1);
+    else this.armMount();
+    this.refresh();
+  }
+
+  /* 延迟出现阈值只在第一次派生时起武 */
+  armMount() {
+    if (this.mountArmed) return;
+    this.mountArmed = true;
+    later(() => {
+      if (this.counts.live > 0) { this.mount(); log('ui_mount', '', '超过 800ms 阈值'); }
+      else log('ui_skip', '', '太快，不出卡');
+    }, SHOW_DELAY);
+  }
+
+  step(id, text) {
+    const s = this.state.get(id);
+    if (!s || s.status === 'done' || s.status === 'failed') return;
+    s.steps.push(text);
+    if (this.openId === id) this.paintDetail(id);
+  }
+
+  settle(id, status, result) {
+    this.set(id, status, { result });
+    if (this.counts.live === 0) allDone(this);
+  }
+
+  todo(items) { renderTodo(items); }   // Codex 走 checklist，不进编队卡
+
+  get counts() {
+    let done = 0, live = 0, ask = 0, fail = 0;
+    this.state.forEach(s => {
+      if (s.status === 'done') done++;
+      else if (s.status === 'failed') fail++;
+      else if (s.status === 'asking' || s.status === 'waiting') { ask++; live++; }
+      else live++;
+    });
+    return { done, live, ask, fail, total: this.order.length };
+  }
+
+  mount() {
+    if (this.el) return;
+    this.shownAt = Date.now();
+    const wrap = document.createElement('div');
+    wrap.className = 'msg';
+    const card = document.createElement('div');
+    card.className = 'squad';
+    card.innerHTML = `
+      <div class="sq-head">
+        <span class="sq-title">分头处理中</span>
+        <span class="sq-count"></span>
+        <span class="sq-spacer"></span>
+        <button class="sq-stopall">全部停止</button>
+        <svg class="sq-chev" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4 6.5 8 10.5l4-4"/></svg>
+      </div>
+      <div class="sq-body"><div class="sq-clip"><div class="sq-rows"><i class="sq-rail"></i></div></div></div>
+      <div class="sq-summary">
+        <span class="jd"></span>
+        <span class="sq-sumtxt"></span>
+        <span class="sq-re">展开</span>
+      </div>`;
+    wrap.appendChild(card);
+    msgs.appendChild(wrap);
+    this.el = card;
+
+    card.querySelector('.sq-head').onclick = (e) => {
+      if (e.target.closest('.sq-stopall')) return;
+      card.classList.toggle('folded');
+    };
+    card.querySelector('.sq-stopall').onclick = () => this.stopAll();
+    card.querySelector('.sq-re').onclick = () => {
+      card.classList.remove('done');
+      card.querySelector('.sq-head').style.display = '';
+      card.querySelector('.sq-rail').classList.remove('joined');
+      card.querySelectorAll('.sq-conn').forEach(c => c.classList.remove('joined'));
+      later(scrollDown, 300);
+    };
+
+    this.order.forEach((id, i) => this.addRow(id, i));
+    this.refresh();
+
+    // 分叉：rail 先长出来，各分支再依次接上
+    requestAnimationFrame(() => {
+      card.querySelector('.sq-rail').classList.add('grown');
+      this.el.querySelectorAll('.sq-conn').forEach((c, i) => {
+        later(() => c.classList.add('grown'), 100 + i * 55);
+      });
+    });
+    scrollDown();
+  }
+
+  addRow(id, i) {
+    const rows = this.el.querySelector('.sq-rows');
+    const row = document.createElement('div');
+    row.className = 'sq-row';
+    row.dataset.s = this.state.get(id)?.status || 'queued';
+    row.dataset.id = id;
+    row.style.animationDelay = (i * 55) + 'ms';
+    row.innerHTML = `
+      <i class="sq-conn"></i>
+      <span class="sq-dot"></span>
+      <span class="sq-label"></span>
+      <span class="sq-meta num">—</span>
+      <button class="sq-stop">停止</button>`;
+    row.querySelector('.sq-label').textContent = this.labels.get(id) || id;
+
+    const det = document.createElement('div');
+    det.className = 'sq-detail';
+    det.dataset.for = id;
+    det.innerHTML = `<div><div class="sq-detail-in"></div></div>`;
+
+    row.onclick = (e) => {
+      if (e.target.closest('.sq-stop')) return;
+      this.toggleDetail(id);
+    };
+    row.querySelector('.sq-stop').onclick = () => this.stopOne(id);
+
+    rows.appendChild(row);
+    rows.appendChild(det);
+
+    // 卡片已在场时新派生的分支，补上分叉动画
+    if (this.el.querySelector('.sq-rail')?.classList.contains('grown')) {
+      requestAnimationFrame(() => row.querySelector('.sq-conn').classList.add('grown'));
+    }
+  }
+
+  /* 只改提问项的呈现层级，不走状态机 */
+  markAsk(id, s) {
+    const st = this.state.get(id);
+    if (!st || (st.status !== 'asking' && st.status !== 'waiting')) return;
+    st.status = s;
+    const row = this.el?.querySelector(`.sq-row[data-id="${id}"]`);
+    if (row) row.dataset.s = s;
+  }
+
+  /* L2：一次只展开一个 —— 同时开两个，卡片会无限膨胀 */
+  toggleDetail(id) {
+    const opening = this.openId !== id;
+    this.el.querySelectorAll('.sq-detail').forEach(d => d.classList.remove('open'));
+    this.openId = opening ? id : null;
+    if (opening) {
+      this.paintDetail(id);
+      this.el.querySelector(`.sq-detail[data-for="${id}"]`).classList.add('open');
+    }
+    later(scrollDown, 300);
+  }
+
+  paintDetail(id) {
+    const det = this.el.querySelector(`.sq-detail[data-for="${id}"] .sq-detail-in`);
+    const s = this.state.get(id);
+    if (!det || !s) return;
+    det.innerHTML = '';
+    s.steps.forEach((txt, i) => {
+      const e = document.createElement('span');
+      e.className = 'st' + (i === s.steps.length - 1 && s.status === 'running' ? ' now' : '');
+      e.textContent = txt;
+      det.appendChild(e);
+    });
+    if (!s.steps.length) {
+      const e = document.createElement('span');
+      e.className = 'st'; e.textContent = '等待启动…';
+      det.appendChild(e);
+    }
+    if (s.result) {
+      const r = document.createElement('span');
+      r.className = 'rs'; r.textContent = s.result;
+      det.appendChild(r);
+    }
+  }
+
+  set(id, status, extra = {}) {
+    const s = this.state.get(id);
+    if (!s || s.status === 'done' || s.status === 'failed' || s.status === 'stopped') return;
+    s.status = status;
+    if (extra.step) s.steps.push(extra.step);
+    if (extra.result) s.result = extra.result;
+    if (extra.elapsed != null) s.elapsed = extra.elapsed;
+    if (!this.el) return;
+    const row = this.el.querySelector(`.sq-row[data-id="${id}"]`);
+    if (row) {
+      row.dataset.s = status;
+      const meta = row.querySelector('.sq-meta');
+      if (status === 'done' || status === 'failed' || status === 'stopped') {
+        // 成果比过程重要：完成后 meta 从计时切成"拿回了什么"
+        meta.textContent = s.result || (s.elapsed ? (s.elapsed / 1000).toFixed(1) + 's' : '');
+        meta.classList.toggle('num', !s.result);
+      } else {
+        meta.textContent = s.elapsed ? (s.elapsed / 1000).toFixed(0) + 's' : '';
+        meta.classList.add('num');
+      }
+    }
+    if (this.openId === id) this.paintDetail(id);   // L2 开着就跟着实时刷
+    this.refresh();
+  }
+
+  refresh() {
+    if (!this.el) return;
+    const c = this.counts;
+    this.el.querySelector('.sq-count').textContent =
+      c.done + c.fail > 0 ? `${c.done + c.fail}/${c.total}` : `${c.total} 项`;
+  }
+
+  stopOne(id) {
+    const label = this.labels.get(id) || id;
+    this.set(id, 'failed', { result: '已跳过' });
+    const s = this.state.get(id); if (s) s.status = 'failed';
+    const left = this.counts.live;
+    log('task_stopped', id);
+    // 明确后果，用户最怕不知道自己刚按下去发生了什么
+    setChip(left > 0 ? `已跳过「${label}」，其余 ${left} 项继续` : `已跳过「${label}」`, this.counts.done, this.counts.total);
+    if (left === 0) allDone(this);
+  }
+
+  stopAll() {
+    clearAll();
+    this.state.forEach((s, id) => { if (s.status !== 'done') this.set(id, 'failed', { result: '已停止' }); });
+    log('turn_stopped', '');
+    setChip('');
+    this.join('已停止');
+  }
+
+  /* 合流：rail 收拢 → 整卡塌成一行摘要 */
+  join(customText) {
+    if (!this.el || this.el.classList.contains('done')) return;
+    const dwell = Date.now() - this.shownAt;
+    const wait = Math.max(0, MIN_DWELL - dwell);
+    later(() => {
+      // 合流：分支先从右侧收回，rail 再自下而上并回主线
+      this.el.querySelectorAll('.sq-conn').forEach((c, i) => {
+        later(() => c.classList.add('joined'), i * 45);
+      });
+      later(() => this.el.querySelector('.sq-rail').classList.add('joined'), 120);
+      log('join', '', '分支收回 → rail 并线');
+      later(() => {
+        const c = this.counts;
+        const secs = ((Date.now() - this.startAt) / 1000).toFixed(0);
+        this.el.classList.add('done');
+        this.el.querySelector('.sq-sumtxt').textContent =
+          customText || (c.fail
+            ? `完成 ${c.done} 项 · ${c.fail} 项未成功 · ${secs}s`
+            : `已完成 ${c.done} 项 · ${secs}s`);
+        scrollDown();
+      }, 420);
+    }, wait);
+  }
+}
+
+/* —— 提问队列 —— */
+const askQ = [];
+let askBusy = false;
+
+function updateAskIdx() {
+  const el = document.querySelector('.ask-idx');
+  if (el) el.textContent = askQ.length > 1 ? `1 / ${askQ.length}` : '';
+  // 队首才是焦点，其余降级为"排队等你回答"
+  if (current?.card) askQ.forEach((it, i) => current.card.markAsk(it.taskId, i === 0 ? 'asking' : 'waiting'));
+}
+
+function enqueueAsk(item) {
+  askQ.push(item);
+  log('ask_queued', item.taskId, `队列 ${askQ.length}`);
+  pumpAsk();
+  updateAskIdx();   // 新问题入队时，正在显示的那个也要更新计数
+}
+
+function pumpAsk() {
+  if (askBusy || !askQ.length) return;
+  askBusy = true;
+  const it = askQ[0];
+  const box = $('#ask');
+  box.innerHTML = `
+    <div class="ask-head">
+      <span class="ask-src"></span>
+      <span class="ask-idx"></span>
+    </div>
+    <div class="ask-q"></div>
+    <div class="ask-opts"></div>`;
+  box.querySelector('.ask-src').textContent = `关于「${it.label}」`;
+  box.querySelector('.ask-q').textContent = it.q;
+  const opts = box.querySelector('.ask-opts');
+  it.opts.forEach(o => {
+    const b = document.createElement('button');
+    b.className = 'ask-opt'; b.textContent = o;
+    b.onclick = () => answerAsk(o);
+    opts.appendChild(b);
+  });
+  box.classList.remove('slide'); void box.offsetWidth; box.classList.add('slide');
+  $('#askwrap').style.height = box.offsetHeight + 10 + 'px';
+  updateAskIdx();
+  log('ask_shown', it.taskId);
+}
+
+function answerAsk(choice) {
+  const it = askQ.shift();
+  askBusy = false;
+  log('ask_answered', it.taskId, choice);
+  it.resolve && it.resolve(choice);
+  if (askQ.length) {
+    later(pumpAsk, 60);
+  } else {
+    $('#askwrap').style.height = '0px';
+  }
+}
+
+/* —— 后台活动条 —— */
+function showBg(text, ok) {
+  bgbar.querySelector('.bt').textContent = text;
+  bgbar.querySelector('.ba').textContent = ok ? '查看结果' : '点击查看';
+  bgbar.classList.toggle('ok', !!ok);
+  bgbar.classList.add('show');
+}
+function hideBg() { bgbar.classList.remove('show'); }
+
+bgbar.onclick = () => { setCollapsed(false); hideBg(); };
+$('#btn-collapse').onclick = () => setCollapsed(!panel.classList.contains('collapsed'));
+
+function setCollapsed(v) {
+  panel.classList.toggle('collapsed', v);
+  $('#editor').style.width = v ? '684px' : '300px';
+  if (v && current && current.card && current.card.counts.live > 0) {
+    showBg(`AI 仍在处理 ${current.card.counts.live} 项`);
+  } else if (!v) hideBg();
+}
+
+/* —— 最终回答（逐字） —— */
+function typeAnswer(text) {
+  const m = document.createElement('div');
+  m.className = 'msg';
+  const b = document.createElement('div');
+  b.className = 'msg-body';
+  m.appendChild(b); msgs.appendChild(m);
+  let i = 0;
+  const caret = document.createElement('span');
+  caret.className = 'caret';
+  const tick = () => {
+    if (i >= text.length) { caret.remove(); scrollDown(); return; }
+    i += Math.random() < 0.3 ? 2 : 1;
+    b.innerHTML = text.slice(0, i)
+      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+      .replace(/\n\n/g, '<br><br>');
+    b.appendChild(caret);
+    scrollDown();
+    timers.push(setTimeout(tick, 14));
+  };
+  tick();
+}
+
+/* ══════════════════════════════════════════════════════════════
+   播放器
+   ══════════════════════════════════════════════════════════════ */
+let current = null;
+
+function play(key) {
+  clearAll();
+  askQ.length = 0; askBusy = false;
+  $('#askwrap').style.height = '0px';
+  setChip('');
+  hideBg();
+  msgs.innerHTML = '';
+  probe.innerHTML = '';
+  t0 = Date.now();
+
+  const sc = SCENARIOS[key];
+  const card = new SquadCard();
+  current = { key, card, sc };
+  todoEl = null;
+
+  addUser(sc.prompt);
+
+  // 所有场景统一发射真实事件形状，交给 reducer —— 与生产同一条路径
+  const stream = sc.events ? sc.events : tasksToEvents(sc);
+  stream.forEach(([at, ev]) => later(() => {
+    logEvent(ev);
+    if (!subagentIngest(ev, card)) renderMainStream(ev);
+    tickChip(card);
+  }, at));
+
+  // 提问不在 task 事件流里（走 control_request），单独排程
+  (sc.tasks || []).forEach(t => {
+    if (!t.ask) return;
+    later(() => {
+      card.set(t.id, 'asking');
+      log('needs_input', t.id);
+      setChip(`需要你回答 · ${card.counts.total} 项工作中`, card.counts.done, card.counts.total);
+      enqueueAsk({
+        taskId: t.id, label: t.label, q: t.ask.q, opts: t.ask.opts,
+        resolve: () => {
+          card.set(t.id, 'running');
+          later(() => card.settle(t.id, 'done', t.result), t.done);
+        }
+      });
+    }, 120 + t.ask.at);
+  });
+
+  // Codex 没有编队卡可合流，事件播完直接出答案
+  if (sc.provider === 'codex') {
+    const last = Math.max(...stream.map(([at]) => at));
+    later(() => { setChip(''); typeAnswer(sc.answer); }, last + 1000);
+    setChip('正在按计划执行');
+  }
+
+  const beat = setInterval(() => {
+    if (!current || current.card !== card) return clearInterval(beat);
+    if (card.counts.live === 0 || askBusy) return;
+    tickChip(card);
+  }, 500);
+  timers.push(setTimeout(() => clearInterval(beat), 40000));
+
+  if (key === 'bg') {
+    later(() => {
+      if (card.counts.live > 0 && !panel.classList.contains('collapsed')) {
+        log('hint', '', '超过 8s，可转后台');
+        setCollapsed(true);
+      }
+    }, BG_AFTER);
+  }
+}
+
+/* 场景的 tasks 简写 → 真实的 system/task_* 事件序列 */
+function tasksToEvents(sc) {
+  const out = [];
+  (sc.tasks || []).forEach((t, i) => {
+    out.push([120 + i * 60, { type: 'system', subtype: 'task_started', task_id: t.id, description: t.label }]);
+    (t.steps || []).forEach(([at, txt]) =>
+      out.push([120 + at, { type: 'system', subtype: 'task_progress', task_id: t.id, description: txt }]));
+    if (t.ask) return;                               // 完成由用户回答后触发
+    if (t.fail) out.push([120 + t.fail, { type: 'system', subtype: 'task_updated', task_id: t.id, patch: { status: 'failed', description: t.result } }]);
+    else out.push([120 + t.done, { type: 'system', subtype: 'task_notification', task_id: t.id, description: t.result }]);
+  });
+  return out;
+}
+
+function logEvent(ev) {
+  const kind = ev.type === 'system' ? ev.subtype
+    : ev.parent_tool_use_id ? `${ev.type}⤷sub`
+    : ev.itemType ? `${ev.type}:${ev.itemType}` : ev.type;
+  const id = ev.task_id ?? ev.parent_tool_use_id
+    ?? (ev.message?.content ?? []).find(b => b.type === 'tool_use' || b.type === 'tool_result')?.[ev.type === 'user' ? 'tool_use_id' : 'id']
+    ?? '';
+  log(kind, id, taskDesc(ev) || (ev.message?.content ?? []).map(b => b.name || '').filter(Boolean).join(' '));
+}
+
+/* reducer 没消费的事件 → 原有主流渲染。Codex 的工具调用走这里 */
+function renderMainStream(ev) {
+  if (ev.type !== 'server_tool_use' && ev.type !== 'tool_use' && ev.type !== 'mcp_tool_use') return;
+  const el = document.createElement('div');
+  el.className = 'msg';
+  el.innerHTML = `<div class="msg-body"></div>`;
+  const row = document.createElement('div');
+  row.style.cssText = 'display:flex;align-items:center;gap:8px;background:var(--tool-bg);border:1px solid var(--border);border-left:2px solid var(--yellow);border-radius:8px;padding:7px 10px;font-family:var(--font-mono);font-size:11px;';
+  row.innerHTML = `<span style="color:var(--yellow);font-weight:600"></span><span style="color:var(--text-dim);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>`;
+  row.children[0].textContent = ev.name || 'tool';
+  row.children[1].textContent = toolLabel(ev);
+  el.querySelector('.msg-body').appendChild(row);
+  msgs.appendChild(el); scrollDown();
+}
+
+/* —— Codex 的串行 checklist —— */
+let todoEl = null;
+function renderTodo(items) {
+  if (!todoEl) {
+    const wrap = document.createElement('div');
+    wrap.className = 'msg';
+    wrap.innerHTML = `<div class="todo"><div class="todo-h">执行计划</div><div class="todo-body"></div></div>`;
+    msgs.appendChild(wrap);
+    todoEl = wrap.querySelector('.todo-body');
+  }
+  todoEl.innerHTML = '';
+  const nextIdx = items.findIndex(i => !i.completed);
+  items.forEach((it, i) => {
+    const row = document.createElement('div');
+    row.className = 'todo-i' + (it.completed ? ' on' : (i === nextIdx ? ' now' : ''));
+    row.innerHTML = `<span class="todo-b"></span><span class="todo-t"></span>`;
+    row.querySelector('.todo-t').textContent = it.text;
+    todoEl.appendChild(row);
+  });
+  const doneN = items.filter(i => i.completed).length;
+  setChip(doneN < items.length ? `按计划执行 · 第 ${doneN + 1}/${items.length} 步` : '');
+  scrollDown();
+}
+
+function tickChip(card) {
+  const c = card.counts;
+  if (c.live === 0) return;
+  const txt = c.done + c.fail > 0
+    ? `分头处理 ${c.total} 项 · ${c.done} 项已完成`
+    : `分头处理 ${c.total} 项`;
+  setChip(txt, c.done, c.total);
+  if (panel.classList.contains('collapsed')) showBg(`AI 仍在处理 ${c.live} 项`);
+}
+
+function allDone(card) {
+  const sc = current?.sc;
+  if (!sc) return;
+  setChip('');
+  if (card.el) {
+    card.join();
+    later(() => typeAnswer(sc.answer), MIN_DWELL + 620);
+  } else {
+    log('ui_skip', '', '全程未出卡');
+    later(() => typeAnswer(sc.answer), 120);
+  }
+  if (panel.classList.contains('collapsed')) {
+    later(() => showBg('已完成', true), 400);
+    later(hideBg, 6400);
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════
+   「看现状」对照 —— 现有代码每个 task 各自 append 一行 .task-status
+   ══════════════════════════════════════════════════════════════ */
+function playBefore() {
+  clearAll(); current = null;
+  msgs.innerHTML = ''; probe.innerHTML = ''; t0 = Date.now();
+  setChip(''); $('#askwrap').style.height = '0px'; hideBg();
+  addUser(SCENARIOS.parallel.prompt);
+
+  const wrap = document.createElement('div');
+  wrap.className = 'msg';
+  wrap.innerHTML = `<div class="msg-body" id="before-body"></div>`;
+  msgs.appendChild(wrap);
+  const body = wrap.querySelector('#before-body');
+
+  const raw = [
+    [300, 't1', '子任务已启动'], [420, 't2', '子任务已启动'], [560, 't3', '子任务已启动'],
+    [1600, 't2', '子任务进行中'], [2400, 't1', '子任务进行中'], [3300, 't3', '子任务已更新'],
+    [3400, 't2', '任务通知'], [5200, 't1', '任务通知'], [6600, 't3', '任务通知'],
+  ];
+  const seen = new Map();
+  raw.forEach(([at, id, txt]) => later(() => {
+    let el = seen.get(id);
+    if (!el) {
+      el = document.createElement('div');
+      el.style.cssText = 'display:flex;align-items:center;gap:8px;background:var(--tool-bg);border:1px solid var(--border);border-left:2px solid var(--yellow);border-radius:8px;padding:7px 10px;margin:4px 0;font-family:var(--font-mono);font-size:11px;';
+      el.innerHTML = `<span style="color:var(--yellow);font-weight:600">${id}</span><span style="color:var(--text-dim);flex:1"></span>`;
+      body.appendChild(el); seen.set(id, el);
+    }
+    el.querySelector('span:last-child').textContent = txt;
+    log('render', id, txt);
+    setChip(`后台任务：${txt}`, 0, 0);
+    scrollDown();
+  }, at));
+
+  later(() => { setChip(''); typeAnswer(SCENARIOS.parallel.answer); }, 7200);
+}
+
+/* ══════════════════════════════════════════════════════════════
+   控制台绑定
+   ══════════════════════════════════════════════════════════════ */
+document.querySelectorAll('.scn[data-scn]').forEach(b => {
+  b.onclick = () => {
+    document.querySelectorAll('.scn').forEach(x => x.classList.remove('on'));
+    b.classList.add('on');
+    setCollapsed(false);
+    play(b.dataset.scn);
+  };
+});
+
+$('#btn-before').onclick = () => {
+  document.querySelectorAll('.scn').forEach(x => x.classList.remove('on'));
+  $('#btn-before').classList.add('on');
+  setCollapsed(false);
+  playBefore();
+};
+
+$('#btn-theme').onclick = () => {
+  const dark = document.documentElement.dataset.theme === 'dark';
+  document.documentElement.dataset.theme = dark ? 'light' : 'dark';
+  $('#btn-theme').textContent = dark ? '深色' : '浅色';
+};
+
+if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
+  document.documentElement.dataset.theme = 'dark';
+  $('#btn-theme').textContent = '浅色';
+} else {
+  document.documentElement.dataset.theme = 'light';
+}
+
+// 开场播 A
+document.querySelector('.scn[data-scn="parallel"]').click();
+</script>
+</body>
+</html>
