@@ -160,6 +160,29 @@ test("buildAgentEnv 按 activeProfileId 覆写切换候选 profile", { timeout: 
   assert.equal(env.deepseekEffort, "medium");
 });
 
+// 这条曾在 desktop-lite 静默失效数周：不设该变量，SDK 就不发
+// session_state_changed，长驻 Query 的回合永远结束不了，且无报错无日志。
+// 必须对所有 provider 都成立——buildAgentEnv 里按 provider 提前 return，
+// 变量放错位置会漏掉 Claude 会员通道。
+test("buildAgentEnv 对所有 provider 都开启 session_state_changed", { timeout: 40_000 }, async () => {
+  const profiles = JSON.stringify(PROBE_PROFILES);
+  const flags = await evalInServer(`m => {
+    const data = ${profiles};
+    return {
+      claude: m.buildAgentEnv(data, "medium", null).CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS ?? null,
+      deepseek: m.buildAgentEnv(
+        { ...data, activeProfileId: "p_deepseek" }, "medium", null
+      ).CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS ?? null,
+      noProfile: m.buildAgentEnv(
+        { activeProfileId: "nope", profiles: [] }, "medium", null
+      ).CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS ?? null,
+    };
+  }`);
+  assert.equal(flags.claude, "1");
+  assert.equal(flags.deepseek, "1");
+  assert.equal(flags.noProfile, "1");
+});
+
 test("buildAgentEnv 清掉继承来的 Claude 兼容环境变量，避免串档", { timeout: 40_000 }, async () => {
   const profiles = JSON.stringify(PROBE_PROFILES);
   const env = await evalInServer(`m => {

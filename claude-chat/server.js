@@ -13,6 +13,7 @@ import { query, tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk"
 import { Codex } from "@openai/codex-sdk";
 import * as scheduler from "./scheduler.js";
 import { buildModelCandidates, runWithModelFallback } from "./model-fallback.js";
+import { PersistentQueryRuntime } from "./agent-session.js";
 import { z } from "zod";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -578,6 +579,12 @@ function getActiveProfile(data = readProfiles()) {
 export function buildAgentEnv(profileData, effort, requestedModel) {
   const env = { ...process.env };
   for (const key of CLAUDE_COMPAT_ENV_KEYS) delete env[key];
+
+  // 长驻 Query 的前台轮靠 system/session_state_changed state=idle 收尾。该事件自
+  // SDK 0.2.83 起改为 opt-in，不开启就永远不发，回合结束不了、后续消息会一直排队。
+  // 必须放在下面按 provider 提前 return 之前——放后面对 Claude 会员账号不生效，
+  // 而那恰恰是最常用的通道。
+  env.CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS = "1";
 
   const active = getActiveProfile(profileData);
   if (!active || active.provider === "claude") return env;
@@ -2480,6 +2487,113 @@ function makeAbortError(message) {
 //（包括断线期间已完成的完整回答）。宽限期内没人认领才真正 abort。
 const orphanRuns = new Map(); // runId -> run
 
+// ── 长驻 Claude 会话 ─────────────────────────────────────────
+// 一条 query 跨多个回合复用，回合边界不再由 query 迭代结束划分，而是由
+// system/session_state_changed state=idle 划分（该事件是 opt-in 的，见
+// buildAgentEnv）。这样后台任务（system/task_*）能在前台轮结束后继续跑，
+// 子代理事件也能带着 parent_tool_use_id 一并上来——squad cards UI 依赖这些。
+//
+// options 在 start() 时固化，所以 cwd/权限/模型等一变就得重启 runtime，
+// 用 signature 判定。前台轮的事件路由目标是 claudeTurn，而不是 start() 时
+// 捕获的那个 run——否则第二轮的事件会发给第一轮的连接。
+let claudeTurn = null;          // { epoch, onEvent, finish, fail }
+let claudeTurnEpoch = 0;
+let claudeRuntimeSignature = null;
+
+// 需要透传到前端的 system 事件：后台任务生命周期 + 子代理。其余 system 事件
+// （尤其 session_state_changed）是服务端的回合控制信号，不该泄给 UI。
+const CLIENT_VISIBLE_SYSTEM_SUBTYPES = new Set([
+  "task_started",
+  "task_progress",
+  "task_updated",
+  "task_notification",
+]);
+
+function claudeRuntimeSignatureOf(options) {
+  return JSON.stringify({
+    cwd: options.cwd,
+    permissionMode: options.permissionMode,
+    effort: options.effort,
+    model: options.model ?? null,
+    // resume 刻意不参与指纹：第一轮结束后 saveSession 会让第二轮带上
+    // resume=sessionId，若计入指纹就会每轮重启 runtime，长驻等于白做。
+    // 正在跑的会话本身就持有上下文；只有真需要重启时才用 resume 接回来。
+    mcp: Object.keys(options.mcpServers ?? {}).sort(),
+    systemPrompt: options.systemPrompt ?? null,
+    // env 里只有这些会改变 agent 行为；整个 env 参与指纹会因无关变量频繁误重启
+    env: {
+      base: options.env?.ANTHROPIC_BASE_URL ?? null,
+      model: options.env?.ANTHROPIC_MODEL ?? null,
+      effort: options.env?.CLAUDE_CODE_EFFORT_LEVEL ?? null,
+    },
+  });
+}
+
+// 回合终止依赖 opt-in 的 session_state_changed/idle。上一次它静默失效时没有
+// 任何报错、日志或测试失败，只有用户手动发第二条消息才暴露。看门狗把这种
+// 失效变成可见信号：result 之后短时间内没等到 idle 就告警。纯观察，不改行为。
+const TURN_IDLE_WATCHDOG_MS = 3_000;
+let turnIdleWatchdog = null;
+
+function armTurnIdleWatchdog() {
+  clearTimeout(turnIdleWatchdog);
+  if (!claudeTurn) return;
+  const epoch = claudeTurn.epoch;
+  turnIdleWatchdog = setTimeout(() => {
+    turnIdleWatchdog = null;
+    if (!claudeTurn || claudeTurn.epoch !== epoch) return; // 已换代 = 正常时序
+    console.warn(
+      `[Web Agent] result 后 ${TURN_IDLE_WATCHDOG_MS}ms 未收到 session_state_changed/idle：`
+      + "本轮无法结束，后续消息将被排队。检查 SDK 是否仍支持 "
+      + "CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS=1（见 buildAgentEnv）。"
+    );
+  }, TURN_IDLE_WATCHDOG_MS);
+  turnIdleWatchdog.unref?.();
+}
+
+const claudeRuntime = new PersistentQueryRuntime({
+  queryFactory: ({ prompt, options }) => query({ prompt, options }),
+  onEvent: (ev) => {
+    const turn = claudeTurn;
+    if (!turn) return; // 无前台轮时到达的多是后台任务事件，由 UI 侧的活动条呈现
+    turn.onEvent(ev);
+    if (ev.type === "system" && ev.subtype === "session_state_changed" && ev.state === "idle") {
+      clearTimeout(turnIdleWatchdog);
+      turn.finish();
+      return;
+    }
+    // origin 非空 = 后台任务的自动续写，不是用户轮的收尾，不进看门狗避免误报
+    if (ev.type === "result" && !ev.origin) armTurnIdleWatchdog();
+  },
+  onError: (err) => { claudeTurn?.fail(err); },
+  onClose: () => {
+    claudeRuntimeSignature = null;
+    claudeTurn?.fail(makeAbortError("会话已关闭"));
+  },
+});
+
+function resetClaudeRuntime() {
+  claudeTurnEpoch += 1;
+  claudeTurn = null;
+  clearTimeout(turnIdleWatchdog);
+  claudeRuntimeSignature = null;
+  claudeRuntimeAbort = null;
+  if (claudeRuntime.started) claudeRuntime.close();
+}
+
+// 长驻 query 的 AbortController 属于 runtime 而不是某一轮：用每轮的 ac 会导致
+// 第一轮结束时把整条会话一起 abort 掉。停止单轮走 interrupt()。
+let claudeRuntimeAbort = null;
+
+// 返回 true 表示已按"长驻会话"的方式停掉前台轮，调用方不要再 abort。
+function interruptClaudeTurn() {
+  if (!claudeRuntime.started || !claudeTurn) return false;
+  claudeRuntime.interrupt().catch(err => {
+    console.warn(`[Web Agent] interrupt 失败：${err?.message || err}`);
+  });
+  return true;
+}
+
 function createRun(runId, ws, ac) {
   return {
     id: runId,
@@ -2670,6 +2784,9 @@ wss.on("connection", (ws) => {
     if (msg.reset) {
       clearPendingAskUserQuestion(activeRun, "会话已重置");
       clearAllSessions();
+      // 重置是要丢弃整条会话，长驻 runtime 必须一起关掉，否则下一条消息会
+      // 复用旧 session 的上下文。
+      resetClaudeRuntime();
       if (activeRun && !activeRun.finished) activeRun.ac.abort();
       activeRun = null;
       return;
@@ -2685,6 +2802,9 @@ wss.on("connection", (ws) => {
 
     if (msg.stop) {
       clearPendingAskUserQuestion(activeRun, "用户停止了生成");
+      // Claude 走长驻会话：只中断本轮，保留 query 供后续消息复用。
+      // Codex 仍是每请求一条流，只能 abort。
+      if (interruptClaudeTurn()) { activeRun = null; return; }
       if (activeRun && !activeRun.finished) { activeRun.ac.abort(); activeRun = null; }
       else send({ type: "stopped" });
       return;
@@ -2692,7 +2812,7 @@ wss.on("connection", (ws) => {
 
     // Cancel any in-flight query before starting a new one
     clearPendingAskUserQuestion(activeRun, "新的请求已开始");
-    if (activeRun && !activeRun.finished) activeRun.ac.abort();
+    if (!interruptClaudeTurn() && activeRun && !activeRun.finished) activeRun.ac.abort();
     activeRun = null;
 
     const schedulerRequest = hasSchedulerIntent(msg.prompt);
@@ -2906,12 +3026,19 @@ wss.on("connection", (ws) => {
       const resetStall = () => {
         clearTimeout(stallTimer);
         if (waitingForUserInput || toolRunning) return;
-        stallTimer = setTimeout(() => { isStallAbort = true; ac.abort(); }, STREAM_STALL_MS);
+        // 长驻会话下只中断本轮；abort 会连整条 query 一起杀掉
+        stallTimer = setTimeout(() => {
+          isStallAbort = true;
+          if (!interruptClaudeTurn()) ac.abort();
+        }, STREAM_STALL_MS);
       };
       const resetHardTimer = () => {
         clearTimeout(hardTimer);
         if (waitingForUserInput || toolRunning) return;
-        hardTimer = setTimeout(() => { isHardAbort = true; ac.abort(); }, MAX_AGENT_RUN_MS);
+        hardTimer = setTimeout(() => {
+          isHardAbort = true;
+          if (!interruptClaudeTurn()) ac.abort();
+        }, MAX_AGENT_RUN_MS);
       };
       // 工具开始执行（assistant 消息带 tool_use）→ 两个看门狗全部暂停；
       // tool_result 回来（user 消息）→ 重新计时。硬上限因此只约束 API 阶段
@@ -3024,40 +3151,79 @@ wss.on("connection", (ws) => {
         };
       };
 
-      // Run one query() to completion, forwarding all events to the client.
-      const runQuery = async (promptMsg, queryOptions) => {
-        for await (const ev of query({
-          prompt: (async function* () { yield promptMsg; })(),
-          options: queryOptions,
-        })) {
-          updateToolState(ev);
-          // api_retry means the SDK is in a backoff loop — don't reset the stall
-          // timer here or it will keep resetting indefinitely while the WebSocket
-          // sits idle and the browser receives nothing. Real progress resets it.
-          if (!(ev.type === "system" && ev.subtype === "api_retry")) resetStall();
-          if (ev.type === "system" && ev.subtype === "init") {
-            saveSession(ev.session_id);
-            send({ type: "session", sessionId: ev.session_id, provider: "claude" });
-            // ev.skills = skill slugs only; ev.slash_commands = skills + built-in names
-            const skillsFromSdk = Array.isArray(ev.skills) && ev.skills.length > 0
-              ? ev.skills
-              : (Array.isArray(ev.slash_commands) ? ev.slash_commands : []);
-            if (skillsFromSdk.length > 0) cachedSkillsByProvider["claude"] = skillsFromSdk; // keep cache fresh
-            send({
-              type: "system",
-              subtype: "init",
-              slash_commands: skillsFromSdk,
-              skills: skillsFromSdk,
-            });
-            continue;
-          }
-          // Forward retry/status events so the frontend can show progress instead of silently spinning
-          if (ev.type === "system" && (ev.subtype === "api_retry" || ev.subtype === "status")) {
-            send(ev);
-            continue;
-          }
-          if (ev.type !== "system") send(ev);
+      // 把一个前台轮跑到 idle。runtime 是模块级长驻的：签名没变就复用同一条
+      // query，只把新消息推进去；变了才重启。回合的结束信号是 idle，不是
+      // query 迭代结束——后者在长驻模式下只有会话彻底关闭时才会发生。
+      const runQuery = (promptMsg, queryOptions) => new Promise((resolve, reject) => {
+        const signature = claudeRuntimeSignatureOf(queryOptions);
+        if (!claudeRuntime.started || claudeRuntimeSignature !== signature) {
+          if (claudeRuntime.started) claudeRuntime.close();
+          // 用 runtime 自己的 controller，不要用本轮的 ac——否则第一轮收尾时
+          // 会把整条长驻会话一起 abort 掉。
+          claudeRuntimeAbort = new AbortController();
+          claudeRuntime.start({ ...queryOptions, abortController: claudeRuntimeAbort });
+          claudeRuntimeSignature = signature;
         }
+
+        const epoch = ++claudeTurnEpoch;
+        let settled = false;
+        const settle = (fn, arg) => {
+          if (settled) return;
+          settled = true;
+          if (claudeTurn?.epoch === epoch) claudeTurn = null;
+          fn(arg);
+        };
+
+        claudeTurn = {
+          epoch,
+          onEvent: (ev) => { try { handleClaudeEvent(ev); } catch (err) { settle(reject, err); } },
+          finish: () => settle(resolve, undefined),
+          fail: (err) => settle(reject, err),
+        };
+
+        try {
+          claudeRuntime.send(promptMsg);
+        } catch (err) {
+          settle(reject, err);
+        }
+      });
+
+      // 单条事件的处理：从原来的 for-await 循环体搬过来，语义不变，
+      // 只是循环里的 continue 变成了 return。
+      const handleClaudeEvent = (ev) => {
+        updateToolState(ev);
+        // api_retry means the SDK is in a backoff loop — don't reset the stall
+        // timer here or it will keep resetting indefinitely while the WebSocket
+        // sits idle and the browser receives nothing. Real progress resets it.
+        if (!(ev.type === "system" && ev.subtype === "api_retry")) resetStall();
+        if (ev.type === "system" && ev.subtype === "init") {
+          saveSession(ev.session_id);
+          send({ type: "session", sessionId: ev.session_id, provider: "claude" });
+          // ev.skills = skill slugs only; ev.slash_commands = skills + built-in names
+          const skillsFromSdk = Array.isArray(ev.skills) && ev.skills.length > 0
+            ? ev.skills
+            : (Array.isArray(ev.slash_commands) ? ev.slash_commands : []);
+          if (skillsFromSdk.length > 0) cachedSkillsByProvider["claude"] = skillsFromSdk; // keep cache fresh
+          send({
+            type: "system",
+            subtype: "init",
+            slash_commands: skillsFromSdk,
+            skills: skillsFromSdk,
+          });
+          return;
+        }
+        // Forward retry/status events so the frontend can show progress instead of silently spinning
+        if (ev.type === "system" && (ev.subtype === "api_retry" || ev.subtype === "status")) {
+          send(ev);
+          return;
+        }
+        // 后台任务与子代理生命周期事件要透传给前端（squad cards 依赖），
+        // 其余 system 事件（含 session_state_changed）留在服务端做回合控制。
+        if (ev.type === "system" && CLIENT_VISIBLE_SYSTEM_SUBTYPES.has(ev.subtype)) {
+          send(ev);
+          return;
+        }
+        if (ev.type !== "system") send(ev);
       };
 
       const isThinkingSignatureError = (err) => {
