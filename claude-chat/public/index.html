@@ -53,6 +53,8 @@
   /* JS 端引用的别名 */
   --border-color: var(--border);
   --fg-color-secondary: var(--text-dim);
+  /* 编队卡的分叉/合流动画统一用这条缓动 */
+  --ease-out: cubic-bezier(0.32, 0.72, 0, 1);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -156,6 +158,141 @@ html, body { height: 100%; height: 100dvh; overflow: hidden; margin: 0; padding:
 .gen-chip { display: flex; align-items: center; gap: 5px; padding: 8px 0 2px; color: var(--text-dim); font-size: 11px; }
 .gen-chip-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); flex-shrink: 0; animation: genPulse 1.5s ease-in-out infinite; }
 @keyframes genPulse { 0%, 100% { opacity: 0.2; transform: scale(0.7); } 50% { opacity: 1; transform: scale(1); } }
+
+/* ══════════════════════════════════════════════════════════
+   编队卡 —— 派生子 agent 的统一呈现
+   覆盖两种形态：Task 工具派生（parent_tool_use_id）与后台任务（task_*）
+   ══════════════════════════════════════════════════════════ */
+.squad {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--tool-bg);
+  overflow: hidden;
+  margin: 6px 0;
+  animation: squadIn 0.3s var(--ease-out) both;
+}
+@keyframes squadIn {
+  from { opacity: 0; transform: translateY(6px) scale(0.985); }
+  to   { opacity: 1; transform: none; }
+}
+.sq-head { display: flex; align-items: center; gap: 8px; padding: 9px 10px 9px 12px; cursor: pointer; user-select: none; }
+.sq-head:hover { background: var(--bg3); }
+.sq-title { font-size: 12px; font-weight: 600; letter-spacing: -0.005em; }
+.sq-count { font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.sq-spacer { flex: 1; }
+.sq-stopall { border: 0; background: transparent; padding: 3px 7px; border-radius: 5px; font-family: inherit; font-size: 10.5px; color: var(--text-dim); cursor: pointer; opacity: 0; transition: opacity 0.15s; }
+.squad:hover .sq-stopall { opacity: 1; }
+.sq-stopall:hover { background: var(--bg3); color: var(--red); }
+.sq-chev { width: 14px; height: 14px; flex-shrink: 0; color: var(--text-dim); transition: transform 0.24s var(--ease-out); }
+.squad.folded .sq-chev { transform: rotate(-90deg); }
+
+.sq-body { display: grid; grid-template-rows: 1fr; transition: grid-template-rows 0.32s var(--ease-out), opacity 0.24s ease; }
+.sq-body > .sq-clip { min-height: 0; overflow: hidden; }
+.squad.folded .sq-body { grid-template-rows: 0fr; opacity: 0; }
+.sq-rows { position: relative; padding: 2px 8px 10px; }
+
+/* 分叉轨 —— 真实元素，JS 驱动"分叉 → 合流"两段动画 */
+.sq-rail { position: absolute; left: 18px; top: 0; bottom: 13px; width: 1.5px; background: var(--border-strong); transform: scaleY(0); transform-origin: top; transition: transform 0.26s var(--ease-out); }
+.sq-rail.grown { transform: scaleY(1); }
+.sq-rail.joined { transform-origin: bottom; transform: scaleY(0); }
+.sq-conn { position: absolute; left: 19px; top: 50%; width: 7px; height: 1.5px; background: var(--border-strong); transform: scaleX(0); transform-origin: left; transition: transform 0.22s var(--ease-out); }
+.sq-conn.grown { transform: scaleX(1); }
+.sq-conn.joined { transform-origin: right; transform: scaleX(0); }
+
+.sq-row { position: relative; display: flex; align-items: center; gap: 8px; padding: 6px 6px 6px 34px; border-radius: 6px; cursor: pointer; animation: rowIn 0.26s var(--ease-out) both; transition: background 0.15s; }
+.sq-row:hover { background: var(--bg3); }
+@keyframes rowIn { from { opacity: 0; transform: translateX(-5px); } to { opacity: 1; transform: none; } }
+
+.sq-dot { position: absolute; left: 24px; top: 50%; width: 8px; height: 8px; margin-top: -4px; border-radius: 50%; display: grid; place-items: center; flex-shrink: 0; }
+.sq-row[data-s="queued"] .sq-dot { box-shadow: inset 0 0 0 1.5px var(--border-strong); }
+/* 运行中刻意无色：多个彩点同时闪会变成圣诞树 */
+.sq-row[data-s="running"] .sq-dot { background: var(--text-dim); animation: sqBreathe 1.6s ease-in-out infinite; }
+@keyframes sqBreathe { 0%,100% { opacity: 0.35; transform: scale(0.8); } 50% { opacity: 1; transform: scale(1); } }
+.sq-row[data-s="asking"] .sq-dot { background: var(--accent); }
+.sq-row[data-s="asking"] .sq-dot::after { content: ''; position: absolute; inset: -4px; border-radius: 50%; border: 1.5px solid var(--accent); animation: sqRing 1.4s ease-out infinite; }
+@keyframes sqRing { 0% { opacity: 0.7; transform: scale(0.6); } 100% { opacity: 0; transform: scale(1.25); } }
+/* 排队等回答：同色不脉冲 —— 同时只能有一个注意力焦点 */
+.sq-row[data-s="waiting"] .sq-dot { background: var(--accent); opacity: 0.4; }
+.sq-row[data-s="waiting"] .sq-label { color: var(--accent); opacity: 0.65; }
+.sq-row[data-s="done"] .sq-dot { background: transparent; }
+.sq-row[data-s="done"] .sq-dot::after { content: ''; width: 3px; height: 6.5px; margin-top: -2px; margin-left: 1px; border: solid var(--text-dim); border-width: 0 1.5px 1.5px 0; transform: rotate(42deg); }
+.sq-row[data-s="failed"] .sq-dot { background: var(--yellow); }
+.sq-row[data-s="failed"] .sq-dot::after { content: ''; width: 1.5px; height: 4px; background: var(--bg); border-radius: 1px; }
+
+.sq-label { flex: 1; min-width: 0; font-size: 12px; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: color 0.3s ease; }
+.sq-row[data-s="done"] .sq-label { color: var(--text-dim); }
+.sq-row[data-s="asking"] .sq-label { color: var(--accent); font-weight: 550; }
+/* 成果摘要用 sans：mono 排中文会散架，等宽只留给时间和数字 */
+.sq-meta { flex-shrink: 0; max-width: 52%; font-size: 10.5px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: opacity 0.15s; }
+.sq-meta.num { font-family: "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }
+.sq-stop { position: absolute; right: 6px; border: 0; background: var(--bg); padding: 2px 7px; border-radius: 5px; font-family: inherit; font-size: 10px; color: var(--text-dim); cursor: pointer; opacity: 0; transition: opacity 0.15s; box-shadow: inset 0 0 0 1px var(--border); }
+.sq-row:hover .sq-stop { opacity: 1; }
+.sq-row[data-s="running"]:hover .sq-meta, .sq-row[data-s="queued"]:hover .sq-meta { opacity: 0; }
+.sq-stop:hover { color: var(--red); }
+.sq-row[data-s="done"] .sq-stop, .sq-row[data-s="failed"] .sq-stop { display: none; }
+
+/* L2：就地展开的子 agent 工具流，一次只开一个 */
+.sq-detail { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 0.28s var(--ease-out); }
+.sq-detail > * { min-height: 0; overflow: hidden; }
+.sq-detail.open { grid-template-rows: 1fr; }
+.sq-detail-in { margin: 0 6px 6px 34px; padding: 7px 9px; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; font-family: "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace; font-size: 10.5px; line-height: 1.85; color: var(--text-dim); }
+.sq-detail-in .st { display: block; }
+.sq-detail-in .st.now { color: var(--text); }
+.sq-detail-in .rs { display: block; margin-top: 5px; padding-top: 5px; border-top: 1px dashed var(--border); font-family: inherit; font-size: 11px; color: var(--text); }
+
+/* 合流后整卡塌成一行 —— 完成的东西不该继续占注意力 */
+.sq-summary { display: none; align-items: center; gap: 7px; padding: 9px 12px; font-size: 11.5px; color: var(--text-dim); }
+.squad.done .sq-summary { display: flex; }
+.squad.done .sq-head { display: none; }
+.squad.done .sq-body { grid-template-rows: 0fr; opacity: 0; }
+.squad.done { background: transparent; }
+.sq-summary .sq-re { margin-left: auto; font-size: 10.5px; color: var(--accent); cursor: pointer; }
+.sq-summary .jd { width: 8px; height: 8px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px var(--border-strong); display: grid; place-items: center; }
+.sq-summary .jd::after { content: ''; width: 3px; height: 6px; margin-top: -1.5px; border: solid var(--text-dim); border-width: 0 1.5px 1.5px 0; transform: rotate(42deg); }
+
+/* ── 后台活动条 ──
+   前台轮结束但后台任务仍在跑时常驻。发送键保持可用 —— 后台任务的设计意图
+   就是"你可以继续做别的"，把主操作按钮占住会移除这个能力。 */
+#bg-activity {
+  display: flex; align-items: center; gap: 8px;
+  margin: 0 0 8px;
+  padding: 7px 10px 7px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 16px;
+  font-size: 11.5px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  animation: bgaIn 0.28s var(--ease-out) both;
+}
+#bg-activity[hidden] { display: none; }
+@keyframes bgaIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.bga-dot {
+  width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0;
+  background: var(--accent); animation: genPulse 1.5s ease-in-out infinite;
+}
+.bga-text { flex: 1; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bga-view, .bga-close {
+  flex-shrink: 0; border: 0; background: transparent; cursor: pointer;
+  font-family: inherit; color: var(--accent); padding: 2px 6px; border-radius: 5px;
+}
+.bga-close { color: var(--text-dim); font-size: 12px; line-height: 1; }
+.bga-view:hover { background: rgba(var(--accent-rgb),0.08); }
+.bga-close:hover { background: var(--bg3); color: var(--text); }
+/* 完成即停止脉冲：还在动的点意味着还在忙 */
+#bg-activity.done .bga-dot { background: var(--green); animation: none; }
+#bg-activity.done .bga-text { color: var(--green); }
+
+/* ── Codex 的 todo_list：串行计划，刻意不长成编队卡 ── */
+.todo { border: 1px solid var(--border); border-left: 2px solid var(--text-dim); border-radius: 6px; background: var(--tool-bg); padding: 8px 11px; margin: 6px 0; animation: squadIn 0.3s var(--ease-out) both; }
+.todo-h { font-size: 10.5px; font-weight: 650; color: var(--text-dim); letter-spacing: 0.04em; margin-bottom: 6px; }
+.todo-i { display: flex; align-items: center; gap: 8px; padding: 3px 0; font-size: 12px; line-height: 1.4; transition: color 0.3s ease; }
+.todo-b { width: 11px; height: 11px; flex-shrink: 0; border-radius: 3px; box-shadow: inset 0 0 0 1.5px var(--border-strong); display: grid; place-items: center; transition: background 0.2s, box-shadow 0.2s; }
+.todo-i.on .todo-b { background: var(--text-dim); box-shadow: none; }
+.todo-i.on .todo-b::after { content: ''; width: 2.5px; height: 5.5px; margin-top: -1.5px; border: solid var(--bg); border-width: 0 1.5px 1.5px 0; transform: rotate(42deg); }
+.todo-i.on { color: var(--text-dim); }
+.todo-i.now { font-weight: 550; }
+.todo-i.now .todo-b { box-shadow: inset 0 0 0 1.5px var(--accent); }
+.todo-i.now .todo-b::after { content: ''; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); animation: sqBreathe 1.6s ease-in-out infinite; }
 
 /* ── Composer popup: slash commands + note mentions ── */
 #input-wrap {
@@ -2074,6 +2211,13 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
   <div id="input-wrap">
     <div id="slash-popup" role="listbox" aria-label="输入建议"></div>
     <div id="ask-user-question" role="region" aria-live="polite" aria-label="Claude 提问"></div>
+    <!-- 前台回合已结束、后台任务仍在跑时的常驻指示。发送键保持可用。 -->
+    <div id="bg-activity" role="status" aria-live="polite" hidden>
+      <span class="bga-dot"></span>
+      <span class="bga-text"></span>
+      <button class="bga-view" type="button">查看</button>
+      <button class="bga-close" type="button" aria-label="收起">✕</button>
+    </div>
     <div id="composer">
       <div id="image-chip"></div>
       <div id="mention-chips" aria-label="已选择的文件上下文"></div>
@@ -3422,7 +3566,18 @@ function appendAssistantBlock(body, block) {
   }
 
   if (block.type === "tool_use" || block.type === "server_tool_use" || block.type === "mcp_tool_use") {
+    // Task 的派生已经由编队卡表达，别再重复渲染成一行普通工具调用
+    if (block.name === "Task" && squadCards.get(activeSquad)?.has(block.id)) return;
     body.appendChild(makeToolEl(block));
+    return;
+  }
+
+  if (block.type === "squad") {
+    // 从实例状态重建整张卡 —— assistant 事件的全量重渲染不会丢展开态。
+    // 历史回放时实例已不在（新会话），用 block 里的快照还原。
+    let card = squadCards.get(block.squadId);
+    if (!card && block.snapshot) card = SquadCard.fromSnapshot(block.squadId, block.snapshot);
+    if (card) body.appendChild(card.render());
     return;
   }
 
@@ -3457,6 +3612,8 @@ function setGenerating(v, notifyParent = true) {
   sendBtn.setAttribute("aria-label", v ? "停止" : "发送");
   iconSend.style.display = v ? "none" : "";
   iconStop.style.display = v ? "" : "none";
+  // 前台轮结束时，后台任务若还在跑要接手表达 —— 发送键保持可用
+  updateBackgroundActivity();
   if (notifyParent && window.parent && window.parent !== window) {
     window.parent.postMessage({ type: "ai-generating-state", isGenerating: v }, "*");
   }
@@ -3834,6 +3991,8 @@ let assistantEvents = []; // non-content SDK events that still explain the AI tu
 function resetAssistantState() {
   cleanupRunningTools();
   removeGenChip();
+  // 上一回合遗留的编队卡不该被下一回合的派生复用
+  resetSquads();
   assistantEl = null; assistantTxt = ""; assistantBlocks = []; assistantRawMessages = []; assistantEvents = []; blockMap = {}; prevTurnTexts = [];
 }
 
@@ -3887,6 +4046,588 @@ function formatResetTime(value) {
 
 function updateRateLimit(info) {
   if (info) mergeClaudeRateLimitInfo(info);
+}
+
+/* ══════════════════════════════════════════════════════════
+   派生子 agent 的统一呈现
+   三种真实形态收敛到同一张编队卡（Codex 的串行 todo 除外）：
+     A  Task 工具派生   tool_use{name:"Task"} + 子 agent 的 parent_tool_use_id
+     B  后台异步任务     system/task_*  + task_id
+     C  Codex todo_list  串行计划，走 checklist 而非编队卡
+   Codex 自 2026-03 起也有 subagent（default/worker/explorer），但它们是独立的
+   spawned thread，@openai/codex-sdk 到 0.146.0-alpha 的 ThreadItem union 都没
+   暴露对应事件 —— 所以这里暂时接不上。等 SDK 出了事件，加个分支复用编队卡即可。
+   状态存在 SquadCard 实例里，DOM 可被 assistant 事件的全量重渲染安全重建。
+   ══════════════════════════════════════════════════════════ */
+
+// 服务端 CLIENT_VISIBLE_SYSTEM_SUBTYPES 透传上来的后台任务生命周期事件
+const TASK_EVENT_TYPES = new Set([
+  "task_started",
+  "task_progress",
+  "task_updated",
+  "task_notification",
+]);
+
+function taskEventId(ev) {
+  return String(ev.task_id ?? ev.taskId ?? ev.tool_use_id ?? ev.toolUseID ?? "task");
+}
+
+function taskEventType(ev) {
+  return ev.type === "system" ? ev.subtype : ev.type;
+}
+
+// 只取描述本身（不带状态前缀），编队卡的行标题和成果摘要用它
+function taskEventDetail(ev) {
+  const candidates = [
+    ev.description, ev.summary, ev.message, ev.subject,
+    ev.task?.description, ev.task?.summary,
+    ev.patch?.description, ev.patch?.error, ev.data?.description, ev.last_tool_name,
+  ];
+  return candidates.find((v) => typeof v === "string" && v.trim())?.trim().slice(0, 120) || "";
+}
+
+function taskEventIsDone(ev) {
+  const status = String(ev.status ?? ev.patch?.status ?? ev.task?.status ?? "").trim().toLowerCase();
+  return taskEventType(ev) === "task_notification"
+    || ["completed", "complete", "success", "failed", "error", "stopped", "killed", "cancelled", "canceled"].includes(status);
+}
+
+const SHOW_DELAY = 800;   // 更快结束的派生根本不出卡，避免闪一下就消失
+const MIN_DWELL = 1200;   // 一旦出现，最少驻留这么久
+
+const squadCards = new Map();      // squadId -> SquadCard
+const squadOfTask = new Map();     // taskId/toolUseId -> squadId，供跨回合的后台任务找回原卡
+let activeSquad = null;
+let squadSeq = 0;
+
+const sqShortPath = (p) => String(p || "").split(/[\\/]/).pop() || "";
+const sqHost = (u) => { try { return new URL(u).host; } catch { return String(u || "").slice(0, 30); } };
+
+// 工具调用 → 人话，用于子 agent 的 L2 工具流
+function subagentToolLabel(name, input) {
+  const i = input || {};
+  if (name === "Read") return `读取 ${sqShortPath(i.file_path)}`;
+  if (name === "Edit" || name === "Write") return `写入 ${sqShortPath(i.file_path)}`;
+  if (name === "Grep") return `检索 "${String(i.pattern ?? "").slice(0, 24)}"`;
+  if (name === "Glob") return `匹配 ${i.pattern ?? ""}`;
+  if (name === "Bash") return i.description || `执行 ${String(i.command ?? "").slice(0, 36)}`;
+  if (name === "WebFetch") return `抓取 ${sqHost(i.url)}`;
+  if (name === "WebSearch") return `搜索 "${String(i.query ?? "").slice(0, 24)}"`;
+  if (name === "Task") return i.description || "子任务";
+  return name || "tool";
+}
+
+// tool_result 内容 → 一句成果摘要，避免把整段 dump 塞进行尾
+function subagentResultSummary(content) {
+  const text = Array.isArray(content)
+    ? content.map((c) => (typeof c === "string" ? c : c?.text || "")).join(" ")
+    : String(content ?? "");
+  const first = text.trim().split("\n").find((l) => l.trim());
+  return first ? first.trim().slice(0, 40) : "已完成";
+}
+
+class SquadCard {
+  constructor(id) {
+    this.id = id;
+    this.state = new Map();    // id -> {status, steps:[], result}
+    this.labels = new Map();
+    this.order = [];
+    this.el = null;
+    this.openId = null;
+    this.shownAt = 0;
+    this.startAt = Date.now();
+    this.finishedAt = 0;
+    this.mountArmed = false;
+    this.block = null;
+  }
+
+  has(id) { return this.state.has(id); }
+
+  get counts() {
+    let done = 0, live = 0, fail = 0;
+    this.state.forEach((s) => {
+      if (s.status === "done") done++;
+      else if (s.status === "failed") fail++;
+      else live++;
+    });
+    return { done, live, fail, total: this.order.length };
+  }
+
+  spawn(id, label) {
+    if (this.state.has(id)) return;
+    this.state.set(id, { status: "running", steps: [], result: null });
+    this.labels.set(id, label);
+    this.order.push(id);
+    squadOfTask.set(id, this.id);
+    if (this.el) this.addRow(id, this.order.length - 1);
+    else this.armMount();
+    this.refresh();
+    this.syncBlock();
+    updateBackgroundActivity();
+  }
+
+  armMount() {
+    if (this.mountArmed) return;
+    this.mountArmed = true;
+    setTimeout(() => {
+      if (this.counts.live > 0 && !this.el) this.mount();
+    }, SHOW_DELAY);
+  }
+
+  step(id, text) {
+    const s = this.state.get(id);
+    if (!s || s.status === "done" || s.status === "failed") return;
+    s.steps.push(text);
+    if (this.openId === id) this.paintDetail(id);
+    this.syncBlock();
+    this.syncChip();
+  }
+
+  /* L0 用稳定计数，不用"最后一步的文本" —— 后者会随每个工具调用闪烁 */
+  syncChip() {
+    const c = this.counts;
+    if (c.live === 0) return;
+    updateGenChip(c.done + c.fail > 0
+      ? `分头处理 ${c.total} 项 · ${c.done} 项已完成`
+      : `分头处理 ${c.total} 项`);
+  }
+
+  settle(id, status, result) {
+    const s = this.state.get(id);
+    if (!s || s.status === "done" || s.status === "failed") return;
+    s.status = status;
+    s.result = result;
+    this.paintRow(id);
+    this.refresh();
+    this.syncBlock();
+    this.syncChip();
+    updateBackgroundActivity();
+    if (this.counts.live === 0) this.join();
+  }
+
+  /* 把自己登记成一个 assistantBlock：既支撑 assistant 事件的全量重渲染，
+     也让快照进入历史，刷新后仍能把卡片还原出来 */
+  ensureBlock() {
+    if (this.block) return;
+    this.block = { type: "squad", squadId: this.id, snapshot: this.snapshot() };
+    assistantBlocks.push(this.block);
+  }
+
+  // 用纯数组存，保证能 JSON 序列化进历史
+  snapshot() {
+    return {
+      order: [...this.order],
+      labels: [...this.labels],
+      state: [...this.state].map(([k, v]) => [k, { status: v.status, result: v.result, steps: [...v.steps] }]),
+      startAt: this.startAt,
+      finishedAt: this.finishedAt,
+    };
+  }
+
+  syncBlock() {
+    if (this.block) this.block.snapshot = this.snapshot();
+  }
+
+  static fromSnapshot(id, snap) {
+    const card = new SquadCard(id);
+    card.order = [...(snap.order ?? [])];
+    card.labels = new Map(snap.labels ?? []);
+    card.state = new Map((snap.state ?? []).map(([k, v]) => [k, { status: v.status, result: v.result, steps: [...(v.steps ?? [])] }]));
+    card.startAt = snap.startAt ?? Date.now();
+    card.finishedAt = snap.finishedAt ?? 0;
+    squadCards.set(id, card);
+    return card;
+  }
+
+  mount() {
+    if (this.el) return;
+    this.ensureBlock();
+    if (!assistantEl) { removeTyping(); assistantEl = addMessage("assistant", ""); }
+    const body = assistantEl.querySelector(".msg-body");
+    body.appendChild(this.render());
+    reanchorGenChip();
+    scrollBottom();
+  }
+
+  /* 从当前状态重建整张卡 —— 全量重渲染时被 appendAssistantBlock 调用 */
+  render() {
+    const card = document.createElement("div");
+    card.className = "squad";
+    card.dataset.squadId = this.id;
+    card.innerHTML = `
+      <div class="sq-head">
+        <span class="sq-title">分头处理中</span>
+        <span class="sq-count"></span>
+        <span class="sq-spacer"></span>
+        <button class="sq-stopall">全部停止</button>
+        <svg class="sq-chev" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4 6.5 8 10.5l4-4"/></svg>
+      </div>
+      <div class="sq-body"><div class="sq-clip"><div class="sq-rows"><i class="sq-rail"></i></div></div></div>
+      <div class="sq-summary"><span class="jd"></span><span class="sq-sumtxt"></span><span class="sq-re">展开</span></div>`;
+    this.el = card;
+    this.shownAt = this.shownAt || Date.now();
+
+    card.querySelector(".sq-head").onclick = (e) => {
+      if (e.target.closest(".sq-stopall")) return;
+      card.classList.toggle("folded");
+    };
+    card.querySelector(".sq-stopall").onclick = () => this.stopAll();
+    card.querySelector(".sq-re").onclick = () => {
+      card.classList.remove("done");
+      card.querySelector(".sq-head").style.display = "";
+      card.querySelector(".sq-rail").classList.remove("joined");
+      card.querySelectorAll(".sq-conn").forEach((c) => c.classList.remove("joined"));
+    };
+
+    this.order.forEach((id, i) => this.addRow(id, i));
+    this.refresh();
+
+    const allSettled = this.counts.live === 0 && this.order.length > 0;
+    requestAnimationFrame(() => {
+      card.querySelector(".sq-rail").classList.add("grown");
+      card.querySelectorAll(".sq-conn").forEach((c, i) => {
+        setTimeout(() => c.classList.add("grown"), allSettled ? 0 : 100 + i * 55);
+      });
+    });
+    // 重建时若早已合流，直接恢复到摘要态，不重放动画
+    if (allSettled) { card.classList.add("done"); this.paintSummary(); }
+    return card;
+  }
+
+  addRow(id, i) {
+    const rows = this.el.querySelector(".sq-rows");
+    const row = document.createElement("div");
+    row.className = "sq-row";
+    row.dataset.s = this.state.get(id)?.status || "queued";
+    row.dataset.id = id;
+    row.style.animationDelay = (i * 55) + "ms";
+    row.innerHTML = `
+      <i class="sq-conn"></i>
+      <span class="sq-dot"></span>
+      <span class="sq-label"></span>
+      <span class="sq-meta num"></span>
+      <button class="sq-stop">停止</button>`;
+    row.querySelector(".sq-label").textContent = this.labels.get(id) || id;
+
+    const det = document.createElement("div");
+    det.className = "sq-detail";
+    det.dataset.for = id;
+    det.innerHTML = `<div><div class="sq-detail-in"></div></div>`;
+
+    row.onclick = (e) => {
+      if (e.target.closest(".sq-stop")) return;
+      this.toggleDetail(id);
+    };
+    row.querySelector(".sq-stop").onclick = () => this.stopOne(id);
+
+    rows.appendChild(row);
+    rows.appendChild(det);
+    this.paintRow(id);
+    if (this.el.querySelector(".sq-rail")?.classList.contains("grown")) {
+      requestAnimationFrame(() => row.querySelector(".sq-conn").classList.add("grown"));
+    }
+    if (this.openId === id) { this.paintDetail(id); det.classList.add("open"); }
+  }
+
+  paintRow(id) {
+    const row = this.el?.querySelector(`.sq-row[data-id="${cssEscapeValue(id)}"]`);
+    const s = this.state.get(id);
+    if (!row || !s) return;
+    row.dataset.s = s.status;
+    const meta = row.querySelector(".sq-meta");
+    if (s.status === "done" || s.status === "failed") {
+      meta.textContent = s.result || "";
+      meta.classList.toggle("num", !s.result);
+    } else {
+      meta.textContent = "";
+    }
+  }
+
+  toggleDetail(id) {
+    const opening = this.openId !== id;
+    this.el.querySelectorAll(".sq-detail").forEach((d) => d.classList.remove("open"));
+    this.openId = opening ? id : null;
+    if (opening) {
+      this.paintDetail(id);
+      this.el.querySelector(`.sq-detail[data-for="${cssEscapeValue(id)}"]`)?.classList.add("open");
+    }
+  }
+
+  paintDetail(id) {
+    const box = this.el?.querySelector(`.sq-detail[data-for="${cssEscapeValue(id)}"] .sq-detail-in`);
+    const s = this.state.get(id);
+    if (!box || !s) return;
+    box.innerHTML = "";
+    s.steps.forEach((txt, i) => {
+      const e = document.createElement("span");
+      e.className = "st" + (i === s.steps.length - 1 && s.status === "running" ? " now" : "");
+      e.textContent = txt;
+      box.appendChild(e);
+    });
+    if (!s.steps.length) {
+      const e = document.createElement("span");
+      e.className = "st";
+      e.textContent = "等待子任务的第一个动作…";
+      box.appendChild(e);
+    }
+    if (s.result) {
+      const r = document.createElement("span");
+      r.className = "rs";
+      r.textContent = s.result;
+      box.appendChild(r);
+    }
+  }
+
+  refresh() {
+    if (!this.el) return;
+    const c = this.counts;
+    this.el.querySelector(".sq-count").textContent =
+      c.done + c.fail > 0 ? `${c.done + c.fail}/${c.total}` : `${c.total} 项`;
+  }
+
+  stopOne(id) {
+    const label = this.labels.get(id) || id;
+    this.settle(id, "failed", "已跳过");
+    const left = this.counts.live;
+    // 明确后果：用户最怕不知道自己刚按下去发生了什么
+    updateGenChip(left > 0 ? `已跳过「${label}」，其余 ${left} 项继续` : `已跳过「${label}」`);
+  }
+
+  stopAll() {
+    this.order.forEach((id) => {
+      const s = this.state.get(id);
+      if (s && s.status !== "done" && s.status !== "failed") this.settle(id, "failed", "已停止");
+    });
+    // main 的停止协议是 { stop: true }（服务端读 msg.stop），不是 { type: "stop" }
+    try { ws?.send(JSON.stringify({ stop: true })); } catch { }
+  }
+
+  paintSummary() {
+    if (!this.el) return;
+    const c = this.counts;
+    // 用合流时刻定格，否则历史回放会显示"已完成 3 项 · 84000s"
+    this.finishedAt = this.finishedAt || Date.now();
+    const secs = Math.max(1, Math.round((this.finishedAt - this.startAt) / 1000));
+    this.el.querySelector(".sq-sumtxt").textContent = c.fail
+      ? `完成 ${c.done} 项 · ${c.fail} 项未成功 · ${secs}s`
+      : `已完成 ${c.done} 项 · ${secs}s`;
+  }
+
+  /* 合流：分支收回 → rail 并线 → 整卡塌成一行摘要 */
+  join() {
+    if (!this.el || this.el.classList.contains("done")) return;
+    const wait = Math.max(0, MIN_DWELL - (Date.now() - this.shownAt));
+    setTimeout(() => {
+      if (!this.el) return;
+      this.el.querySelectorAll(".sq-conn").forEach((c, i) => setTimeout(() => c.classList.add("joined"), i * 45));
+      setTimeout(() => this.el?.querySelector(".sq-rail")?.classList.add("joined"), 120);
+      setTimeout(() => {
+        if (!this.el) return;
+        this.el.classList.add("done");
+        this.paintSummary();
+        this.syncBlock();   // 把定格的耗时一起写进历史快照
+        scrollBottom();
+      }, 420);
+    }, wait);
+  }
+}
+
+function currentSquad(create) {
+  if (activeSquad && squadCards.has(activeSquad)) return squadCards.get(activeSquad);
+  if (!create) return null;
+  const id = `sq_${++squadSeq}`;
+  const card = new SquadCard(id);
+  squadCards.set(id, card);
+  activeSquad = id;
+  return card;
+}
+
+/* 回合结束时的清理。后台任务（system/task_*）会跨回合继续跑 —— 主 agent 的
+   前台轮结束不代表它们结束，所以还在运行的卡必须留着，否则它后续的
+   task_progress / task_notification 会另起一张孤卡。 */
+function resetSquads() {
+  for (const [id, card] of [...squadCards]) {
+    if (card.counts.live > 0) continue;          // 仍在后台跑，留着
+    squadCards.delete(id);
+    for (const [taskId, sid] of [...squadOfTask]) {
+      if (sid === id) squadOfTask.delete(taskId);
+    }
+  }
+  activeSquad = null;   // 下一轮的前台派生另起一张，不混进上一轮
+  todoListEl = null;
+}
+
+/* ── 后台活动条 ──
+   只在"前台轮已结束、后台任务仍在跑"时出现。生成中不显示（那时有 gen chip）。 */
+let bgActivityEl = null;
+let bgActivityDismissed = false;
+let bgActivityHideTimer = null;
+
+// 惰性获取并绑定：setGenerating 可能在脚本执行期就被调用，顶层 const 会踩 TDZ
+function ensureBgActivityEl() {
+  if (bgActivityEl) return bgActivityEl;
+  const el = document.getElementById("bg-activity");
+  if (!el) return null;
+  bgActivityEl = el;
+  el.querySelector(".bga-view").onclick = () => {
+    let target = null;
+    squadCards.forEach((card) => { if (card.counts.live > 0 && card.el) target = card.el; });
+    target = target || [...document.querySelectorAll(".squad")].pop();
+    if (!target) return scrollBottom();
+    target.classList.remove("folded");
+    // 手动滚动 —— scrollIntoView 会连带滚坏外层容器
+    const box = messagesEl;
+    const boxRect = box.getBoundingClientRect();
+    const tRect = target.getBoundingClientRect();
+    box.scrollTop += (tRect.top - boxRect.top) - Math.max(0, (box.clientHeight - tRect.height) / 2);
+    target.animate(
+      [{ boxShadow: "0 0 0 3px rgba(var(--accent-rgb),0.35)" }, { boxShadow: "0 0 0 0 transparent" }],
+      { duration: 700, easing: "cubic-bezier(0.32, 0.72, 0, 1)" },
+    );
+  };
+  el.querySelector(".bga-close").onclick = () => {
+    bgActivityDismissed = true;
+    el.hidden = true;
+  };
+  return el;
+}
+
+function liveBackgroundTasks() {
+  let live = 0;
+  squadCards.forEach((card) => { live += card.counts.live; });
+  return live;
+}
+
+function updateBackgroundActivity() {
+  const el = ensureBgActivityEl();
+  if (!el) return;
+  const live = liveBackgroundTasks();
+
+  // 生成中由 gen chip 负责，这里让位，避免两处同时喊
+  if (isGenerating || bgActivityDismissed) {
+    if (!live) bgActivityDismissed = false;
+    el.hidden = true;
+    return;
+  }
+
+  if (live > 0) {
+    clearTimeout(bgActivityHideTimer);
+    el.classList.remove("done");
+    el.querySelector(".bga-text").textContent = `${live} 项仍在后台运行`;
+    el.querySelector(".bga-view").hidden = false;
+    el.hidden = false;
+    return;
+  }
+
+  // 刚从"有任务"跌到 0 → 报一次完成再自动收起，不需要用户去关
+  if (!el.hidden && !el.classList.contains("done")) {
+    el.classList.add("done");
+    el.querySelector(".bga-text").textContent = "后台任务已全部完成";
+    el.querySelector(".bga-view").hidden = false;
+    clearTimeout(bgActivityHideTimer);
+    bgActivityHideTimer = setTimeout(() => { el.hidden = true; }, 6000);
+  }
+}
+
+/* ── Codex 的串行 checklist ── */
+let todoListEl = null;
+function renderTodoList(items) {
+  if (!Array.isArray(items) || !items.length) return;
+  if (!assistantEl) { removeTyping(); assistantEl = addMessage("assistant", ""); }
+  const body = assistantEl.querySelector(".msg-body");
+  if (!todoListEl || !body.contains(todoListEl)) {
+    const wrap = document.createElement("div");
+    wrap.className = "todo";
+    wrap.innerHTML = `<div class="todo-h">执行计划</div><div class="todo-body"></div>`;
+    body.appendChild(wrap);
+    todoListEl = wrap.querySelector(".todo-body");
+    reanchorGenChip();
+  }
+  todoListEl.innerHTML = "";
+  const nextIdx = items.findIndex((i) => !i.completed);
+  items.forEach((it, i) => {
+    const row = document.createElement("div");
+    row.className = "todo-i" + (it.completed ? " on" : (i === nextIdx ? " now" : ""));
+    row.innerHTML = `<span class="todo-b"></span><span class="todo-t"></span>`;
+    row.querySelector(".todo-t").textContent = it.text ?? "";
+    todoListEl.appendChild(row);
+  });
+  const doneN = items.filter((i) => i.completed).length;
+  updateGenChip(doneN < items.length ? `按计划执行 · 第 ${doneN + 1}/${items.length} 步` : "");
+  scrollBottom();
+}
+
+/* ══════════════════════════════════════════════════════════
+   reducer：真实事件 → 编队状态
+   返回 true 表示已被子 agent UI 消费，主对话流不再渲染这条
+   ══════════════════════════════════════════════════════════ */
+function subagentIngest(ev) {
+  // ── A · 子 agent 自己的事件：靠 parent_tool_use_id 归位。
+  //    默认 forwardSubagentText:false 时这里只有 tool_use/tool_result，
+  //    已经够喂 L2；开了才有 text/thinking。无论如何都不该漏进主流。
+  if (ev.parent_tool_use_id) {
+    const card = currentSquad(false);
+    if (card && card.has(ev.parent_tool_use_id)) {
+      for (const b of ev.message?.content ?? []) {
+        if (b.type === "tool_use" || b.type === "server_tool_use" || b.type === "mcp_tool_use") {
+          card.step(ev.parent_tool_use_id, subagentToolLabel(b.name, b.input));
+        } else if (b.type === "text" && b.text?.trim()) {
+          card.step(ev.parent_tool_use_id, b.text.trim().slice(0, 52));
+        }
+      }
+    }
+    return true;
+  }
+
+  // ── A2 · 主 agent 发起 Task 工具派生
+  if (ev.type === "assistant") {
+    const tasks = (ev.message?.content ?? []).filter((b) => b.type === "tool_use" && b.name === "Task");
+    if (tasks.length) {
+      const card = currentSquad(true);
+      tasks.forEach((b) => card.spawn(b.id, b.input?.description || b.input?.subagent_type || "子任务"));
+      return false;   // 这条 assistant 消息还有别的内容，交回主流继续渲染
+    }
+  }
+
+  // ── A3 · Task 返回 → 该分支合流
+  if (ev.type === "user") {
+    const card = currentSquad(false);
+    if (card) {
+      let hit = false;
+      for (const b of ev.message?.content ?? []) {
+        if (b.type === "tool_result" && card.has(b.tool_use_id)) {
+          card.settle(b.tool_use_id, b.is_error ? "failed" : "done", subagentResultSummary(b.content));
+          hit = true;
+        }
+      }
+      if (hit) return true;
+    }
+  }
+
+  // ── B · 后台异步任务。可能跨回合回来，先按 taskId 找回它原来那张卡
+  if (ev.type === "system" && TASK_EVENT_TYPES.has(ev.subtype)) {
+    const id = taskEventId(ev);
+    const card = squadCards.get(squadOfTask.get(id)) ?? currentSquad(true);
+    const status = String(ev.status ?? ev.patch?.status ?? ev.task?.status ?? "").trim().toLowerCase();
+    const desc = taskEventDetail(ev);
+    if (!card.has(id)) card.spawn(id, desc || "后台任务");
+    if (taskEventIsDone(ev)) {
+      card.settle(id, (status === "failed" || status === "error") ? "failed" : "done", desc || "已完成");
+    } else if (desc) {
+      card.step(id, desc);
+    }
+    return true;
+  }
+
+  // ── C · Codex todo_list：这是当前 thread 的串行计划，不是并行派生，
+  //        所以走 checklist 不套编队卡。Codex 真正的 subagent 走独立 thread，
+  //        SDK 目前不透传，与这里无关。
+  if (ev.type === "tool_progress" && ev.itemType === "todo_list") {
+    renderTodoList(ev.raw?.items ?? []);
+    return true;
+  }
+
+  return false;
 }
 
 // ── Event handling ────────────────────────────────────────
@@ -3959,6 +4700,27 @@ function handleEvent(ev) {
     return;
   }
 
+  // 后台任务生命周期 → 编队卡（原先会落到末尾的 captureAssistantEvent，
+  // 被渲染成一条无结构的 sdk_event 折叠块）
+  if (ev.type === "system" && TASK_EVENT_TYPES.has(ev.subtype)) {
+    assistantEvents.push(cloneJson(ev));
+    subagentIngest(ev);
+    return;
+  }
+
+  // Codex 的串行计划
+  if (ev.type === "tool_progress" && ev.itemType === "todo_list") {
+    subagentIngest(ev);
+    return;
+  }
+
+  // 子 agent 自己的事件靠 parent_tool_use_id 归位到对应分支，
+  // 不再和主 agent 的工具调用交错平铺在一起。
+  if (ev.parent_tool_use_id) {
+    subagentIngest(ev);
+    return;
+  }
+
   // ── Streaming deltas ──────────────────────────────────────
   if (ev.type === "stream_event") {
     const event = ev.event;
@@ -4000,6 +4762,13 @@ function handleEvent(ev) {
         reanchorGenChip();
         blockMap[idx] = { el, type: "text", accumulated: "" };
       } else if (isToolUseType(block.type)) {
+        // Task 走编队卡。此刻 input 还在流式累积中，等 content_block_stop
+        // 拿到完整 JSON 才知道 description，所以先只登记不渲染。
+        if (block.name === "Task") {
+          blockMap[idx] = { el: null, type: block.type, accumulated: "", id: block.id, isTask: true };
+          updateGenChip("正在分派子任务…");
+          return;
+        }
         updateGenChip("调用工具中…");
         const el = makeToolEl({
           id: block.id,
@@ -4047,7 +4816,7 @@ function handleEvent(ev) {
         scrollBottom();
       } else if (delta.type === "input_json_delta" && delta.partial_json != null) {
         b.accumulated += delta.partial_json;
-        const inp = b.el.querySelector(".tool-input");
+        const inp = b.el?.querySelector(".tool-input");   // Task 块没有 el
         if (inp) { inp.textContent = b.accumulated.slice(0, 120); scrollBottom(); }
       }
       return;
@@ -4064,15 +4833,25 @@ function handleEvent(ev) {
         if (label) label.textContent = "思考过程";
         showGenChip("整理回复中…");
       }
+      // Task 的 input 到这里才完整，此时才知道该给分支起什么名字
+      if (b?.isTask) {
+        let desc = "";
+        try {
+          const raw = JSON.parse(b.accumulated || "{}");
+          desc = raw.description || raw.subagent_type || "";
+        } catch { }
+        currentSquad(true).spawn(b.id, desc || "子任务");
+        return;
+      }
       if (isToolUseType(b?.type)) {
         try {
           const raw = JSON.parse(b.accumulated || "{}");
           const preview = raw.command ?? raw.file_path ?? raw.path ?? raw.query ?? JSON.stringify(raw);
-          const inp = b.el.querySelector(".tool-input");
+          const inp = b.el?.querySelector(".tool-input");
           if (inp) { inp.textContent = String(preview).slice(0, 120); inp.title = JSON.stringify(raw, null, 2); }
         } catch { }
         // 输入完成 → 工具执行中，保持 spinner
-        markToolRunning(b.el);
+        if (b.el) markToolRunning(b.el);
       }
       return;
     }
@@ -4081,6 +4860,7 @@ function handleEvent(ev) {
 
   // ── Complete assistant turn ────────────────────────────────
   if (ev.type === "assistant") {
+    subagentIngest(ev);   // 认领其中的 Task 工具派生，其余内容照常渲染
     const content = ev.message?.content ?? [];
     const turnBlocks = normalizeAssistantBlocks(content, "");
     if (turnBlocks.length) assistantBlocks.push(...turnBlocks);
@@ -4106,6 +4886,7 @@ function handleEvent(ev) {
   }
 
   if (ev.type === "user" && isToolResultEvent(ev)) {
+    subagentIngest(ev);   // Task 的 tool_result → 该分支合流
     cleanupRunningTools();
     return;
   }

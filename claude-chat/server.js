@@ -2509,6 +2509,13 @@ const CLIENT_VISIBLE_SYSTEM_SUBTYPES = new Set([
   "task_notification",
 ]);
 
+// 后台任务在前台轮结束后仍会继续产出 system/task_* 事件，此时 claudeTurn 已是
+// null，按回合路由就会被丢弃 —— 前端的后台活动条于是永远停在"仍在运行"，
+// 收不到那条让它合流的 task_notification。这个 sink 让这类事件绕过回合路由
+// 直达当前连接。刻意不经过 run.send()：不带 runId，前端才不会把它当成"被新
+// 请求取代的旧 run 的迟到事件"丢掉。
+let backgroundEventSink = null;
+
 function claudeRuntimeSignatureOf(options) {
   return JSON.stringify({
     cwd: options.cwd,
@@ -2555,7 +2562,15 @@ const claudeRuntime = new PersistentQueryRuntime({
   queryFactory: ({ prompt, options }) => query({ prompt, options }),
   onEvent: (ev) => {
     const turn = claudeTurn;
-    if (!turn) return; // 无前台轮时到达的多是后台任务事件，由 UI 侧的活动条呈现
+    if (!turn) {
+      // 无前台轮时到达的多是后台任务事件，由 UI 侧的活动条呈现。只放行这批
+      // 生命周期事件；其余（尤其 session_state_changed）是服务端的回合控制
+      // 信号，继续丢弃，不该泄给 UI。
+      if (ev.type === "system" && CLIENT_VISIBLE_SYSTEM_SUBTYPES.has(ev.subtype)) {
+        try { backgroundEventSink?.(ev); } catch { }
+      }
+      return;
+    }
     turn.onEvent(ev);
     if (ev.type === "system" && ev.subtype === "session_state_changed" && ev.state === "idle") {
       clearTimeout(turnIdleWatchdog);
@@ -2658,6 +2673,10 @@ wss.on("connection", (ws) => {
   const send = (obj) => {
     if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(obj));
   };
+
+  // 前台轮之外到达的后台任务事件推给这条连接。多标签页时后连接者接管即可：
+  // 活动条只是提示，不参与回合控制，丢给谁都不影响正确性。
+  backgroundEventSink = send;
 
   const clearPendingAskUserQuestion = (run, reason = "cancelled") => {
     if (!run?.pendingAskUserQuestion) return;
@@ -3297,6 +3316,8 @@ wss.on("connection", (ws) => {
       activeRun.detach();
     }
     activeRun = null;
+    // 只在自己仍是当前 sink 时摘掉，别把后连上来的那条连接一起解绑
+    if (backgroundEventSink === send) backgroundEventSink = null;
   });
 });
 
