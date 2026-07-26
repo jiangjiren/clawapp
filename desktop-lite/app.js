@@ -28,6 +28,8 @@ const state = {
   tabScroll: new Map(),
   dirty: false,
   editMode: false,
+  // 新建后尚未命名的笔记：文件名跟随正文首行，用户手动改名或切走即退出
+  autoTitlePath: null,
   navHistory: [],
   navIndex: -1,
   expanded: new Set([""]),
@@ -38,6 +40,7 @@ const state = {
   searchRequestId: 0,
   savePromise: null,
   pendingImagePastes: new Set(),
+  imageViewerLoading: false,
   contextTarget: null,
   gitStatus: null,
   gitPane: "main",
@@ -375,6 +378,17 @@ function updateEditButton() {
 }
 
 /* 把光标放到当前可视区域顶部附近，避免输入时视图跳走 */
+/* 空文档给一行提示；未命名的新笔记顺带把「首行=标题」这条规则说出来 */
+function syncEditorPlaceholder() {
+  const container = qs("cm-container");
+  const cm = state.editor;
+  if (!container || !cm) return;
+  container.dataset.placeholder = state.autoTitlePath && state.autoTitlePath === state.activeNote?.path
+    ? "写下第一行，它会成为标题"
+    : "开始写点什么…";
+  container.classList.toggle("cmEmpty", cm.getValue() === "");
+}
+
 function placeCaretAtVisibleArea() {
   const cm = state.editor;
   if (!cm) return;
@@ -1127,6 +1141,8 @@ function renderDocArea(options = {}) {
     cm.on("paste", (_inst, event) => handleEditorPaste(cm, event));
     cm.on("blur", () => { void flushPendingSave(); });
     cm.on("cursorActivity", sendSelectionContext);
+    cm.on("change", syncEditorPlaceholder);
+    syncEditorPlaceholder();
     cm.getInputField().focus({ preventScroll: true });
   } else {
     docArea.className = docAreaClass();
@@ -1164,15 +1180,21 @@ function renderDocArea(options = {}) {
       });
       frame.srcdoc = state.activeNote.content;
     } else if (isImage) {
+      const navigation = imageViewerNavigation(state.activeNote.path);
       docArea.innerHTML = `
         <div class="imageViewer">
           <figure class="imageViewerFrame">
+            ${renderImageViewerNavButton("previous", navigation.previous)}
             <img class="imageViewerImage" src="${state.activeNote.dataUrl}" alt="${escapeHtml(state.activeNote.name)}" />
+            ${renderImageViewerNavButton("next", navigation.next)}
           </figure>
           <div class="imageViewerMeta">
             <strong>${escapeHtml(state.activeNote.name)}</strong>
             <span>${escapeHtml((state.activeNote.mime || ext).toUpperCase())}</span>
             <span>${escapeHtml(formatSize(state.activeNote.size || 0))}</span>
+            ${navigation.items.length > 1 && navigation.index >= 0
+              ? `<span class="imageViewerPosition" aria-label="当前为第 ${navigation.index + 1} 张，共 ${navigation.items.length} 张">${navigation.index + 1} / ${navigation.items.length}</span>`
+              : ""}
           </div>
         </div>`;
       wireImageZoom();
@@ -1183,10 +1205,77 @@ function renderDocArea(options = {}) {
   }
 }
 
+function imageViewerNavigation(path = state.activePath) {
+  const folder = parentFolder(path || "").toLowerCase();
+  const items = flattenFiles(state.tree).filter((file) => {
+    const extension = file.extension || extOf(file.path);
+    return isImageExt(extension) && parentFolder(file.path).toLowerCase() === folder;
+  });
+  const normalizedPath = String(path || "").toLowerCase();
+  const index = items.findIndex((file) => file.path.toLowerCase() === normalizedPath);
+  return {
+    items,
+    index,
+    previous: index > 0 ? items[index - 1] : null,
+    next: index >= 0 && index < items.length - 1 ? items[index + 1] : null,
+  };
+}
+
+function renderImageViewerNavButton(direction, target) {
+  if (!target) return "";
+  const isPrevious = direction === "previous";
+  const label = isPrevious ? "上一张图片" : "下一张图片";
+  const shortcut = isPrevious ? "←" : "→";
+  const path = isPrevious ? "M15 18l-6-6 6-6" : "M9 18l6-6-6-6";
+  return `
+    <button
+      type="button"
+      class="imageViewerNav imageViewerNav${isPrevious ? "Previous" : "Next"}"
+      data-image-viewer-direction="${direction}"
+      aria-label="${label}：${escapeHtml(target.name)}"
+      title="${label}（${shortcut}）"
+    >
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="${path}" />
+      </svg>
+    </button>`;
+}
+
+async function navigateImageViewer(direction, options = {}) {
+  if (state.imageViewerLoading || !isImageExt(state.activeNote?.extension)) return;
+  const navigation = imageViewerNavigation(state.activePath);
+  const target = direction === "previous" ? navigation.previous : navigation.next;
+  if (!target) return;
+
+  state.imageViewerLoading = true;
+  try {
+    await loadNote(target.path, { replaceCurrentTab: true });
+    if (options.restoreFocus) {
+      requestAnimationFrame(() => {
+        document.querySelector(`[data-image-viewer-direction="${direction}"]`)
+          ?.focus({ preventScroll: true });
+      });
+    }
+  } finally {
+    state.imageViewerLoading = false;
+  }
+}
+
 function wireImageZoom() {
   const frame = document.querySelector(".imageViewerFrame");
   const image = document.querySelector(".imageViewerImage");
   if (!frame || !image) return;
+
+  frame.querySelectorAll("[data-image-viewer-direction]").forEach((button) => {
+    button.addEventListener("pointerdown", (e) => e.stopPropagation());
+    button.addEventListener("dblclick", (e) => e.stopPropagation());
+    button.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const restoreFocus = button.matches(":focus-visible");
+      void navigateImageViewer(button.dataset.imageViewerDirection, { restoreFocus });
+    });
+  });
 
   let zoom = 1;
   let panX = 0;
@@ -1506,6 +1595,39 @@ const FOLDER_ICON = `<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" 
 const FILE_ICON = `<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 1h6l3 3v9H3V1z"/><path d="M9 1v3h3"/></svg>`;
 const CHEVRON_ICON = `<svg viewBox="0 0 8 8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="2,1 6,4 2,7"/></svg>`;
 
+/* 文件树按类型区分图标：形状先辨认，低饱和色相做二次提示 */
+const SVG_OPEN = `<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">`;
+const FILE_KIND_ICONS = {
+  doc: FILE_ICON,
+  note: `${SVG_OPEN}<path d="M3 1h6l3 3v9H3V1z"/><path d="M9 1v3h3"/><path d="M5 8h4M5 10.5h2.5"/></svg>`,
+  image: `${SVG_OPEN}<rect x="1.5" y="2.5" width="11" height="9" rx="1.5"/><circle cx="5" cy="5.75" r="0.9"/><path d="M2.2 10.2l2.8-2.8 2.4 2.4 1.8-1.8 2.6 2.6"/></svg>`,
+  code: `${SVG_OPEN}<polyline points="4.5,3.8 1.6,7 4.5,10.2"/><polyline points="9.5,3.8 12.4,7 9.5,10.2"/></svg>`,
+  pdf: `${SVG_OPEN}<path d="M2 2.5h4a1.8 1.8 0 0 1 1.8 1.8v7.2a1.4 1.4 0 0 0-1.4-1.4H2V2.5z"/><path d="M12 2.5H8a1.8 1.8 0 0 0-1.8 1.8v7.2a1.4 1.4 0 0 1 1.4-1.4H12V2.5z"/></svg>`,
+  sheet: `${SVG_OPEN}<rect x="1.5" y="2.5" width="11" height="9" rx="1.5"/><path d="M1.5 5.6h11M5.4 5.6v5.9"/></svg>`,
+  audio: `${SVG_OPEN}<path d="M5.6 9.4V3.3l6-1.1v6"/><circle cx="4.1" cy="9.9" r="1.6"/><circle cx="10.1" cy="8.8" r="1.6"/></svg>`,
+  video: `${SVG_OPEN}<rect x="1.5" y="3" width="11" height="8" rx="1.5"/><path d="M6 5.7l3.1 1.9L6 9.5V5.7z"/></svg>`,
+  archive: `${SVG_OPEN}<path d="M1.5 5h11v6.5a0.8 0.8 0 0 1-0.8 0.8H2.3a0.8 0.8 0 0 1-0.8-0.8V5z"/><path d="M2.6 2.2h8.8L12.5 5h-11L2.6 2.2z"/><path d="M6 7.6h2"/></svg>`,
+};
+
+const FILE_KIND_BY_EXT = {
+  md: "note", markdown: "note", txt: "note", rtf: "note", doc: "doc", docx: "doc",
+  png: "image", jpg: "image", jpeg: "image", gif: "image", webp: "image", svg: "image",
+  bmp: "image", avif: "image", ico: "image", heic: "image",
+  html: "code", htm: "code", js: "code", mjs: "code", cjs: "code", ts: "code", tsx: "code",
+  jsx: "code", css: "code", scss: "code", json: "code", yaml: "code", yml: "code",
+  toml: "code", xml: "code", py: "code", rs: "code", go: "code", java: "code", c: "code",
+  h: "code", cpp: "code", sh: "code", rb: "code", php: "code", sql: "code", vue: "code", svelte: "code",
+  pdf: "pdf",
+  csv: "sheet", xls: "sheet", xlsx: "sheet",
+  mp3: "audio", wav: "audio", m4a: "audio", flac: "audio", ogg: "audio", aac: "audio",
+  mp4: "video", mov: "video", mkv: "video", avi: "video", webm: "video",
+  zip: "archive", rar: "archive", "7z": "archive", gz: "archive", tar: "archive", bz2: "archive",
+};
+
+function fileKindOf(ext) {
+  return FILE_KIND_BY_EXT[ext] || "doc";
+}
+
 function flattenFiles(node, result = []) {
   if (!node) return result;
   if (node.type === "file") { result.push(node); return result; }
@@ -1593,9 +1715,10 @@ function buildTreeNodes(node, container, level, isRoot) {
     btn.style.paddingLeft = `${4 + level * 14}px`;
     btn.title = `${node.path}\n${formatDate(node.updatedAt)}`;
 
+    const kind = fileKindOf(ext);
     const icon = document.createElement("span");
-    icon.className = "treeNodeIcon";
-    icon.innerHTML = FILE_ICON;
+    icon.className = `treeNodeIcon treeNodeIcon-${kind}`;
+    icon.innerHTML = FILE_KIND_ICONS[kind] || FILE_ICON;
 
     const label = document.createElement("span");
     label.className = "treeLabel";
@@ -1606,7 +1729,7 @@ function buildTreeNodes(node, container, level, isRoot) {
 
     if (ext && ext !== "md") {
       const badge = document.createElement("span");
-      badge.className = "fileTypeBadge";
+      badge.className = `fileTypeBadge fileTypeBadge-${kind}`;
       badge.textContent = ext.toUpperCase();
       btn.appendChild(badge);
     }
@@ -1745,6 +1868,8 @@ function renameEntry(target) {
     if (!raw || newName === target.name) return;
     try {
       const newPath = await invoke("rename_entry", { path: target.path, name: newName });
+      // 用户亲自命名后，不再让首行接管文件名
+      if (state.autoTitlePath === target.path) state.autoTitlePath = null;
       if (target.path === state.activePath) {
         state.activePath = newPath;
         if (state.activeNote) state.activeNote = { ...state.activeNote, path: newPath, name: newName };
@@ -1806,16 +1931,7 @@ async function deleteEntry(target) {
 }
 
 async function newNoteInFolder(target) {
-  const title = await showDialog("新建笔记", "无标题");
-  if (!title) return;
-  try {
-    const note = await invoke("create_note", { folder: target.path, title });
-    state.expanded.add(target.path);
-    await loadTree(false);
-    await loadNote(note.path);
-  } catch (err) {
-    showToast(String(err));
-  }
+  await createBlankNote(target.path);
 }
 
 async function newFolderInFolder(target) {
@@ -1892,6 +2008,17 @@ function ensureTab(path) {
 }
 
 /* 重命名/移动后批量映射路径，映射后去重 */
+function replaceTabPath(previousPath, nextPath) {
+  if (!previousPath || !state.tabs.includes(previousPath)) {
+    ensureTab(nextPath);
+    return;
+  }
+  state.tabs = [...new Set(state.tabs.map((path) => path === previousPath ? nextPath : path))];
+  state.tabScroll.delete(previousPath);
+  persistTabs();
+  renderTabs();
+}
+
 function mapTabPaths(mapper) {
   const next = [];
   for (const p of state.tabs) {
@@ -2159,6 +2286,9 @@ async function closeTab(path) {
 
 /* ── Note operations ─────────────────────────────── */
 async function loadNote(path, opts = {}) {
+  const previousActivePath = state.activePath;
+  // 切到别的笔记就不再自动命名，避免旧笔记在后台被改名
+  if (state.autoTitlePath && state.autoTitlePath !== path) state.autoTitlePath = null;
   // 自动保存模式：切换前把未保存内容落盘
   if (!(await flushPendingSave())) return;
   closeGitWorkspace(false);
@@ -2181,7 +2311,8 @@ async function loadNote(path, opts = {}) {
     const note = await invoke(command, { path });
     state.activePath = note.path;
     state.activeNote = note;
-    ensureTab(note.path);
+    if (opts.replaceCurrentTab) replaceTabPath(previousActivePath, note.path);
+    else ensureTab(note.path);
     expandAncestors(note.path);
     renderTree();
     renderNoteMeta();
@@ -2200,6 +2331,7 @@ async function loadNote(path, opts = {}) {
 
 function clearActiveNote() {
   cancelAutosave();
+  state.autoTitlePath = null;
   state.activePath = null;
   state.activeNote = null;
   setDirty(false);
@@ -2233,6 +2365,7 @@ async function saveNote() {
           flashSavedHint();
         }
       }
+      await maybeAutoTitle(savedPath);
       await loadTree(false);
       if (state.outlineOpen) renderToc();
       return true;
@@ -2264,11 +2397,95 @@ async function createNoteWithTitle(title, folder) {
   }
 }
 
+const UNTITLED_NAME = "无标题";
+
+/* 新建不问名字：先给一个不冲突的占位名，写完首行再自动落定 */
+function uniqueUntitledName(folder) {
+  const taken = new Set(
+    flattenFiles(state.tree)
+      .filter((file) => parentFolder(file.path) === folder)
+      .map((file) => stripExt(file.name).toLowerCase())
+  );
+  if (!taken.has(UNTITLED_NAME.toLowerCase())) return UNTITLED_NAME;
+  for (let i = 2; i < 1000; i++) {
+    const candidate = `${UNTITLED_NAME} ${i}`;
+    if (!taken.has(candidate.toLowerCase())) return candidate;
+  }
+  return `${UNTITLED_NAME} ${Date.now()}`;
+}
+
+/* 正文首个非空行 → 文件名（跳过 front matter，去掉 markdown 记号与文件系统非法字符） */
+function titleFromContent(content) {
+  const { body } = parseFrontMatter(String(content || ""));
+  const line = body
+    .split("\n")
+    .map((l) => l.trim())
+    .find((l) => l && l !== "---");
+  if (!line) return "";
+  return line
+    .replace(/^#{1,6}\s*/, "")
+    .replace(/^[-*+>]\s*/, "")
+    .replace(/[\\/:*?"<>|]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 60);
+}
+
+async function createBlankNote(folder = "") {
+  try {
+    const note = await invoke("create_note", { folder, title: uniqueUntitledName(folder) });
+    if (folder) state.expanded.add(folder);
+    await loadTree(false);
+    await loadNote(note.path);
+    if (state.activePath !== note.path) return;
+    state.autoTitlePath = note.path;
+    await openBlankEditor();
+  } catch (err) {
+    showToast(String(err));
+  }
+}
+
+/* 新笔记直接落在空白页第一行：不留占位标题，也不用先想名字 */
+async function openBlankEditor() {
+  if (!state.editMode) await setEditMode(true, { line: 0 });
+  const cm = state.editor;
+  if (!cm) return;
+  if (cm.getValue() !== "") cm.setValue("");
+  cm.setCursor({ line: 0, ch: 0 });
+  cm.focus();
+  syncEditorPlaceholder();
+}
+
 async function createNote() {
   const folder = state.activePath ? parentFolder(state.activePath) : "";
-  const title = await showDialog("新建笔记", "无标题");
-  if (!title) return;
-  await createNoteWithTitle(title, folder);
+  await createBlankNote(folder);
+}
+
+/* 自动保存后把占位名换成首行标题；重名等冲突静默跳过，下次输入再试 */
+async function maybeAutoTitle(savedPath) {
+  if (!state.autoTitlePath || state.autoTitlePath !== savedPath) return;
+  if (state.activeNote?.path !== savedPath) return;
+  const ext = extOf(state.activeNote.name);
+  const title = titleFromContent(state.editor ? state.editor.getValue() : state.activeNote.content);
+  if (!title || title === UNTITLED_NAME) return;
+  const newName = ext ? `${title}.${ext}` : title;
+  if (newName === state.activeNote.name) return;
+  try {
+    const newPath = await invoke("rename_entry", { path: savedPath, name: newName });
+    state.activePath = newPath;
+    state.activeNote = { ...state.activeNote, path: newPath, name: newName };
+    state.autoTitlePath = newPath;
+    mapTabPaths((p) => (p === savedPath ? newPath : p));
+    const scroll = state.tabScroll.get(savedPath);
+    if (scroll != null) {
+      state.tabScroll.delete(savedPath);
+      state.tabScroll.set(newPath, scroll);
+    }
+    renderNoteMeta();
+    try { localStorage.setItem(LAST_FILE_KEY, newPath); } catch {}
+  } catch {
+    /* 同名文件已存在等情况：保留占位名 */
+  }
 }
 
 async function deleteActiveNote() {
@@ -2934,6 +3151,11 @@ function renderGitMainPane(st, files, initialized, synced) {
       : synced
         ? "已是最新版本"
         : `${files.length} 篇笔记待同步`;
+  // 分支、云端状态、上次同步合成一行副标题，底部只留操作
+  const subParts = [];
+  if (st?.behind > 0) subParts.push("云端有新更新");
+  if (st?.branch) subParts.push(st.branch);
+  if (st?.lastSync) subParts.push(`上次同步 ${formatLastSync(st.lastSync)}`);
 
   return `
     <div class="gitStatusBar">
@@ -2941,10 +3163,13 @@ function renderGitMainPane(st, files, initialized, synced) {
         <span class="gitStatusDot ${synced ? "gitStatusDotSynced" : ""} ${state.gitBusy ? "gitStatusDotPulsing" : ""}"></span>
         <div class="gitStatusText">
           <div class="gitStatusLabel">${escapeHtml(statusLabel)}</div>
-          <div class="gitStatusSubLabel">${st?.behind > 0 ? "云端有新更新" : st?.branch ? escapeHtml(st.branch) : ""}</div>
+          <div class="gitStatusSubLabel">${escapeHtml(subParts.join(" · "))}</div>
         </div>
       </div>
-      <button id="btn-git-refresh-new" class="gitRefresh" type="button" title="重新检查" ${state.gitBusy ? "disabled" : ""}>↻</button>
+      <div class="gitHeaderActions">
+        ${initialized ? `<button id="btn-git-history-new" class="gitHistoryBtn" type="button">版本记录</button>` : ""}
+        <button id="btn-git-refresh-new" class="gitRefresh" type="button" title="重新检查" aria-label="重新检查" ${state.gitBusy ? "disabled" : ""}>↻</button>
+      </div>
     </div>
     <div class="gitFileListContainer">${renderGitFileList(st, files, initialized, synced)}</div>
     ${state.gitFeedback ? `<div class="gitFeedback ${state.gitFeedbackError ? "gitFeedbackError" : ""}">${escapeHtml(state.gitFeedback)}</div>` : ""}
@@ -2955,10 +3180,6 @@ function renderGitMainPane(st, files, initialized, synced) {
           <button id="btn-git-sync-new" class="gitButton gitButtonPrimary gitButtonFull ${synced ? "gitButtonDisabled" : ""}" type="button" ${state.gitBusy || synced ? "disabled" : ""}>
             ${state.gitBusy ? `<span class="gitSpinner"></span><span>智能同步中...</span>` : synced ? "<span>已同步到最新</span>" : "<span>立即同步到云端</span>"}
           </button>
-          <div class="gitSecondaryRow">
-            <button id="btn-git-history-new" class="gitHistoryBtn" type="button">版本记录</button>
-            ${st?.lastSync ? `<span class="gitStatusTime">上次同步：${escapeHtml(formatLastSync(st.lastSync))}</span>` : ""}
-          </div>
         ` : `<button id="btn-git-init-new" class="gitButton gitButtonPrimary gitButtonFull" type="button" ${state.gitBusy ? "disabled" : ""}>初始化同步仓库</button>`}
       </div>
     </div>`;
@@ -2986,6 +3207,7 @@ function renderGitFileItem(file) {
             ${parent ? `<span class="gitFilePath">${escapeHtml(parent)}</span>` : ""}
           </span>` : ""}
         </div>
+        <span class="gitFileState">${escapeHtml(gitStateLabel(file.state, file.kind))}</span>
         <div class="gitHoverActions">
           ${file.state !== "deleted" && file.kind !== "folder" ? `<button class="gitCircleBtn" type="button" data-action="open" data-path="${escapeHtml(file.path)}" title="打开文件"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/></svg></button>` : ""}
           <button class="gitCircleBtn gitCircleBtnDanger" type="button" data-action="confirm-discard" data-path="${escapeHtml(file.path)}" title="还原">↩</button>
@@ -3573,6 +3795,31 @@ function initKeyboard() {
   document.addEventListener("keydown", (e) => {
     const isMac = navigator.platform.includes("Mac");
     const mod = isMac ? e.metaKey : e.ctrlKey;
+    const activeElement = document.activeElement;
+    const isTyping = activeElement?.matches?.("input, textarea, select, [contenteditable='true']");
+
+    if (
+      !mod &&
+      !e.altKey &&
+      !e.shiftKey &&
+      !isTyping &&
+      (e.key === "ArrowLeft" || e.key === "ArrowRight") &&
+      isImageExt(state.activeNote?.extension) &&
+      qs("dialog-overlay").hidden &&
+      !state.gitQuickOpen &&
+      !state.outlineOpen &&
+      !state.gitWorkspaceOpen &&
+      !quickOpenEl
+    ) {
+      const direction = e.key === "ArrowLeft" ? "previous" : "next";
+      const navigation = imageViewerNavigation(state.activePath);
+      const target = direction === "previous" ? navigation.previous : navigation.next;
+      if (target) {
+        e.preventDefault();
+        void navigateImageViewer(direction);
+        return;
+      }
+    }
 
     if (mod && e.key === "s") {
       e.preventDefault();
