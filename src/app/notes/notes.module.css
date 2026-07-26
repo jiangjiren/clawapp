@@ -6216,3 +6216,65 @@
 .undoToastButton:hover {
   background: var(--notes-accent-bg);
 }
+
+/* ── 文件类型图标 ─────────────────────────────── */
+
+/* 文件类型色（低饱和，仅用于文件树图标与角标）。挂在 .shell 上而不是
+   globals.css，避免这套只服务文件树的变量外溢到全站 */
+.shell {
+  --file-image: #3f9a5e;
+  --file-code: #7c58d3;
+  --file-pdf: #cc4b3a;
+  --file-sheet: #2f8f6f;
+  --file-audio: #c4521c;
+  --file-video: #4a6fd0;
+  --file-archive: #8a7a44;
+}
+
+@media (prefers-color-scheme: dark) {
+  .shell {
+    --file-image: #56c07d;
+    --file-code: #a78bfa;
+    --file-pdf: #f0857a;
+    --file-sheet: #4fc0a0;
+    --file-audio: #e08a4a;
+    --file-video: #7ea2ff;
+    --file-archive: #c9b871;
+  }
+}
+
+/* 笔记与未知类型保持中性，不与内容抢注意力 */
+.fileIconNote,
+.fileIconDoc { color: var(--notes-text-muted); }
+.fileIconImage { color: var(--file-image); }
+.fileIconCode { color: var(--file-code); }
+.fileIconPdf { color: var(--file-pdf); }
+.fileIconSheet { color: var(--file-sheet); }
+.fileIconAudio { color: var(--file-audio); }
+.fileIconVideo { color: var(--file-video); }
+.fileIconArchive { color: var(--file-archive); }
+
+.treeFileActive .fileDot { color: #ffffff; }
+
+/* 角标与图标同色，一行里只出现一种色相 */
+.fileBadgeNote,
+.fileBadgeDoc,
+.fileBadgeImage,
+.fileBadgeCode,
+.fileBadgePdf,
+.fileBadgeSheet,
+.fileBadgeAudio,
+.fileBadgeVideo,
+.fileBadgeArchive {
+  color: var(--notes-text-muted);
+  border-color: color-mix(in srgb, currentColor 26%, transparent);
+  background: color-mix(in srgb, currentColor 9%, transparent);
+}
+
+.fileBadgeImage { color: var(--file-image); }
+.fileBadgeCode { color: var(--file-code); }
+.fileBadgePdf { color: var(--file-pdf); }
+.fileBadgeSheet { color: var(--file-sheet); }
+.fileBadgeAudio { color: var(--file-audio); }
+.fileBadgeVideo { color: var(--file-video); }
+.fileBadgeArchive { color: var(--file-archive); }

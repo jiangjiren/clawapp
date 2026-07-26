@@ -1,9 +1,121 @@
 "use client";
 
-import { memo, useEffect, useRef, type CSSProperties } from "react";
+import { memo, useEffect, useRef, type CSSProperties, type ReactNode } from "react";
 import type { NotesTreeNode } from "@/lib/notesTypes";
-import { isImagePath, isPdfPath, stripNoteExtension, type TreeActionTarget } from "./noteFileUtils";
+import {
+  fileExtensionOf,
+  fileKindOf,
+  isImagePath,
+  isPdfPath,
+  stripNoteExtension,
+  type FileKind,
+  type TreeActionTarget,
+} from "./noteFileUtils";
 import styles from "./notes.module.css";
+
+// 文件类型图标：形状先辨认，颜色只做二次提示（与桌面端同一套图形）
+const FILE_KIND_SHAPES: Record<FileKind, ReactNode> = {
+  doc: (
+    <>
+      <path d="M3 1h6l3 3v9H3V1z" />
+      <path d="M9 1v3h3" />
+    </>
+  ),
+  note: (
+    <>
+      <path d="M3 1h6l3 3v9H3V1z" />
+      <path d="M9 1v3h3" />
+      <path d="M5 8h4M5 10.5h2.5" />
+    </>
+  ),
+  image: (
+    <>
+      <rect x="1.5" y="2.5" width="11" height="9" rx="1.5" />
+      <circle cx="5" cy="5.75" r="0.9" />
+      <path d="M2.2 10.2l2.8-2.8 2.4 2.4 1.8-1.8 2.6 2.6" />
+    </>
+  ),
+  code: (
+    <>
+      <polyline points="4.5,3.8 1.6,7 4.5,10.2" />
+      <polyline points="9.5,3.8 12.4,7 9.5,10.2" />
+    </>
+  ),
+  pdf: (
+    <>
+      <path d="M2 2.5h4a1.8 1.8 0 0 1 1.8 1.8v7.2a1.4 1.4 0 0 0-1.4-1.4H2V2.5z" />
+      <path d="M12 2.5H8a1.8 1.8 0 0 0-1.8 1.8v7.2a1.4 1.4 0 0 1 1.4-1.4H12V2.5z" />
+    </>
+  ),
+  sheet: (
+    <>
+      <rect x="1.5" y="2.5" width="11" height="9" rx="1.5" />
+      <path d="M1.5 5.6h11M5.4 5.6v5.9" />
+    </>
+  ),
+  audio: (
+    <>
+      <path d="M5.6 9.4V3.3l6-1.1v6" />
+      <circle cx="4.1" cy="9.9" r="1.6" />
+      <circle cx="10.1" cy="8.8" r="1.6" />
+    </>
+  ),
+  video: (
+    <>
+      <rect x="1.5" y="3" width="11" height="8" rx="1.5" />
+      <path d="M6 5.7l3.1 1.9L6 9.5V5.7z" />
+    </>
+  ),
+  archive: (
+    <>
+      <path d="M1.5 5h11v6.5a0.8 0.8 0 0 1-0.8 0.8H2.3a0.8 0.8 0 0 1-0.8-0.8V5z" />
+      <path d="M2.6 2.2h8.8L12.5 5h-11L2.6 2.2z" />
+      <path d="M6 7.6h2" />
+    </>
+  ),
+};
+
+const FILE_KIND_ICON_CLASS: Record<FileKind, string> = {
+  doc: styles.fileIconDoc,
+  note: styles.fileIconNote,
+  image: styles.fileIconImage,
+  code: styles.fileIconCode,
+  pdf: styles.fileIconPdf,
+  sheet: styles.fileIconSheet,
+  audio: styles.fileIconAudio,
+  video: styles.fileIconVideo,
+  archive: styles.fileIconArchive,
+};
+
+const FILE_KIND_BADGE_CLASS: Record<FileKind, string> = {
+  doc: styles.fileBadgeDoc,
+  note: styles.fileBadgeNote,
+  image: styles.fileBadgeImage,
+  code: styles.fileBadgeCode,
+  pdf: styles.fileBadgePdf,
+  sheet: styles.fileBadgeSheet,
+  audio: styles.fileBadgeAudio,
+  video: styles.fileBadgeVideo,
+  archive: styles.fileBadgeArchive,
+};
+
+function FileKindIcon({ kind }: { kind: FileKind }) {
+  return (
+    <svg
+      className={`${styles.fileDot} ${FILE_KIND_ICON_CLASS[kind]}`}
+      viewBox="0 0 14 14"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      style={{ width: "13px", height: "13px" }}
+    >
+      {FILE_KIND_SHAPES[kind]}
+    </svg>
+  );
+}
 
 function TreeActionMenu({
   target,
@@ -106,10 +218,11 @@ function TreeItem({
 
   if (node.type === "file") {
     const isActive = node.path === activePath;
-    const isHtml = /\.html?$/i.test(node.name);
-    const isPdf = /\.pdf$/i.test(node.name);
-    const isImg = isImagePath(node.name);
-    const ext = isImg ? node.name.split(".").pop()?.toLowerCase() : null;
+    const ext = fileExtensionOf(node.name);
+    const kind = fileKindOf(ext);
+    // md 是默认格式，不加角标；其余扩展名统一「标题 + 角标」，不在标题里重复
+    const showBadge = ext !== "" && ext !== "md";
+    const label = showBadge ? node.name.replace(/\.[^.]+$/, "") : stripNoteExtension(node.name);
     const fileExt = node.name.match(/\.[^.]+$/)?.[0] ?? "";
     const target: TreeActionTarget = { kind: "file", name: node.name, path: node.path };
     return (
@@ -125,10 +238,7 @@ function TreeItem({
         {isRenaming ? (
           <>
             <div className={styles.treeRenameWrap}>
-              <svg className={styles.fileDot} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ width: "13px", height: "13px" }}>
-                <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z" />
-                <polyline points="14 2 14 8 20 8" />
-              </svg>
+              <FileKindIcon kind={kind} />
               <input
                 ref={inlineInputRef}
                 className={styles.treeRenameInput}
@@ -155,14 +265,11 @@ function TreeItem({
               onClick={() => onSelect(node.path)}
               title={node.path}
             >
-              <svg className={styles.fileDot} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ width: "13px", height: "13px" }}>
-                <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z" />
-                <polyline points="14 2 14 8 20 8" />
-              </svg>
-              <span className={styles.treeLabel}>{isImg ? node.name.replace(/\.[^.]+$/, "") : isPdf ? node.name.replace(/\.pdf$/i, "") : stripNoteExtension(node.name)}</span>
-              {isHtml ? <span className={styles.fileTypeBadge}>html</span> : null}
-              {isPdf ? <span className={styles.fileTypeBadge}>pdf</span> : null}
-              {isImg ? <span className={styles.fileTypeBadge}>{ext}</span> : null}
+              <FileKindIcon kind={kind} />
+              <span className={styles.treeLabel}>{label}</span>
+              {showBadge ? (
+                <span className={`${styles.fileTypeBadge} ${FILE_KIND_BADGE_CLASS[kind]}`}>{ext}</span>
+              ) : null}
             </button>
             <button
               type="button"
