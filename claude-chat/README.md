@@ -105,6 +105,8 @@ The chat agent receives scheduler tools when the request looks like a reminder o
 
 Cron time zones are stored per job and default to `Asia/Shanghai`. One-off times use a future Unix timestamp in milliseconds. Schedules, state, and run logs live in `CLAUDE_CHAT_DATA_DIR`.
 
+WeChat conversations and scheduled jobs start with `claude-sonnet-5`. If that model is unavailable because it was removed, renamed, or requires unavailable usage credits, the service rebuilds a fallback chain from the currently configured provider profiles and model fields for that run. Codex candidates are skipped only for WeChat requests that need the in-process scheduler tools, because the Codex SDK cannot receive that ephemeral MCP server.
+
 At present, WeChat is the only registered external delivery adapter. References in source comments to Feishu or Telegram are extension points, not implemented channels.
 
 ## WeChat Connection

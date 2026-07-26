@@ -3,6 +3,8 @@ import { join } from "node:path";
 import crypto from "node:crypto";
 import cron from "node-cron";
 import { query } from "@anthropic-ai/claude-agent-sdk";
+import { Codex } from "@openai/codex-sdk";
+import { buildModelCandidates, runWithModelFallback } from "./model-fallback.js";
 
 // Injected server context
 let ctx = null;
@@ -379,9 +381,27 @@ async function _runAgent(job) {
     fullPrompt += `\n\n请将任务结果以追加方式写入笔记：${job.notePath}，在文件末尾添加分隔线和日期标题后写入内容。`;
   }
 
-  const profileData = ctx.readProfiles();
-  const agentEnv = ctx.buildAgentEnv(profileData, "medium", null);
   const cwd = ctx.resolveAllowedCwd("");
+  const profileData = ctx.readProfiles();
+  const candidates = buildModelCandidates(profileData);
+  const ac = new AbortController();
+  const timeout = setTimeout(() => ac.abort(), 5 * 60 * 1000);
+  try {
+    return await runWithModelFallback(
+      candidates,
+      candidate => candidate.provider === "codex"
+        ? _runCodexCandidate(candidate, fullPrompt, cwd, ac.signal)
+        : _runClaudeCandidate(candidate, profileData, fullPrompt, cwd, ac),
+      { logPrefix: `Scheduler ${job.id.slice(0, 8)}` },
+    );
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function _runClaudeCandidate(candidate, profileData, fullPrompt, cwd, abortController) {
+  const candidateProfiles = { ...profileData, activeProfileId: candidate.profileId };
+  const agentEnv = ctx.buildAgentEnv(candidateProfiles, "medium", candidate.model);
   agentEnv.PWD = cwd;
 
   const userMsg = {
@@ -390,36 +410,46 @@ async function _runAgent(job) {
     parent_tool_use_id: null,
   };
 
-  const ac = new AbortController();
-  const timeout = setTimeout(() => ac.abort(), 5 * 60 * 1000);
-
   let finalResult = "";
-  try {
-    for await (const ev of query({
-      prompt: (async function* () { yield userMsg; })(),
-      options: {
-        cwd,
-        permissionMode: "bypassPermissions",
-        allowDangerouslySkipPermissions: true,
-        includePartialMessages: false,
-        env: agentEnv,
-        abortController: ac,
-      },
-    })) {
-      if (ev.type === "assistant") {
-        const text = (ev.message?.content || ev.content || [])
-          .filter(b => b.type === "text").map(b => b.text).join("");
-        if (text) finalResult = text;
-      }
-      if (ev.type === "result" && ev.subtype === "success" && ev.result) {
-        finalResult = ev.result;
-      }
+  for await (const ev of query({
+    prompt: (async function* () { yield userMsg; })(),
+    options: {
+      cwd,
+      permissionMode: "bypassPermissions",
+      allowDangerouslySkipPermissions: true,
+      includePartialMessages: false,
+      env: agentEnv,
+      abortController,
+      ...(candidate.provider === "claude" ? { model: candidate.model } : {}),
+    },
+  })) {
+    if (ev.type === "assistant") {
+      const text = (ev.message?.content || ev.content || [])
+        .filter(b => b.type === "text").map(b => b.text).join("");
+      if (text) finalResult = text;
     }
-  } finally {
-    clearTimeout(timeout);
+    if (ev.type === "result" && ev.subtype === "success" && ev.result) {
+      finalResult = ev.result;
+    }
   }
 
   return finalResult;
+}
+
+async function _runCodexCandidate(candidate, fullPrompt, cwd, signal) {
+  const codex = new Codex();
+  const thread = codex.startThread({
+    workingDirectory: cwd,
+    skipGitRepoCheck: true,
+    approvalPolicy: "never",
+    sandboxMode: "danger-full-access",
+    modelReasoningEffort: "medium",
+    model: candidate.model,
+    networkAccessEnabled: true,
+    webSearchMode: "live",
+  });
+  const result = await thread.run(fullPrompt, { signal });
+  return result.finalResponse || "";
 }
 
 function _injectChatHistory(job, result) {

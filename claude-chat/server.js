@@ -12,6 +12,7 @@ import { WebSocketServer } from "ws";
 import { query, tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk";
 import { Codex } from "@openai/codex-sdk";
 import * as scheduler from "./scheduler.js";
+import { buildModelCandidates, runWithModelFallback } from "./model-fallback.js";
 import { z } from "zod";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -1709,6 +1710,162 @@ function _buildSchedulerMcpServer({ sourceChannel, sourcePeer, defaultOutputs = 
   });
 }
 
+async function runWechatClaudeCandidate({
+  candidate,
+  profileData,
+  fullPrompt,
+  mediaFiles,
+  wechatCwd,
+  abortSignal,
+  extraMcpServers,
+  wechatSystemPrompt,
+  hasScheduler,
+}) {
+  const candidateProfiles = { ...profileData, activeProfileId: candidate.profileId };
+  const agentEnv = buildAgentEnv(candidateProfiles, "medium", candidate.model);
+  agentEnv.PWD = wechatCwd;
+  const agentUserContent = buildWechatUserContent(fullPrompt, mediaFiles, {
+    includeImageBlocks: candidate.provider !== "deepseek",
+  });
+  const userMsg = {
+    type: "user",
+    message: { role: "user", content: agentUserContent },
+    parent_tool_use_id: null,
+  };
+  const queryAbortController = new AbortController();
+  let stallTimer = null;
+  let toolRunning = false;
+  let stalled = false;
+  let finalResponse = "";
+  const onAbort = () => queryAbortController.abort();
+  const resetStall = () => {
+    clearTimeout(stallTimer);
+    if (toolRunning) return;
+    stallTimer = setTimeout(() => {
+      stalled = true;
+      queryAbortController.abort();
+    }, STREAM_STALL_MS);
+  };
+
+  if (abortSignal.aborted) queryAbortController.abort();
+  else abortSignal.addEventListener("abort", onAbort, { once: true });
+
+  try {
+    const generator = query({
+      prompt: (async function* () { yield userMsg; })(),
+      options: {
+        cwd: wechatCwd,
+        permissionMode: "auto",
+        allowDangerouslySkipPermissions: true,
+        includePartialMessages: false,
+        env: agentEnv,
+        abortController: queryAbortController,
+        mcpServers: extraMcpServers,
+        systemPrompt: { type: "preset", preset: "claude_code", append: wechatSystemPrompt },
+        ...(candidate.provider === "claude" ? { model: candidate.model } : {}),
+        ...(hasScheduler ? { disallowedTools: ["Bash"] } : {}),
+      },
+    });
+    resetStall();
+    for await (const ev of generator) {
+      if (ev.type === "assistant") {
+        const blocks = ev.message?.content || ev.content || [];
+        if (Array.isArray(blocks) && blocks.some(block => block?.type === "tool_use")) toolRunning = true;
+      } else if (ev.type === "user") {
+        toolRunning = false;
+      }
+      resetStall();
+      if (ev.type === "assistant") {
+        const text = (ev.message?.content || ev.content || [])
+          .filter(block => block.type === "text").map(block => block.text).join("");
+        if (text) finalResponse = text;
+      }
+      if (ev.type === "result" && ev.subtype === "success" && ev.result) finalResponse = ev.result;
+    }
+    return finalResponse;
+  } catch (error) {
+    if (stalled && error?.name === "AbortError") {
+      const stallError = new Error("AI 响应超时，请稍后重试。", { cause: error });
+      stallError.code = "WECHAT_STALL_TIMEOUT";
+      throw stallError;
+    }
+    throw error;
+  } finally {
+    clearTimeout(stallTimer);
+    abortSignal.removeEventListener("abort", onAbort);
+  }
+}
+
+async function runWechatCodexCandidate({ candidate, fullPrompt, mediaFiles, wechatCwd, abortSignal, wechatSystemPrompt }) {
+  const codex = new Codex();
+  const thread = codex.startThread({
+    workingDirectory: wechatCwd,
+    skipGitRepoCheck: true,
+    approvalPolicy: "never",
+    sandboxMode: "workspace-write",
+    modelReasoningEffort: "medium",
+    model: candidate.model,
+    networkAccessEnabled: true,
+    webSearchMode: "live",
+  });
+  const controller = new AbortController();
+  let timedOut = false;
+  let toolRunning = false;
+  let stallTimer = null;
+  const onAbort = () => controller.abort();
+  const resetStall = () => {
+    clearTimeout(stallTimer);
+    if (toolRunning) return;
+    stallTimer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, STREAM_STALL_MS);
+  };
+  if (abortSignal.aborted) controller.abort();
+  else abortSignal.addEventListener("abort", onAbort, { once: true });
+
+  const attachmentSummary = formatWechatMediaSummary(mediaFiles);
+  const text = `${wechatSystemPrompt}\n\n${fullPrompt}${attachmentSummary ? `\n\n附件：\n${attachmentSummary}` : ""}`;
+  const images = mediaFiles
+    .filter(file => file.kind === "image" && file.filePath)
+    .map(file => ({ type: "local_image", path: file.filePath }));
+  const input = images.length > 0 ? [...images, { type: "text", text }] : text;
+
+  try {
+    const codexToolItems = new Set(["command_execution", "mcp_tool_call", "web_search", "file_change"]);
+    const { events } = await thread.runStreamed(input, { signal: controller.signal });
+    let finalResponse = "";
+    resetStall();
+    for await (const event of events) {
+      if (event.type === "item.started" && codexToolItems.has(event.item?.type)) {
+        toolRunning = true;
+        clearTimeout(stallTimer);
+      } else if (event.type === "item.completed" && codexToolItems.has(event.item?.type)) {
+        toolRunning = false;
+      }
+      resetStall();
+      if (event.type === "item.completed" && event.item?.type === "agent_message") {
+        finalResponse = codexItemText(event.item) || finalResponse;
+      } else if (event.type === "turn.failed") {
+        throw new Error(event.error?.message || "Codex 请求失败");
+      } else if (event.type === "error") {
+        throw new Error(event.message || "Codex 请求失败");
+      }
+    }
+    return finalResponse;
+  } catch (error) {
+    if (timedOut && error?.name === "AbortError") {
+      const stallError = new Error("AI 响应超时，请稍后重试。", { cause: error });
+      stallError.code = "WECHAT_STALL_TIMEOUT";
+      throw stallError;
+    }
+    throw error;
+  } finally {
+    clearTimeout(stallTimer);
+    abortSignal.removeEventListener("abort", onAbort);
+  }
+}
+
 async function processWechatQuery(baseUrl, token, sender, prompt, contextToken, abortSignal, mediaFiles = []) {
   console.log(`[WeChat Agent] processWechatQuery starting for ${sender}...`);
   try {
@@ -1725,7 +1882,6 @@ async function processWechatQuery(baseUrl, token, sender, prompt, contextToken, 
     const history = (!isExpired && sessionEntry?.turns) ? sessionEntry.turns : [];
 
     const hasScheduler = hasSchedulerIntent(prompt);
-    const includeImageBlocks = active?.provider !== "deepseek";
     const historyPrompt = summarizeWechatHistoryPrompt(prompt, mediaFiles);
     const wechatSystemPrompt = hasScheduler
       ? `${WECHAT_OUTPUT_PROMPT}\n\n${INKFELLOW_SCHEDULER_PROMPT}`
@@ -1736,79 +1892,42 @@ async function processWechatQuery(baseUrl, token, sender, prompt, contextToken, 
     }, 6000);
 
     let finalResponse = "";
-    let wechatStallTimer = null;
-    let isWechatStall = false;
     try {
-      // 微信对话必须和网页 AI 面板一致走 Agent SDK query()。buildAgentEnv 会把
-      // Anthropic/DeepSeek/OpenRouter/custom profile 转成 Claude Code 兼容环境变量。
-      const agentEnv = buildAgentEnv(profileData, "medium", null);
       const wechatCwd = resolveAllowedCwd("");
-      agentEnv.PWD = wechatCwd; // 工作目录与实际 cwd 一致，避免误报为启动目录
       let fullPrompt = prompt;
       if (history.length > 0) {
         const historyText = history.map(t => `${t.role === "user" ? "用户" : "助手"}：${t.content}`).join("\n");
         fullPrompt = `以下是本次对话的历史记录：\n${historyText}\n\n用户：${prompt}`;
       }
-      const agentUserContent = buildWechatUserContent(fullPrompt, mediaFiles, { includeImageBlocks });
       const extraMcpServers = hasScheduler
         ? { scheduler: _buildSchedulerMcpServer({ sourceChannel: "wechat", sourcePeer: sender }) }
         : {};
-      console.log(`[WeChat Agent] query() via Agent SDK (cwd: ${wechatCwd}, history: ${history.length} turns, scheduler: ${hasScheduler})`);
-      const userMsg = {
-        type: "user",
-        message: { role: "user", content: agentUserContent },
-        parent_tool_use_id: null,
-      };
-      const queryAbortController = new AbortController();
-      let wechatToolRunning = false; // 工具执行期间 SDK 静默是正常的，不计入 stall
-      const resetWechatStall = () => {
-        clearTimeout(wechatStallTimer);
-        if (wechatToolRunning) return;
-        wechatStallTimer = setTimeout(() => {
-          isWechatStall = true;
-          queryAbortController.abort();
-        }, STREAM_STALL_MS);
-      };
-      if (abortSignal.aborted) {
-        queryAbortController.abort();
-      } else {
-        abortSignal.addEventListener("abort", () => queryAbortController.abort(), { once: true });
-      }
-      const generator = query({
-        prompt: (async function* () { yield userMsg; })(),
-        options: {
-          cwd: wechatCwd,
-          permissionMode: "auto",
-          allowDangerouslySkipPermissions: true,
-          includePartialMessages: false,
-          env: agentEnv,
-          abortController: queryAbortController,
-          mcpServers: extraMcpServers,
-          systemPrompt: { type: "preset", preset: "claude_code", append: wechatSystemPrompt },
-          ...(hasScheduler ? {
-            disallowedTools: ["Bash"],
-          } : {}),
-        },
+      // Codex SDK 目前不能注入这个进程内的 scheduler MCP，涉及定时任务时跳过 Codex，
+      // 其余场景仍可按动态配置把它作为 fallback。
+      const candidates = buildModelCandidates(profileData, {
+        excludedProviders: hasScheduler ? ["codex"] : [],
       });
-      resetWechatStall();
-      for await (const ev of generator) {
-        if (ev.type === "assistant") {
-          const blocks = ev.message?.content || ev.content || [];
-          if (Array.isArray(blocks) && blocks.some(b => b?.type === "tool_use")) wechatToolRunning = true;
-        } else if (ev.type === "user") {
-          wechatToolRunning = false; // tool_result 回来，恢复计时
-        }
-        resetWechatStall();
-        if (ev.type === "assistant") {
-          const text = (ev.message?.content || ev.content || []).filter(b => b.type === "text").map(b => b.text).join("");
-          if (text) finalResponse = text;
-        }
-        if (ev.type === "result" && ev.subtype === "success" && ev.result) finalResponse = ev.result;
-      }
-      clearTimeout(wechatStallTimer);
+      console.log(`[WeChat Agent] model chain: ${candidates.map(candidate => `${candidate.profileName}/${candidate.model}`).join(" -> ")}`);
+      finalResponse = await runWithModelFallback(
+        candidates,
+        candidate => candidate.provider === "codex"
+          ? runWechatCodexCandidate({ candidate, fullPrompt, mediaFiles, wechatCwd, abortSignal, wechatSystemPrompt })
+          : runWechatClaudeCandidate({
+            candidate,
+            profileData,
+            fullPrompt,
+            mediaFiles,
+            wechatCwd,
+            abortSignal,
+            extraMcpServers,
+            wechatSystemPrompt,
+            hasScheduler,
+          }),
+        { logPrefix: "WeChat Agent" },
+      );
     } catch (err) {
       if (abortSignal.aborted) { console.warn(`[WeChat Agent] Aborted.`); return; }
-      if (err?.name === "AbortError" && isWechatStall) {
+      if (err?.code === "WECHAT_STALL_TIMEOUT") {
         console.warn("[WeChat Agent] Stream stalled, timed out after 3 min.");
         finalResponse = "⚠️ AI 响应超时，请稍后重试。";
       } else {
@@ -1816,7 +1935,6 @@ async function processWechatQuery(baseUrl, token, sender, prompt, contextToken, 
         finalResponse = `⚠️ 助手发生错误: ${err.message}`;
       }
     } finally {
-      clearTimeout(wechatStallTimer);
       clearInterval(typingInterval);
       await sendWechatTyping(baseUrl, token, sender, 2, contextToken);
     }
