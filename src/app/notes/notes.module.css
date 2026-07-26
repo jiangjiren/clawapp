@@ -6362,5 +6362,119 @@
 
   .gitFileListContainer {
     padding: 0 14px 4px;
+/* ── 图片翻页 ─────────────────────────────────────── */
+/* 悬浮在图片左右两侧，同目录内按文件树顺序上一张/下一张 */
+.imageViewerNav {
+  position: absolute;
+  top: 50%;
+  z-index: 2;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 50%;
+  background: rgba(250, 250, 252, 0.8);
+  color: rgba(29, 29, 31, 0.82);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08), 0 8px 24px rgba(0, 0, 0, 0.1);
+  opacity: 0.78;
+  cursor: pointer;
+  line-height: 0;
+  transform: translateY(-50%);
+  backdrop-filter: blur(18px) saturate(160%);
+  -webkit-backdrop-filter: blur(18px) saturate(160%);
+  transition: opacity 180ms ease, color 180ms ease, background-color 180ms ease, box-shadow 180ms ease;
+}
+
+.imageViewerNav:hover {
+  background: rgba(255, 255, 255, 0.94);
+  color: #1d1d1f;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.1), 0 10px 30px rgba(0, 0, 0, 0.14);
+  opacity: 1;
+}
+
+.imageViewerNav:focus-visible {
+  outline: 3px solid var(--notes-accent);
+  outline-offset: 3px;
+  opacity: 1;
+}
+
+.imageViewerNavPrev { left: 16px; }
+.imageViewerNavNext { right: 16px; }
+
+/* 位置计数：图片底部居中的小药丸，只有多于一张时才渲染 */
+.imageViewerPosition {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  z-index: 2;
+  transform: translateX(-50%);
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.42);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  user-select: none;
+}
+
+@media (prefers-color-scheme: dark) {
+  .imageViewerNav {
+    border-color: rgba(255, 255, 255, 0.14);
+    background: rgba(40, 40, 43, 0.78);
+    color: rgba(245, 245, 247, 0.86);
+    box-shadow: 0 3px 12px rgba(0, 0, 0, 0.26), 0 12px 30px rgba(0, 0, 0, 0.24);
+  }
+
+  .imageViewerNav:hover {
+    background: rgba(58, 58, 62, 0.94);
+    color: #fff;
+  }
+}
+
+@media (max-width: 900px), (orientation: portrait) {
+  .imageViewerNav {
+    width: 38px;
+    height: 38px;
+  }
+
+  .imageViewerNavPrev { left: 8px; }
+  .imageViewerNavNext { right: 8px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .imageViewerNav {
+    transition: none;
+  }
+}
+
+/* ── 编辑器空态 ───────────────────────────────────── */
+/* 提示语压在首行位置，不参与交互，也不进 CM 文档 */
+/* 40/56 是 .cmContainer 的内边距，再加 CodeMirror 自带的 4px 行内边距才对得上首行 */
+.cmEmpty::before {
+  content: attr(data-placeholder);
+  position: absolute;
+  top: 44px;
+  left: 60px;
+  right: 60px;
+  color: var(--notes-text-muted);
+  font-family: var(--notes-font-sans);
+  font-size: 16px;
+  line-height: 1.75;
+  pointer-events: none;
+  user-select: none;
+}
+
+@media (max-width: 900px), (orientation: portrait) {
+  .cmEmpty::before {
+    top: 28px;
+    left: 22px;
+    right: 22px;
+    font-size: 15px;
   }
 }

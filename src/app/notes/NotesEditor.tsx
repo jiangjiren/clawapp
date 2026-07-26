@@ -24,6 +24,8 @@ interface NotesEditorProps {
   onImagePasted?: () => void;
   /** 粘贴图片失败提示 */
   onImagePasteError?: (message: string) => void;
+  /** 空文档时压在首行的提示语（未命名的新笔记会换成「首行=标题」的说明） */
+  placeholder?: string;
 }
 
 export interface NotesEditorHandle {
@@ -132,7 +134,7 @@ function makeWikiHint(noteNames: string[]) {
 }
 
 const NotesEditor = forwardRef<NotesEditorHandle, NotesEditorProps>(
-  function NotesEditor({ value, onChange, onReady, onExit, noteNames = [], currentPath = null, onImagePasted, onImagePasteError }, ref) {
+  function NotesEditor({ value, onChange, onReady, onExit, noteNames = [], currentPath = null, onImagePasted, onImagePasteError, placeholder = "开始写点什么…" }, ref) {
     const containerRef = useRef<HTMLDivElement>(null);
     const cmRef        = useRef<any>(null);
     const onChangeRef  = useRef(onChange);
@@ -323,7 +325,9 @@ const NotesEditor = forwardRef<NotesEditorHandle, NotesEditorProps>(
     return (
       <div
         ref={containerRef}
-        className={styles.cmContainer}
+        // 空态提示走 CSS ::before，不塞进 CM 文档，避免被当成正文保存
+        className={`${styles.cmContainer} ${value === "" ? styles.cmEmpty : ""}`}
+        data-placeholder={placeholder}
         onMouseDown={handleContainerMouseDown}
       />
     );

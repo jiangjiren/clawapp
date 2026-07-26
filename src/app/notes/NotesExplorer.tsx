@@ -130,6 +130,60 @@ const getAncestorFolders = (filePath: string) => {
   return folders;
 };
 
+// ── 新建免命名：占位名 + 首行自动改名 ─────────────────────
+const UNTITLED_NAME = "无标题";
+
+/** 去掉 YAML front matter：自动命名只看正文，不该把 title: 之类的元数据当首行 */
+const stripFrontMatter = (content: string) => {
+  if (!content.startsWith("---")) return content;
+  const firstNewline = content.indexOf("\n");
+  if (firstNewline === -1) return content;
+  const rest = content.slice(firstNewline + 1);
+  const closing = /^---[ \t]*\r?$/m.exec(rest);
+  if (!closing) return content;
+  const after = rest.slice(closing.index + closing[0].length);
+  return after.startsWith("\n") ? after.slice(1) : after;
+};
+
+/** 正文首个非空行 → 文件名：去掉 markdown 记号与文件系统非法字符，截断 60 字 */
+const titleFromContent = (content: string) => {
+  const line = stripFrontMatter(content)
+    .split("\n")
+    .map((rawLine) => rawLine.trim())
+    .find((rawLine) => rawLine && rawLine !== "---");
+  if (!line) return "";
+  return line
+    .replace(/^#{1,6}\s*/, "")
+    .replace(/^[-*+>]\s*/, "")
+    .replace(/[\\/:*?"<>|]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 60);
+};
+
+/** 同目录内不冲突的占位名：无标题、无标题 2… */
+const uniqueUntitledName = (files: NotesFileNode[], folder: string) => {
+  const taken = new Set(
+    files
+      .filter((file) => getParentFolder(file.path) === folder)
+      .map((file) => file.name.replace(/\.[^./]+$/, "").toLowerCase()),
+  );
+  if (!taken.has(UNTITLED_NAME.toLowerCase())) return UNTITLED_NAME;
+  for (let index = 2; index < 1000; index += 1) {
+    const candidate = `${UNTITLED_NAME} ${index}`;
+    if (!taken.has(candidate.toLowerCase())) return candidate;
+  }
+  return `${UNTITLED_NAME} ${Date.now()}`;
+};
+
+/** 图片查看器翻页队列：只在同一目录内、按文件树顺序 */
+type ImageViewerNavigation = {
+  total: number;
+  index: number;
+  previous: NotesFileNode | null;
+  next: NotesFileNode | null;
+};
+
 const findPreferredInitialFile = (files: NotesFileNode[]) => {
   try {
     const last = window.localStorage.getItem(LAST_FILE_KEY);
@@ -632,6 +686,9 @@ export default function NotesExplorer() {
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [deleteLoading, setDeleteLoading] = useState(false);
   const [newNoteOpen, setNewNoteOpen] = useState(false);
+  // 新建后尚未命名的笔记：文件名跟随正文首行，用户手动改名或切走即退出
+  const [autoTitlePath, setAutoTitlePath] = useState<string | null>(null);
+  const autoTitlePathRef = useRef<string | null>(null);
   const [quickSwitcherOpen, setQuickSwitcherOpen] = useState(false);
   const [newNoteTitle, setNewNoteTitle] = useState("");
   const [newNoteFolder, setNewNoteFolder] = useState("");
@@ -1293,8 +1350,20 @@ export default function NotesExplorer() {
     }
   }, []);
 
+  // ref 与 state 同步：ref 给异步流程读最新值，state 给编辑器空态提示做渲染
+  const setAutoTitleTarget = useCallback((path: string | null) => {
+    autoTitlePathRef.current = path;
+    setAutoTitlePath(path);
+  }, []);
+
   const loadNote = useCallback(
     async (path: string, hash?: string | null, options: LoadNoteOptions = {}) => {
+      // 切到别的笔记就不再自动命名，避免旧笔记在后台被莫名改名。
+      // 只认用户发起的切换：自动改名后 SSE 可能拿着旧路径补一次静默重载，
+      // 那是文件改名的回声，不是用户切走。
+      if (!options.silent && autoTitlePathRef.current && autoTitlePathRef.current !== path) {
+        setAutoTitleTarget(null);
+      }
       // 进入切换窗口：暂停滚动快照写入，直到新内容提交并恢复滚动位置。
       // loading 骨架/内容替换会把 scrollTop 钳制到 0，此时的 scroll 事件
       // 若照常写快照，会把 0 记到旧文件名下，覆盖真实阅读位置。
@@ -1389,7 +1458,7 @@ export default function NotesExplorer() {
         suppressScrollSaveRef.current = false;
       }
     },
-    [getReaderScrollSnapshot, openAncestors, pushNavHistory, restoreReaderScroll],
+    [getReaderScrollSnapshot, openAncestors, pushNavHistory, restoreReaderScroll, setAutoTitleTarget],
   );
 
   const refreshTree = useCallback(async () => {
@@ -1403,6 +1472,73 @@ export default function NotesExplorer() {
     treeRevRef.current = payload.rev;
     return payload;
   }, []);
+
+  // ── 图片查看器翻页 ────────────────────────────────────
+  // 只在同一目录内翻，顺序跟文件树一致，跨目录不串门
+  const imageViewerNav = useMemo<ImageViewerNavigation | null>(() => {
+    if (!activePath || !isImagePath(activePath)) return null;
+    const folder = getParentFolder(activePath).toLowerCase();
+    const items = files.filter(
+      (file) => isImagePath(file.path) && getParentFolder(file.path).toLowerCase() === folder,
+    );
+    const normalized = activePath.toLowerCase();
+    const index = items.findIndex((file) => file.path.toLowerCase() === normalized);
+    return {
+      total: items.length,
+      index,
+      previous: index > 0 ? items[index - 1] : null,
+      next: index >= 0 && index < items.length - 1 ? items[index + 1] : null,
+    };
+  }, [activePath, files]);
+
+  // 连点互斥：上一张还没落定就再按，会让标签映射和 activePath 打架
+  const imageViewerLoadingRef = useRef(false);
+
+  const navigateImageViewer = useCallback(async (direction: "previous" | "next") => {
+    if (imageViewerLoadingRef.current) return;
+    const target = direction === "previous" ? imageViewerNav?.previous : imageViewerNav?.next;
+    if (!target) return;
+    const from = activePathRef.current;
+    imageViewerLoadingRef.current = true;
+    try {
+      // 替换当前标签而不是新开：先把旧路径就地映射掉，标签才不会越翻越多
+      if (from && from !== target.path) mapTabs((path) => (path === from ? target.path : path));
+      await loadNote(target.path);
+    } finally {
+      imageViewerLoadingRef.current = false;
+    }
+  }, [imageViewerNav, loadNote, mapTabs]);
+
+  /** ← / → 翻页：只在图片查看器里生效，输入框内与任何对话框打开时不接管 */
+  useEffect(() => {
+    if (!imageViewerNav) return;
+    if (newNoteOpen || newFolderOpen || quickSwitcherOpen || shareModalOpen) return;
+    if (renameTarget || deleteTarget || treeSheetTarget) return;
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      const target = event.target instanceof HTMLElement ? event.target : null;
+      if (target?.closest("input, textarea, select, [contenteditable='true']")) return;
+      const direction = event.key === "ArrowLeft" ? "previous" : "next";
+      if (!(direction === "previous" ? imageViewerNav.previous : imageViewerNav.next)) return;
+      event.preventDefault();
+      void navigateImageViewer(direction);
+    };
+
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [
+    imageViewerNav,
+    navigateImageViewer,
+    newNoteOpen,
+    newFolderOpen,
+    quickSwitcherOpen,
+    shareModalOpen,
+    renameTarget,
+    deleteTarget,
+    treeSheetTarget,
+  ]);
 
   // ── 选中文字 → 自动发送到 Claude 引用框 ──────────────────────
   const hasReaderSelectionRef = useRef(false);
@@ -1743,6 +1879,60 @@ export default function NotesExplorer() {
     setIsEditing(true);
   }, [note]);
 
+  /**
+   * 保存成功后把占位名换成正文首行。
+   * 改名冲突（重名等）静默跳过，下次保存再试——写标题的过程中弹错比不改名更烦。
+   */
+  const maybeAutoTitle = useCallback(async (savedPath: string, content: string) => {
+    if (!autoTitlePathRef.current || autoTitlePathRef.current !== savedPath) return;
+    if (activePathRef.current !== savedPath) return;
+
+    const title = titleFromContent(content);
+    if (!title || title === UNTITLED_NAME) return;
+    const extension = savedPath.match(/\.[^./]+$/)?.[0] ?? ".md";
+    const nextName = `${title}${extension}`;
+    if (nextName === (savedPath.split("/").pop() ?? "")) return;
+
+    let renamed: { oldPath: string; path: string } | null = null;
+    try {
+      const res = await fetch("/api/notes/file", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "rename", path: savedPath, name: nextName }),
+      });
+      if (res.ok) renamed = (await res.json()) as { oldPath: string; path: string };
+    } catch { /* 网络抖动同样静默跳过 */ }
+    if (!renamed) return;
+    // 请求往返期间用户可能已经切走，这时别把状态改到别的笔记头上
+    if (activePathRef.current !== savedPath) return;
+
+    const { oldPath, path: nextPath } = renamed;
+    activePathRef.current = nextPath;
+    setAutoTitleTarget(nextPath);
+    mapTabs((path) => (path === oldPath ? nextPath : path));
+
+    const snapshot = readStoredScrollSnapshot(oldPath);
+    if (snapshot) {
+      writeStoredScrollSnapshot(nextPath, snapshot);
+      try { window.sessionStorage.removeItem(getNoteScrollStorageKey(oldPath)); } catch { /* ignore */ }
+    }
+
+    // 只是换了文件名，不算「切换笔记」，别把用户踢出编辑态
+    keepEditingOnCommitRef.current = true;
+    setNote((prev) => (prev ? { ...prev, path: nextPath, name: nextName } : prev));
+    setActivePath(nextPath);
+
+    const nextUrl = new URL(window.location.href);
+    nextUrl.searchParams.set("file", nextPath);
+    window.history.replaceState(null, "", nextUrl);
+    try { window.localStorage.setItem(LAST_FILE_KEY, nextPath); } catch { /* ignore */ }
+
+    try {
+      await refreshTree();
+      openAncestors(nextPath);
+    } catch { /* 树刷新失败不影响已经落定的改名 */ }
+  }, [mapTabs, openAncestors, refreshTree, setAutoTitleTarget]);
+
   /** 保存（⌘S 或切换前 flush 时使用） */
   const handleSave = useCallback(async (notePath?: string, content?: string) => {
     const path = notePath ?? activePath;
@@ -1767,7 +1957,8 @@ export default function NotesExplorer() {
     setSavedFlash(true);
     setTimeout(() => setSavedFlash(false), 1600);
     setHasGitChanges(true);
-  }, [activePath, editContent]);
+    await maybeAutoTitle(path, body);
+  }, [activePath, editContent, maybeAutoTitle]);
 
   /** 草稿首次输入 → 真正落盘到 captureFolder，随后转为普通笔记编辑 */
   const createDraftFile = useCallback(async (initialContent: string) => {
@@ -1848,9 +2039,10 @@ export default function NotesExplorer() {
         setSavedFlash(true);
         setTimeout(() => setSavedFlash(false), 1600);
         setHasGitChanges(true);
+        await maybeAutoTitle(path, value);
       } catch { /* 网络错误静默忽略 */ }
     }, 1500);
-  }, [createDraftFile]); // 其余皆 ref / setter，稳定
+  }, [createDraftFile, maybeAutoTitle]); // 其余皆 ref / setter，稳定
 
   /** 切换阅读 / 编辑模式 */
   const handleEditToggle = useCallback(async () => {
@@ -1919,6 +2111,7 @@ export default function NotesExplorer() {
       draftCreatedPathRef.current = null;
       noteUpdatedAtRef.current = null;
       activePathRef.current = null;
+      setAutoTitleTarget(null);
       if (autoSaveTimerRef.current) {
         clearTimeout(autoSaveTimerRef.current);
         autoSaveTimerRef.current = null;
@@ -1936,7 +2129,7 @@ export default function NotesExplorer() {
         setMobileAssistantSheet('closed');
       }
     });
-  }, [flushEditBeforeSwitch, isMobileViewport]);
+  }, [flushEditBeforeSwitch, isMobileViewport, setAutoTitleTarget]);
 
   /** 切换「存到…」目标文件夹，并记忆为下次默认 */
   const handleCaptureFolderChange = useCallback((folder: string) => {
@@ -1964,6 +2157,7 @@ export default function NotesExplorer() {
       activePathRef.current = null;
       noteUpdatedAtRef.current = null;
       pendingHashRef.current = null;
+      setAutoTitleTarget(null);
       setNoteState("ready");
       setGitPanelOpen(false);
       try {
@@ -1978,7 +2172,7 @@ export default function NotesExplorer() {
         setMobileAssistantSheet('closed');
       }
     });
-  }, [flushEditBeforeSwitch, isMobileViewport]);
+  }, [flushEditBeforeSwitch, isMobileViewport, setAutoTitleTarget]);
 
   // 全局 Git 状态轮询 — 为侧边栏底部状态条和移动端 badge 提供数据
   useEffect(() => {
@@ -2026,7 +2220,63 @@ export default function NotesExplorer() {
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [isEditing, handleSave]);
 
-  /** 打开新建笔记对话框，默认目录 = 当前笔记所在目录 */
+  /**
+   * 新建笔记：不弹窗问名字。先落一个同目录内不冲突的占位名，
+   * 正文首行写完后由 maybeAutoTitle 改成真名。
+   */
+  const createBlankNote = useCallback(async (folder?: string) => {
+    const targetFolder = folder ?? (activePathRef.current ? getParentFolder(activePathRef.current) : "");
+    const filePath = targetFolder
+      ? `${targetFolder}/${uniqueUntitledName(files, targetFolder)}.md`
+      : `${uniqueUntitledName(files, targetFolder)}.md`;
+
+    try {
+      await flushEditBeforeSwitch();
+      const res = await fetch("/api/notes/file", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ path: filePath, content: "" }),
+      });
+      if (!res.ok) {
+        const data = (await res.json().catch(() => ({}))) as { error?: string };
+        throw new Error(data.error ?? "创建失败");
+      }
+
+      // 新建会顶掉正在写的草稿态，否则草稿的首字落盘逻辑会打到新笔记上
+      isDraftRef.current = false;
+      draftCreatedPathRef.current = null;
+      setIsDraft(false);
+
+      await refreshTree();
+      // 从别处切过来时 note.path 会变，但这不该退出编辑态——新笔记本来就要直接开写
+      keepEditingOnCommitRef.current = true;
+      await loadNote(filePath);
+      if (activePathRef.current !== filePath) {
+        // 打开失败：别把「保持编辑态」的标记留给下一次真正的切换
+        keepEditingOnCommitRef.current = false;
+        return;
+      }
+
+      setAutoTitleTarget(filePath);
+      setEditContent("");
+      setEditorMinHeight(0);
+      setIsEditing(true);
+      setTimeout(() => editorFocusRef.current?.focus(), 0);
+      if (isMobileViewport) {
+        setMobileSidebarOpen(false);
+        setMobileAssistantSheet("closed");
+      }
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "创建失败");
+    }
+  }, [files, flushEditBeforeSwitch, isMobileViewport, loadNote, refreshTree, setAutoTitleTarget]);
+
+  /** 各处「新建笔记」入口的同步包装（TreeItem 等只接受同步回调） */
+  const handleNewNote = useCallback((folder?: string) => {
+    void createBlankNote(folder);
+  }, [createBlankNote]);
+
+  /** 打开新建笔记对话框（「新建并命名…」），默认目录 = 当前笔记所在目录 */
   const openNewNote = useCallback((folder?: string) => {
     const defaultFolder = folder ?? (activePath ? getParentFolder(activePath) : "");
     setNewNoteFolder(defaultFolder);
@@ -2187,7 +2437,7 @@ export default function NotesExplorer() {
         const tag = (e.target as HTMLElement).tagName;
         if (tag === "INPUT" || tag === "TEXTAREA" || (e.target as HTMLElement).isContentEditable) return;
         e.preventDefault();
-        openNewNote();
+        handleNewNote();
       }
       if (e.key === "Escape" && newNoteOpen) {
         setNewNoteOpen(false);
@@ -2198,7 +2448,7 @@ export default function NotesExplorer() {
     };
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
-  }, [newNoteOpen, newFolderOpen, openNewNote]);
+  }, [newNoteOpen, newFolderOpen, handleNewNote]);
 
   /** ⌘K / Ctrl+K 快速打开（输入框内也生效：这是全局导航，不与文本输入冲突） */
   useEffect(() => {
@@ -2643,6 +2893,11 @@ export default function NotesExplorer() {
         throw new Error(data.error ?? "重命名失败");
       }
       const result = (await res.json()) as { oldPath: string; path: string; kind: TreeActionTarget["kind"] };
+      // 用户亲自命名后，不再让首行接管文件名（文件夹改名则看它有没有把这篇带走）
+      if (autoTitlePathRef.current &&
+        (autoTitlePathRef.current === result.oldPath || autoTitlePathRef.current.startsWith(`${result.oldPath}/`))) {
+        setAutoTitleTarget(null);
+      }
       // 先映射标签路径再刷新文件树，否则刷新触发的失效清理会把旧路径标签删掉
       mapTabs((p) => replaceMovedPath(p, result.oldPath, result.path, result.kind));
       await refreshTree();
@@ -2666,7 +2921,7 @@ export default function NotesExplorer() {
       setRenameError(err instanceof Error ? err.message : "重命名失败");
       renameInProgressRef.current = false;
     }
-  }, [flushEditBeforeSwitch, loadNote, mapTabs, refreshTree, renameName, renameTarget]);
+  }, [flushEditBeforeSwitch, loadNote, mapTabs, refreshTree, renameName, renameTarget, setAutoTitleTarget]);
 
   const handleSelectTocHeading = useCallback(
     (slug: string) => {
@@ -3171,7 +3426,9 @@ export default function NotesExplorer() {
               </button>
               {globalCreateMenuOpen ? (
                 <div ref={globalCreateMenuRef} className={styles.globalCreateMenu} role="menu">
-                  <button type="button" className={styles.moreMenuItem} role="menuitem" onClick={() => { setGlobalCreateMenuOpen(false); openNewNote(); }}>新建笔记</button>
+                  <button type="button" className={styles.moreMenuItem} role="menuitem" onClick={() => { setGlobalCreateMenuOpen(false); handleNewNote(); }}>新建笔记</button>
+                  {/* 免命名是主路径；想一次选好目录和名字的仍走对话框 */}
+                  <button type="button" className={styles.moreMenuItem} role="menuitem" onClick={() => { setGlobalCreateMenuOpen(false); openNewNote(); }}>新建并命名…</button>
                   <button type="button" className={styles.moreMenuItem} role="menuitem" onClick={() => { setGlobalCreateMenuOpen(false); openNewFolder(); }}>新建文件夹</button>
                   <button type="button" className={styles.moreMenuItem} role="menuitem" onClick={() => handleStartImport(activePath ? getParentFolder(activePath) : "")} disabled={importLoading}>
                     {importLoading ? "导入中…" : "导入文件"}
@@ -3329,7 +3586,7 @@ export default function NotesExplorer() {
                   onSelect={handleSelect}
                   onOpenMenu={handleOpenTreeMenu}
                   onCloseMenu={handleCloseTreeMenu}
-                  onCreateNote={openNewNote}
+                  onCreateNote={handleNewNote}
                   onCreateFolder={openNewFolder}
                   onImport={handleStartImport}
                   onRename={handleOpenRename}
@@ -3715,6 +3972,9 @@ export default function NotesExplorer() {
                 void refreshTree().catch(() => { /* 树刷新失败不影响已插入的引用 */ });
               }}
               onImagePasteError={(message) => alert(message)}
+              placeholder={!isDraft && autoTitlePath && autoTitlePath === activePath
+                ? "写下第一行，它会成为标题"
+                : "开始写点什么…"}
               onReady={() => {
                 setEditorMinHeight(0);
                 // fix: 草稿模式下确保 CM 就绪后光标落在编辑器内
@@ -3759,6 +4019,45 @@ export default function NotesExplorer() {
                     alt={getFilenameFromPath(activePath, "图片")}
                     className={styles.imageViewerImg}
                   />
+                  {/* 翻页按钮压在图片上：pointerdown/dblclick 就地拦下，别冒泡去触发阅读区的双击进编辑 */}
+                  {imageViewerNav?.previous ? (
+                    <button
+                      type="button"
+                      className={`${styles.imageViewerNav} ${styles.imageViewerNavPrev}`}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onDoubleClick={(e) => e.stopPropagation()}
+                      onClick={(e) => { e.preventDefault(); e.stopPropagation(); void navigateImageViewer("previous"); }}
+                      aria-label={`上一张图片：${imageViewerNav.previous.name}`}
+                      title="上一张图片（←）"
+                    >
+                      <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <path d="M15 18l-6-6 6-6" />
+                      </svg>
+                    </button>
+                  ) : null}
+                  {imageViewerNav?.next ? (
+                    <button
+                      type="button"
+                      className={`${styles.imageViewerNav} ${styles.imageViewerNavNext}`}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onDoubleClick={(e) => e.stopPropagation()}
+                      onClick={(e) => { e.preventDefault(); e.stopPropagation(); void navigateImageViewer("next"); }}
+                      aria-label={`下一张图片：${imageViewerNav.next.name}`}
+                      title="下一张图片（→）"
+                    >
+                      <svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                        <path d="M9 18l6-6-6-6" />
+                      </svg>
+                    </button>
+                  ) : null}
+                  {imageViewerNav && imageViewerNav.total > 1 && imageViewerNav.index >= 0 ? (
+                    <span
+                      className={styles.imageViewerPosition}
+                      aria-label={`当前为第 ${imageViewerNav.index + 1} 张，共 ${imageViewerNav.total} 张`}
+                    >
+                      {imageViewerNav.index + 1} / {imageViewerNav.total}
+                    </span>
+                  ) : null}
                   <button
                     type="button"
                     className={styles.imageDownloadBtn}
@@ -3824,7 +4123,7 @@ export default function NotesExplorer() {
                   }
                 }}
                 onQuickCapture={handleQuickCapture}
-                onCreateNote={() => openNewNote()}
+                onCreateNote={() => handleNewNote()}
                 onImport={() => handleStartImport("")}
               />
             ) : null}
@@ -4265,7 +4564,8 @@ export default function NotesExplorer() {
           <div className={styles.nodeActionSheetBody}>
             {treeSheetTarget?.kind === "folder" ? (
               <>
-                <button type="button" className={styles.nodeActionButton} onClick={() => { const folder = treeSheetTarget.path; setTreeSheetTarget(null); openNewNote(folder); }}>新建笔记</button>
+                <button type="button" className={styles.nodeActionButton} onClick={() => { const folder = treeSheetTarget.path; setTreeSheetTarget(null); handleNewNote(folder); }}>新建笔记</button>
+                <button type="button" className={styles.nodeActionButton} onClick={() => { const folder = treeSheetTarget.path; setTreeSheetTarget(null); openNewNote(folder); }}>新建并命名…</button>
                 <button type="button" className={styles.nodeActionButton} onClick={() => { const folder = treeSheetTarget.path; setTreeSheetTarget(null); openNewFolder(folder); }}>新建文件夹</button>
                 <button type="button" className={styles.nodeActionButton} onClick={() => handleStartImport(treeSheetTarget.path)} disabled={importLoading}>
                   {importLoading ? "导入中…" : "导入文件"}
