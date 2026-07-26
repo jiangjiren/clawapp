@@ -15,6 +15,7 @@ type GitStatus = {
   ahead: number;
   behind: number;
   lastSync: string | null;
+  branch?: string | null;
 };
 
 type FileStats = Record<string, { added: number; removed: number }>;
@@ -86,6 +87,10 @@ function formatLastSync(iso: string | null) {
 }
 
 const stripNoteExtension = (value: string) => value.replace(/\.(md|html?)$/i, "");
+
+// 文件夹条目要和新笔记区分开，否则一律显示成「新笔记」
+const stateLabelOf = (file: FileStatus) =>
+  file.kind === "folder" && file.state === "added" ? "新文件夹" : STATE_LABEL[file.state];
 
 const formatParentPath = (filePath: string) =>
   filePath.includes("/") ? filePath.split("/").slice(0, -1).join(" / ") : null;
@@ -317,6 +322,19 @@ export default function NotesGit({ onOpenFile }: Props) {
   const hasChanges = (status?.files.length ?? 0) > 0;
   const isSynced   = !hasChanges && (status?.ahead ?? 0) === 0 && (status?.behind ?? 0) === 0;
 
+  const statusLabel = status === null
+    ? "正在检查云端…"
+    : isSynced
+      ? "已是最新版本"
+      : `${status.files.length} 篇笔记待同步`;
+
+  // 分支、云端状态、上次同步合成一行副标题，底部只留操作
+  const statusSubLabel = [
+    status && status.behind > 0 ? "云端有新更新" : null,
+    status?.branch ?? null,
+    status?.lastSync ? `上次同步 ${formatLastSync(status.lastSync)}` : null,
+  ].filter(Boolean).join(" · ");
+
   return (
     <div className={styles.gitPanel} style={{ position: "relative" }}>
       <div className={`${styles.gitStack}${selectedPane !== "main" ? ` ${styles.gitStackShowingDetail}` : ""}`}>
@@ -326,34 +344,40 @@ export default function NotesGit({ onOpenFile }: Props) {
           {/* ── Status Header ── */}
           <div className={styles.gitStatusBar}>
             <div className={styles.gitStatusLeft}>
-              {status === null ? (
-                <span className={styles.gitStatusDim}>正在检查云端…</span>
-              ) : isSynced ? (
-                <>
-                  <span className={styles.gitStatusDot} data-ok="true" />
-                  <span className={styles.gitStatusLabel}>已是最新版本</span>
-                </>
-              ) : (
-                <>
-                  <span className={`${styles.gitStatusDot} ${isBusy ? styles.gitStatusDotPulsing : ""}`} />
-                  <span className={styles.gitStatusLabel}>
-                    {status.files.length} 篇笔记待同步
-                  </span>
-                  {status.behind > 0 && (
-                    <span className={styles.gitStatusSubLabel}>（云端有新更新）</span>
-                  )}
-                </>
-              )}
+              <span
+                className={`${styles.gitStatusDot} ${isBusy ? styles.gitStatusDotPulsing : ""}`}
+                data-ok={status !== null && isSynced ? "true" : undefined}
+              />
+              <div className={styles.gitStatusText}>
+                <div className={styles.gitStatusLabel}>{statusLabel}</div>
+                {statusSubLabel && (
+                  <div className={styles.gitStatusSubLabel}>{statusSubLabel}</div>
+                )}
+              </div>
             </div>
-            <button
-              type="button"
-              className={styles.gitRefresh}
-              onClick={fetchStatus}
-              disabled={isBusy}
-              title="重新检查"
-            >
-              ↺
-            </button>
+            <div className={styles.gitHeaderActions}>
+              <button
+                type="button"
+                className={styles.gitHistoryBtn}
+                onClick={() => setSelectedPane("history")}
+              >
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+                  <circle cx="6" cy="6" r="4.5" stroke="currentColor" strokeWidth="1.2"/>
+                  <path d="M6 3.5V6l1.8 1.8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+                版本记录
+              </button>
+              <button
+                type="button"
+                className={styles.gitRefresh}
+                onClick={fetchStatus}
+                disabled={isBusy}
+                title="重新检查"
+                aria-label="重新检查"
+              >
+                ↺
+              </button>
+            </div>
           </div>
 
           {/* ── File Change List ── */}
@@ -374,15 +398,15 @@ export default function NotesGit({ onOpenFile }: Props) {
                       >
                         <div className={styles.gitFileRowContent}>
                           {/* Status Dot */}
-                          <span className={`${styles.gitStateDot} ${STATE_DOT_CLASS[f.state]}`} title={STATE_LABEL[f.state]} />
-                          
+                          <span className={`${styles.gitStateDot} ${STATE_DOT_CLASS[f.state]}`} title={stateLabelOf(f)} />
+
                           {/* File Path info */}
                           <div className={styles.gitFileInfo}>
                             {isFolder ? (
                               <span className={styles.gitFileName} title={f.path}>
-                                📁 {f.name}
+                                {f.name}
                               </span>
-                            ) : !isFolder ? (
+                            ) : (
                               <button
                                 type="button"
                                 className={styles.gitFileNameBtn}
@@ -391,15 +415,17 @@ export default function NotesGit({ onOpenFile }: Props) {
                               >
                                 {stripNoteExtension(f.name)}
                               </button>
-                            ) : (
-                              <span className={styles.gitFileName} title={f.path}>
-                                {stripNoteExtension(f.name)}
+                            )}
+                            {(isFolder || parentPath) && (
+                              <span className={styles.gitFileSubLine}>
+                                {isFolder && <span className={styles.gitFileKindTag}>文件夹</span>}
+                                {parentPath && <span className={styles.gitFilePath}>{parentPath}</span>}
                               </span>
                             )}
-                            {parentPath && (
-                              <span className={styles.gitFilePath}>{parentPath}</span>
-                            )}
                           </div>
+
+                          {/* 静默态显示变更类型，悬停时让位给操作按钮 */}
+                          <span className={styles.gitFileState}>{stateLabelOf(f)}</span>
 
                           {/* Hover Actions Panel */}
                           <div className={styles.gitHoverActions}>
@@ -545,26 +571,6 @@ export default function NotesGit({ onOpenFile }: Props) {
                 </>
               )}
             </button>
-            
-            <div className={styles.gitSecondaryRow}>
-              <button
-                type="button"
-                className={styles.gitHistoryBtn}
-                onClick={() => setSelectedPane("history")}
-              >
-                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
-                  <circle cx="6" cy="6" r="4.5" stroke="currentColor" strokeWidth="1.2"/>
-                  <path d="M6 3.5V6l1.8 1.8" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/>
-                </svg>
-                版本记录
-              </button>
-              
-              {status?.lastSync && (
-                <span className={styles.gitStatusTime}>
-                  上次同步：{formatLastSync(status.lastSync)}
-                </span>
-              )}
-            </div>
           </div>
           </div>{/* end gitBottomBar */}
         </div>
@@ -705,7 +711,7 @@ export default function NotesGit({ onOpenFile }: Props) {
                 </div>
               </header>
 
-              <div className={styles.gitDiffContent} style={{ padding: "18px 14px" }}>
+              <div className={styles.gitDiffContent} style={{ padding: "4px 18px 16px" }}>
                 {historyLoading ? (
                   <div className={styles.gitDiffState}>正在载入版本历史…</div>
                 ) : history.length === 0 ? (

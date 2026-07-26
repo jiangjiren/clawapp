@@ -324,7 +324,14 @@ export async function GET(req: Request) {
       if (stdout) lastSync = stdout;
     } catch { /* empty repo */ }
 
-    return NextResponse.json({ files, ahead, behind, lastSync });
+    // 面板副标题要展示当前分支；游离 HEAD 没有分支名，按缺省处理
+    let branch: string | null = null;
+    try {
+      const { stdout } = await git(["rev-parse", "--abbrev-ref", "HEAD"]);
+      if (stdout && stdout !== "HEAD") branch = stdout;
+    } catch { /* empty repo */ }
+
+    return NextResponse.json({ files, ahead, behind, lastSync, branch });
   } catch (err) {
     console.error("Git API Error (status):", err);
     const msg = err instanceof Error ? err.message : String(err);
