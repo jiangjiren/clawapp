@@ -43,6 +43,11 @@
   --radius-item: 8px;
   --shadow-soft: 0 1px 3px rgba(0, 0, 0, 0.05);
   --ease-out: cubic-bezier(0.32, 0.72, 0, 1);
+  /* 所有"仍在进行"的循环动画共用这一拍。以前 spinner 0.65s、typing 1.2s、
+     gen chip 1.5s、thinking 1.6s 各转各的，永远错开，合起来是持续的无序闪烁。
+     同一拍之后它们像在一起呼吸，屏幕安静得多。 */
+  --beat: 1.5s;
+  --beat-half: 0.75s;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -142,15 +147,17 @@ html, body {
 .tool-call.failed .tool-name { color: var(--yellow); }
 .tool-name { color: var(--text); font-weight: 600; white-space: nowrap; flex-shrink: 0; transition: color 0.2s; }
 .tool-input { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
-.tool-spinner { flex-shrink: 0; width: 11px; height: 11px; border: 1.5px solid color-mix(in srgb, var(--accent) 25%, transparent); border-top-color: var(--accent); border-radius: 50%; animation: toolSpin 0.65s linear infinite; }
+/* 半拍转一圈：原来 0.65s 比周围快一倍以上，几个工具一起跑时是全屏最吵的东西 */
+.tool-spinner { flex-shrink: 0; width: 11px; height: 11px; border: 1.5px solid color-mix(in srgb, var(--accent) 25%, transparent); border-top-color: var(--accent); border-radius: 50%; animation: toolSpin var(--beat-half) linear infinite; }
 @keyframes toolSpin { to { transform: rotate(360deg); } }
 .typing { display: flex; gap: 4px; align-items: center; padding: 4px 0; }
-.typing span { width: 5px; height: 5px; background: var(--text-dim); border-radius: 50%; animation: blink 1.2s infinite; }
-.typing span:nth-child(2) { animation-delay: 0.2s; }
-.typing span:nth-child(3) { animation-delay: 0.4s; }
-@keyframes blink { 0%, 80%, 100% { opacity: 0.2; } 40% { opacity: 1; } }
+/* 三点的间隔按拍分配，整体仍是一拍走完一轮 */
+.typing span { width: 5px; height: 5px; background: var(--text-dim); border-radius: 50%; animation: blink var(--beat) ease-in-out infinite; }
+.typing span:nth-child(2) { animation-delay: 0.16s; }
+.typing span:nth-child(3) { animation-delay: 0.32s; }
+@keyframes blink { 0%, 70%, 100% { opacity: 0.2; } 35% { opacity: 1; } }
 .gen-chip { display: flex; align-items: center; gap: 5px; padding: 8px 0 2px; color: var(--text-dim); font-size: 11px; }
-.gen-chip-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); flex-shrink: 0; animation: genPulse 1.5s ease-in-out infinite; }
+.gen-chip-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); flex-shrink: 0; animation: genPulse var(--beat) ease-in-out infinite; }
 @keyframes genPulse { 0%, 100% { opacity: 0.2; transform: scale(0.7); } 50% { opacity: 1; transform: scale(1); } }
 
 /* ══════════════════════════════════════════════════════════
@@ -200,10 +207,10 @@ html, body {
 .sq-dot { position: absolute; left: 24px; top: 50%; width: 8px; height: 8px; margin-top: -4px; border-radius: 50%; display: grid; place-items: center; flex-shrink: 0; }
 .sq-row[data-s="queued"] .sq-dot { box-shadow: inset 0 0 0 1.5px var(--border-strong); }
 /* 运行中刻意无色：多个彩点同时闪会变成圣诞树 */
-.sq-row[data-s="running"] .sq-dot { background: var(--text-dim); animation: sqBreathe 1.6s ease-in-out infinite; }
+.sq-row[data-s="running"] .sq-dot { background: var(--text-dim); animation: sqBreathe var(--beat) ease-in-out infinite; }
 @keyframes sqBreathe { 0%,100% { opacity: 0.35; transform: scale(0.8); } 50% { opacity: 1; transform: scale(1); } }
 .sq-row[data-s="asking"] .sq-dot { background: var(--accent); }
-.sq-row[data-s="asking"] .sq-dot::after { content: ''; position: absolute; inset: -4px; border-radius: 50%; border: 1.5px solid var(--accent); animation: sqRing 1.4s ease-out infinite; }
+.sq-row[data-s="asking"] .sq-dot::after { content: ''; position: absolute; inset: -4px; border-radius: 50%; border: 1.5px solid var(--accent); animation: sqRing var(--beat) ease-out infinite; }
 @keyframes sqRing { 0% { opacity: 0.7; transform: scale(0.6); } 100% { opacity: 0; transform: scale(1.25); } }
 /* 排队等回答：同色不脉冲 —— 同时只能有一个注意力焦点 */
 .sq-row[data-s="waiting"] .sq-dot { background: var(--accent); opacity: 0.4; }
@@ -271,7 +278,7 @@ html, body {
 .bga-head:hover { background: var(--bg3); }
 .bga-dot {
   width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0;
-  background: var(--accent); animation: genPulse 1.5s ease-in-out infinite;
+  background: var(--accent); animation: genPulse var(--beat) ease-in-out infinite;
 }
 .bga-text { flex: 1; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bga-chev {
@@ -296,7 +303,7 @@ html, body {
 }
 .bga-item:hover { background: var(--bg3); }
 .bga-idot { position: relative; width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; display: grid; place-items: center; }
-.bga-item[data-s="running"] .bga-idot { background: var(--accent); animation: sqBreathe 1.6s ease-in-out infinite; }
+.bga-item[data-s="running"] .bga-idot { background: var(--accent); animation: sqBreathe var(--beat) ease-in-out infinite; }
 .bga-item[data-s="queued"] .bga-idot { box-shadow: inset 0 0 0 1.5px var(--border-strong); }
 .bga-item[data-s="done"] .bga-idot::after {
   content: ''; width: 3px; height: 6.5px; margin-top: -2px; margin-left: 1px;
@@ -318,7 +325,7 @@ html, body {
 .todo-i.on { color: var(--text-dim); }
 .todo-i.now { font-weight: 550; }
 .todo-i.now .todo-b { box-shadow: inset 0 0 0 1.5px var(--accent); }
-.todo-i.now .todo-b::after { content: ''; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); animation: sqBreathe 1.6s ease-in-out infinite; }
+.todo-i.now .todo-b::after { content: ''; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); animation: sqBreathe var(--beat) ease-in-out infinite; }
 
 /* ── Composer popup: slash commands + note mentions ── */
 #input-wrap {
@@ -853,7 +860,7 @@ html, body {
   border-radius: 50%;
   background: var(--accent);
   display: none;
-  animation: thinkingPulse 1.6s ease-in-out infinite;
+  animation: thinkingPulse var(--beat) ease-in-out infinite;
 }
 .thinking-active .thinking-dot { display: block; }
 @keyframes thinkingPulse {
@@ -1971,6 +1978,45 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
   color: var(--accent); border-bottom: none;
 }
 
+/* ══════════════════════════════════════════════════════════
+   减弱动态效果
+   系统开关打开时，动效对前庭功能障碍和偏头痛敏感人群是实打实的不适，
+   而这个界面同时有好几个无限循环的脉冲。
+   原则：停掉运动，但不能停掉信息 —— "正在进行"仍须一眼可辨，
+   所以循环动画改成静态的低透明度（区别于已完成的实心/常规态），
+   一次性的入场/展开动画直接跳到终态。
+   ══════════════════════════════════════════════════════════ */
+@media (prefers-reduced-motion: reduce) {
+  /* 入场、合流、展开这类一次性动画：直接到位，不播过程 */
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  /* 循环的"进行中"指示器：不再动，但保留可辨识的状态 */
+  .tool-spinner {
+    animation: none !important;
+    border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+    border-top-color: var(--accent);
+  }
+  .typing span,
+  .gen-chip-dot,
+  .thinking-dot,
+  .bga-dot,
+  .bga-item[data-s="running"] .bga-idot,
+  .sq-row[data-s="running"] .sq-dot,
+  .todo-i.now .todo-b::after,
+  #git-banner-dot {
+    animation: none !important;
+    opacity: 0.55;          /* 半透明 = 进行中，实心 = 已结束 */
+  }
+  /* 扩散光环纯装饰，静止时反而变成一个多余的圈，去掉 */
+  .sq-row[data-s="asking"] .sq-dot::after { display: none !important; }
+  /* 骨架屏的流光去掉，留纯色占位块即可 */
+  .history-skeleton-line { animation: none !important; background: var(--border); }
+}
 
 </style>
 </head>
@@ -3559,6 +3605,10 @@ function setGenerating(v, notifyParent = true) {
     stopRequested = false;
     stopResendPending = false;
     removeGenChip();
+    /* 不生成了就不该还有东西在转。原来 spinner 只在收到 tool_result 时才停，
+       所以中止、报错、断线这些路径下它会一直转到你刷新页面为止 ——
+       一个永远在转的指示器比没有指示器更糟，它在说谎。 */
+    cleanupRunningTools();
   }
 
   sendBtn.disabled = v && stopRequested && !stopResendPending;
