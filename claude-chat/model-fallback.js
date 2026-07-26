@@ -1,6 +1,10 @@
 export const CHANNEL_DEFAULT_MODEL = "claude-sonnet-5";
 
-const MODEL_UNAVAILABLE_PATTERNS = [
+// 候选不可用 = 这套「profile + 模型」组合根本跑不起来，与任务内容无关。
+// 两类都算：模型侧（下线、改名、缺用量额度）和凭证侧（登录过期、密钥失效）。
+// 无人值守渠道最常见的故障恰恰是凭证过期，所以它必须和模型下线同等对待，
+// 对第一个候选也不例外——否则会员一掉线，整条降级链一个都不会尝试。
+const CANDIDATE_UNAVAILABLE_PATTERNS = [
   /requires? usage credits?/i,
   /model[^\n]*(?:not found|does not exist|unknown|unsupported|unavailable|not available)/i,
   /(?:not found|does not exist|unknown|unsupported|unavailable|not available)[^\n]*model/i,
@@ -8,10 +12,6 @@ const MODEL_UNAVAILABLE_PATTERNS = [
   /(?:access|permission) (?:denied|required)[^\n]*model/i,
   /model[^\n]*(?:access|permission) (?:denied|required)/i,
   /invalid model/i,
-];
-
-const CANDIDATE_UNAVAILABLE_PATTERNS = [
-  ...MODEL_UNAVAILABLE_PATTERNS,
   /failed to authenticate/i,
   /invalid authentication credentials/i,
   /invalid api key/i,
@@ -33,11 +33,6 @@ function errorText(error) {
     current = current.cause;
   }
   return parts.join("\n");
-}
-
-export function isModelUnavailableError(error) {
-  const text = errorText(error);
-  return MODEL_UNAVAILABLE_PATTERNS.some(pattern => pattern.test(text));
 }
 
 export function isCandidateUnavailableError(error) {
@@ -116,9 +111,7 @@ export async function runWithModelFallback(candidates, runCandidate, {
       return await runCandidate(candidate, index);
     } catch (error) {
       failures.push({ candidate, error });
-      const canRetry = index === 0
-        ? isModelUnavailableError(error)
-        : isCandidateUnavailableError(error);
+      const canRetry = isCandidateUnavailableError(error);
       if (!canRetry || index === candidates.length - 1) {
         if (failures.length === 1) throw error;
         const summary = failures

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import {
   CHANNEL_DEFAULT_MODEL,
   buildModelCandidates,
-  isModelUnavailableError,
+  isCandidateUnavailableError,
   runWithModelFallback,
 } from "./model-fallback.js";
 
@@ -42,10 +42,11 @@ test("buildModelCandidates accepts an official Anthropic API profile without a c
   assert.equal(buildModelCandidates(data)[1].model, "claude-api-model");
 });
 
-test("model availability errors are classified narrowly", () => {
-  assert.equal(isModelUnavailableError(new Error("API Error: Fable 5 requires usage credits")), true);
-  assert.equal(isModelUnavailableError(new Error("Unknown model claude-retired")), true);
-  assert.equal(isModelUnavailableError(new Error("Failed to write report.md")), false);
+test("unavailable-candidate errors are classified narrowly", () => {
+  assert.equal(isCandidateUnavailableError(new Error("API Error: Fable 5 requires usage credits")), true);
+  assert.equal(isCandidateUnavailableError(new Error("Unknown model claude-retired")), true);
+  assert.equal(isCandidateUnavailableError(new Error("OAuth token expired: unauthorized")), true);
+  assert.equal(isCandidateUnavailableError(new Error("Failed to write report.md")), false);
 });
 
 test("runWithModelFallback retries configured candidates after a model availability error", async () => {
@@ -54,6 +55,20 @@ test("runWithModelFallback retries configured candidates after a model availabil
   const result = await runWithModelFallback(candidates, async candidate => {
     attempted.push(candidate.model);
     if (attempted.length === 1) throw new Error("model not available");
+    return candidate.model;
+  }, { logger: { warn() {} } });
+
+  assert.equal(result, "gpt-main");
+  assert.deepEqual(attempted, [CHANNEL_DEFAULT_MODEL, "gpt-main"]);
+});
+
+// 会员登录过期是无人值守渠道最常见的故障，必须能从第一个候选降级出去
+test("runWithModelFallback falls back when the first candidate's credentials expired", async () => {
+  const candidates = buildModelCandidates(profiles).slice(0, 2);
+  const attempted = [];
+  const result = await runWithModelFallback(candidates, async candidate => {
+    attempted.push(candidate.model);
+    if (attempted.length === 1) throw new Error("Failed to authenticate: OAuth token has expired");
     return candidate.model;
   }, { logger: { warn() {} } });
 

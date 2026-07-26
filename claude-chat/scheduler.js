@@ -12,6 +12,8 @@ let ctx = null;
 // jobId -> cancellable handle (node-cron task or { destroy: () => clearTimeout })
 const activeTasks = new Map();
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
+// 单个候选模型跑一次定时任务的上限
+const AGENT_RUN_TIMEOUT_MS = 5 * 60 * 1000;
 
 // Channel adapters: { send(peer, text) } — add feishu/telegram here later
 const channelAdapters = {};
@@ -384,16 +386,24 @@ async function _runAgent(job) {
   const cwd = ctx.resolveAllowedCwd("");
   const profileData = ctx.readProfiles();
   const candidates = buildModelCandidates(profileData);
+  return await runWithModelFallback(
+    candidates,
+    candidate => _runCandidateWithTimeout(candidate, profileData, fullPrompt, cwd),
+    { logPrefix: `Scheduler ${job.id.slice(0, 8)}` },
+  );
+}
+
+// 每个候选独享完整超时预算，而不是整条链共享一份——否则前面的候选把时间耗光，
+// 真正干活的那个只剩几十秒。这不会让总时长变成 N × 5 分钟：降级只在候选不可用
+// （凭证失效／模型下线）时触发，这类错误立即返回；而超时本身抛 AbortError，
+// 不属于可降级错误，会直接终止整条链。
+async function _runCandidateWithTimeout(candidate, profileData, fullPrompt, cwd) {
   const ac = new AbortController();
-  const timeout = setTimeout(() => ac.abort(), 5 * 60 * 1000);
+  const timeout = setTimeout(() => ac.abort(), AGENT_RUN_TIMEOUT_MS);
   try {
-    return await runWithModelFallback(
-      candidates,
-      candidate => candidate.provider === "codex"
-        ? _runCodexCandidate(candidate, fullPrompt, cwd, ac.signal)
-        : _runClaudeCandidate(candidate, profileData, fullPrompt, cwd, ac),
-      { logPrefix: `Scheduler ${job.id.slice(0, 8)}` },
-    );
+    return candidate.provider === "codex"
+      ? await _runCodexCandidate(candidate, fullPrompt, cwd, ac.signal)
+      : await _runClaudeCandidate(candidate, profileData, fullPrompt, cwd, ac);
   } finally {
     clearTimeout(timeout);
   }

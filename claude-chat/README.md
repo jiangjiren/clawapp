@@ -105,7 +105,9 @@ The chat agent receives scheduler tools when the request looks like a reminder o
 
 Cron time zones are stored per job and default to `Asia/Shanghai`. One-off times use a future Unix timestamp in milliseconds. Schedules, state, and run logs live in `CLAUDE_CHAT_DATA_DIR`.
 
-WeChat conversations and scheduled jobs start with `claude-sonnet-5`. If that model is unavailable because it was removed, renamed, or requires unavailable usage credits, the service rebuilds a fallback chain from the currently configured provider profiles and model fields for that run. Codex candidates are skipped only for WeChat requests that need the in-process scheduler tools, because the Codex SDK cannot receive that ephemeral MCP server.
+WeChat conversations and scheduled jobs start with `claude-sonnet-5`. If a candidate cannot run at all — the model was removed, renamed, or requires unavailable usage credits, or its credentials expired or were rejected — the service falls back to the next candidate in a chain rebuilt from the currently configured provider profiles and model fields for that run. This applies to the first candidate too, so an expired subscription on an unattended channel does not fail the whole run. Errors from the task itself are never retried on another model. Codex candidates are skipped only for WeChat requests that need the in-process scheduler tools, because the Codex SDK cannot receive that ephemeral MCP server.
+
+Each candidate in a scheduled job gets its own five-minute budget rather than sharing one across the chain. Hitting it aborts the run and stops the chain, so the total stays bounded.
 
 At present, WeChat is the only registered external delivery adapter. References in source comments to Feishu or Telegram are extension points, not implemented channels.
 
