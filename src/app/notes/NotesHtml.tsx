@@ -8,15 +8,87 @@ import styles from "./notes.module.css";
 // navigate inside inkfellow instead of trying to launch the Obsidian desktop app
 // (which the browser cannot do for the obsidian:// protocol).
 const injectHeightScript = (html: string): string => {
-  const script =
-    `<script>(function(){` +
-    `function r(){try{window.parent.postMessage({type:"iframeHeight",h:document.documentElement.scrollHeight},"*")}catch(e){}}` +
-    `if(document.readyState==="loading"){document.addEventListener("DOMContentLoaded",r)}else{r()}` +
-    `new ResizeObserver(r).observe(document.documentElement);` +
-    `document.addEventListener("click",function(e){` +
-    `var t=e.target&&e.target.nodeType===1?e.target:e.target&&e.target.parentElement;` +
-    `var a=t&&t.closest?t.closest('a[href^="obsidian://"]'):null;` +
-    `if(!a)return;e.preventDefault();` +
+  const script = `<script>(function(){
+    var resizeObserver;
+    var resizeFrame = 0;
+
+    function saveStyle(element, property) {
+      return [element.style.getPropertyValue(property), element.style.getPropertyPriority(property)];
+    }
+
+    function restoreStyle(element, property, saved) {
+      if (saved[0]) element.style.setProperty(property, saved[0], saved[1]);
+      else element.style.removeProperty(property);
+    }
+
+    function measureIntrinsicHeight() {
+      var root = document.documentElement;
+      var body = document.body;
+      if (!body) return Math.max(1, Math.ceil(root.scrollHeight));
+
+      // A page using min-height:100vh otherwise reports the iframe viewport as
+      // content height. Temporarily neutralise only the root/body height rules
+      // while measuring, then restore them before the browser paints.
+      var rootHeight = saveStyle(root, "height");
+      var rootMinHeight = saveStyle(root, "min-height");
+      var bodyHeight = saveStyle(body, "height");
+      var bodyMinHeight = saveStyle(body, "min-height");
+
+      root.style.setProperty("height", "auto", "important");
+      root.style.setProperty("min-height", "0", "important");
+      body.style.setProperty("height", "auto", "important");
+      body.style.setProperty("min-height", "0", "important");
+
+      var bodyStyle = window.getComputedStyle(body);
+      var marginTop = parseFloat(bodyStyle.marginTop) || 0;
+      var marginBottom = parseFloat(bodyStyle.marginBottom) || 0;
+      var height = Math.ceil(body.getBoundingClientRect().height + marginTop + marginBottom);
+
+      restoreStyle(root, "height", rootHeight);
+      restoreStyle(root, "min-height", rootMinHeight);
+      restoreStyle(body, "height", bodyHeight);
+      restoreStyle(body, "min-height", bodyMinHeight);
+
+      return Math.max(1, height);
+    }
+
+    function reportHeight() {
+      resizeFrame = 0;
+      try {
+        window.parent.postMessage({type:"iframeHeight",h:measureIntrinsicHeight()},"*");
+      } catch (e) {}
+    }
+
+    function scheduleHeightReport() {
+      if (resizeFrame) cancelAnimationFrame(resizeFrame);
+      resizeFrame = requestAnimationFrame(reportHeight);
+    }
+
+    function startHeightObserver() {
+      if (resizeObserver || !document.body) return;
+      resizeObserver = new ResizeObserver(scheduleHeightReport);
+      resizeObserver.observe(document.documentElement);
+      resizeObserver.observe(document.body);
+      Array.prototype.forEach.call(document.body.children, function(child) {
+        resizeObserver.observe(child);
+      });
+      scheduleHeightReport();
+    }
+
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", startHeightObserver, {once:true});
+    } else {
+      startHeightObserver();
+    }
+    window.addEventListener("load", scheduleHeightReport);
+    window.addEventListener("message", function(event) {
+      if (event.data && event.data.type === "iframeMeasure") scheduleHeightReport();
+    });
+
+    document.addEventListener("click",function(e){
+    var t=e.target&&e.target.nodeType===1?e.target:e.target&&e.target.parentElement;
+    var a=t&&t.closest?t.closest('a[href^="obsidian://"]'):null;
+    if(!a)return;e.preventDefault();` +
     // 不能用 URLSearchParams：这些 obsidian 链接的 file 值是原始 UTF-8 且含字面 '+'，
     // URLSearchParams 会把 '+' 当空格解码，导致带 '+' 的文件名跳转失败。手动取 file= 后的原始串。
     `try{var q=(a.getAttribute("href")||"").split("?")[1]||"";var file="";` +
@@ -53,8 +125,15 @@ export default function NotesHtml({ html, onNavigate }: NotesHtmlProps) {
   useEffect(() => {
     const handle = (ev: MessageEvent) => {
       if (ev.source !== iframeRef.current?.contentWindow) return;
-      if (ev.data?.type === "iframeHeight" && typeof ev.data.h === "number") {
-        setHeight(ev.data.h + 32);
+      if (
+        ev.data?.type === "iframeHeight" &&
+        typeof ev.data.h === "number" &&
+        Number.isFinite(ev.data.h)
+      ) {
+        const nextHeight = Math.max(1, Math.ceil(ev.data.h));
+        setHeight((currentHeight) =>
+          currentHeight === nextHeight ? currentHeight : nextHeight,
+        );
       } else if (ev.data?.type === "note-navigate" && typeof ev.data.path === "string") {
         onNavigateRef.current?.(ev.data.path);
       }
@@ -63,16 +142,17 @@ export default function NotesHtml({ html, onNavigate }: NotesHtmlProps) {
     return () => window.removeEventListener("message", handle);
   }, []);
 
-  // Re-query height after iframe width settles, in case the initial render
-  // happened at a narrower width (before CSS applied) and locked in a stale height.
+  // A width change can reflow the iframe content. Ask the child to measure
+  // again, but ignore height-only ResizeObserver events to avoid feedback.
   useEffect(() => {
     const iframe = iframeRef.current;
     if (!iframe) return;
-    const ro = new ResizeObserver(() => {
-      try {
-        const doc = iframe.contentDocument;
-        if (doc) setHeight(doc.documentElement.scrollHeight + 32);
-      } catch { /* cross-origin; ignore */ }
+    let previousWidth = iframe.getBoundingClientRect().width;
+    const ro = new ResizeObserver((entries) => {
+      const nextWidth = entries[0]?.contentRect.width ?? iframe.getBoundingClientRect().width;
+      if (Math.abs(nextWidth - previousWidth) < 0.5) return;
+      previousWidth = nextWidth;
+      iframe.contentWindow?.postMessage({ type: "iframeMeasure" }, "*");
     });
     ro.observe(iframe);
     return () => ro.disconnect();
