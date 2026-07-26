@@ -132,10 +132,15 @@ html, body {
 .msg-body code { background: var(--bg3); border: 1px solid var(--border); border-radius: 3px; padding: 0 4px; font-family: var(--font-mono); font-size: 12px; }
 .msg-body pre { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius-item); padding: 10px 12px; overflow-x: auto; margin: 6px 0; }
 .msg-body pre code { background: none; border: none; padding: 0; font-size: 12px; }
-.tool-call { display: flex; align-items: center; gap: 8px; background: var(--tool-bg); border: 1px solid var(--border); border-left: 2px solid var(--yellow); border-radius: var(--radius-item); padding: 7px 10px; margin: 4px 0; font-family: var(--font-mono); font-size: 11px; transition: border-left-color 0.2s, background 0.2s; }
+/* 工具调用的三态。成功是默认结果，所以完成 = 静默：一次对话里几十个调用全成功，
+   给每个都染色等于整屏都在喊，真正该被看见的失败反而淹掉了。强调色只留给失败。
+   （编队卡里也是这个规则：完成是灰勾，不是彩色。） */
+.tool-call { display: flex; align-items: center; gap: 8px; background: var(--tool-bg); border: 1px solid var(--border); border-left: 2px solid var(--border-strong); border-radius: var(--radius-item); padding: 7px 10px; margin: 4px 0; font-family: var(--font-mono); font-size: 11px; transition: border-left-color 0.2s, background 0.2s, color 0.2s; }
 .tool-call.running { border-left-color: var(--accent); background: color-mix(in srgb, var(--accent) 5%, var(--tool-bg)); }
 .tool-call.running .tool-name { color: var(--accent); }
-.tool-name { color: var(--yellow); font-weight: 600; white-space: nowrap; flex-shrink: 0; transition: color 0.2s; }
+.tool-call.failed { border-left-color: var(--yellow); background: color-mix(in srgb, var(--yellow) 5%, var(--tool-bg)); }
+.tool-call.failed .tool-name { color: var(--yellow); }
+.tool-name { color: var(--text); font-weight: 600; white-space: nowrap; flex-shrink: 0; transition: color 0.2s; }
 .tool-input { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
 .tool-spinner { flex-shrink: 0; width: 11px; height: 11px; border: 1.5px solid color-mix(in srgb, var(--accent) 25%, transparent); border-top-color: var(--accent); border-radius: 50%; animation: toolSpin 0.65s linear infinite; }
 @keyframes toolSpin { to { transform: rotate(360deg); } }
@@ -235,41 +240,73 @@ html, body {
 .squad.done .sq-head { display: none; }
 .squad.done .sq-body { grid-template-rows: 0fr; opacity: 0; }
 .squad.done { background: transparent; }
-.sq-summary .sq-re { margin-left: auto; font-size: 10.5px; color: var(--accent); cursor: pointer; }
-.sq-summary .jd { width: 8px; height: 8px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px var(--border-strong); display: grid; place-items: center; }
+/* 侧边栏很窄：摘要必须挤在一行里，换行会把"展开"劈成两半 */
+.sq-summary .sq-sumtxt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sq-summary .sq-re { flex-shrink: 0; margin-left: auto; font-size: 10.5px; color: var(--accent); cursor: pointer; }
+.sq-summary .jd { flex-shrink: 0; width: 8px; height: 8px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px var(--border-strong); display: grid; place-items: center; }
 .sq-summary .jd::after { content: ''; width: 3px; height: 6px; margin-top: -1.5px; border: solid var(--text-dim); border-width: 0 1.5px 1.5px 0; transform: rotate(42deg); }
 
-/* ── 后台活动条 ──
-   前台轮结束但后台任务仍在跑时常驻。发送键保持可用 —— 后台任务的设计意图
-   就是"你可以继续做别的"，把主操作按钮占住会移除这个能力。 */
+/* ── 子任务活动条 ──
+   编队卡活在消息流里，后面来两条消息就把它顶出视口，而子 agent 常常还在跑。
+   这条贴在输入框上方 —— 你的视线本来就在这儿，不用去别处找一个入口。
+   一行看数量，点开看每一项，全部结束后自己消失：完成的东西不该继续占注意力。 */
 #bg-activity {
-  display: flex; align-items: center; gap: 8px;
   margin: 0 0 8px;
-  padding: 7px 10px 7px 12px;
   background: var(--bg-document);
   border: 1px solid var(--border-strong);
   border-radius: 16px;
   font-size: 11.5px;
   box-shadow: var(--shadow-soft);
+  overflow: hidden;
   animation: bgaIn 0.28s var(--ease-out) both;
 }
 #bg-activity[hidden] { display: none; }
 @keyframes bgaIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+
+.bga-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px 8px 12px;
+  cursor: pointer; user-select: none;
+}
+.bga-head:hover { background: var(--bg3); }
 .bga-dot {
   width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0;
   background: var(--accent); animation: genPulse 1.5s ease-in-out infinite;
 }
 .bga-text { flex: 1; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.bga-view, .bga-close {
-  flex-shrink: 0; border: 0; background: transparent; cursor: pointer;
-  font-family: inherit; color: var(--accent); padding: 2px 6px; border-radius: 5px;
+.bga-chev {
+  width: 13px; height: 13px; flex-shrink: 0; color: var(--text-dim);
+  transform: rotate(180deg); transition: transform 0.24s var(--ease-out);
 }
-.bga-close { color: var(--text-dim); font-size: 12px; line-height: 1; }
-.bga-view:hover { background: var(--accent-bg-hover); }
-.bga-close:hover { background: var(--bg3); color: var(--text); }
+#bg-activity.open .bga-chev { transform: none; }
 /* 完成即停止脉冲：还在动的点意味着还在忙 */
 #bg-activity.done .bga-dot { background: var(--green); animation: none; }
 #bg-activity.done .bga-text { color: var(--green); }
+/* 有跑挂的就别报绿 —— 绿色是"都好了"的意思 */
+#bg-activity.done.has-fail .bga-dot { background: var(--yellow); }
+#bg-activity.done.has-fail .bga-text { color: var(--text); }
+
+.bga-body { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 0.26s var(--ease-out); }
+.bga-body > .bga-clip { min-height: 0; overflow: hidden; }
+#bg-activity.open .bga-body { grid-template-rows: 1fr; }
+.bga-list { max-height: 44vh; overflow-y: auto; padding: 2px 0 6px; border-top: 1px solid var(--border); }
+.bga-item {
+  display: flex; align-items: center; gap: 9px;
+  padding: 7px 12px; cursor: pointer; transition: background 0.12s;
+}
+.bga-item:hover { background: var(--bg3); }
+.bga-idot { position: relative; width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; display: grid; place-items: center; }
+.bga-item[data-s="running"] .bga-idot { background: var(--accent); animation: sqBreathe 1.6s ease-in-out infinite; }
+.bga-item[data-s="queued"] .bga-idot { box-shadow: inset 0 0 0 1.5px var(--border-strong); }
+.bga-item[data-s="done"] .bga-idot::after {
+  content: ''; width: 3px; height: 6.5px; margin-top: -2px; margin-left: 1px;
+  border: solid var(--text-dim); border-width: 0 1.5px 1.5px 0; transform: rotate(42deg);
+}
+.bga-item[data-s="failed"] .bga-idot { background: var(--yellow); }
+.bga-item[data-s="failed"] .bga-idot::after { content: ''; width: 1.5px; height: 4px; background: var(--bg); border-radius: 1px; }
+.bga-ilabel { flex: 1; min-width: 0; font-size: 12px; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bga-item[data-s="done"] .bga-ilabel, .bga-item[data-s="failed"] .bga-ilabel { color: var(--text-dim); }
+.bga-imeta { flex-shrink: 0; font-size: 10px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
 
 /* ── Codex 的 todo_list：串行计划，刻意不长成编队卡 ── */
 .todo { border: 1px solid var(--border); border-left: 2px solid var(--text-dim); border-radius: var(--radius-item); background: var(--tool-bg); padding: 8px 11px; margin: 6px 0; animation: squadIn 0.3s var(--ease-out) both; }
@@ -2114,12 +2151,15 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
   <div id="input-wrap">
     <div id="slash-popup" role="listbox" aria-label="输入建议"></div>
     <div id="ask-user-question" role="region" aria-live="polite" aria-label="Agent clarification"></div>
-    <!-- 前台回合已结束、后台任务仍在跑时的常驻指示。发送键保持可用。 -->
-    <div id="bg-activity" role="status" aria-live="polite" hidden>
-      <span class="bga-dot"></span>
-      <span class="bga-text"></span>
-      <button class="bga-view" type="button">查看</button>
-      <button class="bga-close" type="button" aria-label="收起">✕</button>
+    <!-- 子任务活动条：只要还有子 agent 在跑就常驻在输入框上方，跑完自行消失。
+         发送键始终可用 —— 派生子任务的意义就是你可以继续做别的。 -->
+    <div id="bg-activity" hidden>
+      <div class="bga-head" role="status" aria-live="polite">
+        <span class="bga-dot"></span>
+        <span class="bga-text"></span>
+        <svg class="bga-chev" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M4 6.5 8 10.5l4-4"/></svg>
+      </div>
+      <div class="bga-body"><div class="bga-clip"><div class="bga-list"></div></div></div>
     </div>
     <div id="composer">
       <div id="image-chip"></div>
@@ -3456,7 +3496,7 @@ function appendAssistantBlock(body, block) {
 
   if (block.type === "tool_use" || block.type === "server_tool_use" || block.type === "mcp_tool_use") {
     // Task 的派生已经由编队卡表达，别再重复渲染成一行普通工具调用
-    if (block.name === "Task" && squadCards.get(activeSquad)?.has(block.id)) return;
+    if (isSubagentTool(block.name) && squadCards.get(activeSquad)?.has(block.id)) return;
     body.appendChild(makeToolEl(block));
     return;
   }
@@ -3496,6 +3536,21 @@ function appendAssistantBlock(body, block) {
 
 function renderAssistantBlocks(body, blocks) {
   for (const block of blocks || []) appendAssistantBlock(body, block);
+  // 失败态在 tool_result 里，而它排在 tool_use 之后 —— 全部铺完再回头标注，
+  // 否则刷新一次页面，出错的工具就跟成功的长得一模一样了
+  applyToolFailuresFromBlocks(body, blocks);
+}
+
+function applyToolFailuresFromBlocks(body, blocks) {
+  for (const block of blocks || []) {
+    const raw = block?.raw ?? block;
+    const results = raw?.message?.content ?? (isToolResultType(block?.type) ? [raw] : null);
+    for (const r of results ?? []) {
+      if (r?.type?.includes("tool_result") && r.is_error && r.tool_use_id) {
+        body.querySelector(`.tool-call[data-tool-id="${cssEscapeValue(r.tool_use_id)}"]`)?.classList.add("failed");
+      }
+    }
+  }
 }
 
 function setGenerating(v, notifyParent = true) {
@@ -3839,16 +3894,28 @@ let assistantEvents = []; // non-content SDK events that still explain the AI tu
   function cleanupRunningTools() {
     if (!assistantEl) return;
     assistantEl.querySelectorAll(".tool-call.running").forEach(el => {
+      el.classList.remove("running");
+      el.querySelector(".tool-spinner")?.remove();
+    });
+  }
+
+  /* 按 tool_use_id 给具体那一条工具落状态。失败是唯一需要抢注意力的结果 ——
+     成功就静默收尾，满屏成功调用不该满屏都在喊。 */
+  function markToolSettled(toolUseId, isError) {
+    if (!assistantEl || !toolUseId) return;
+    const el = assistantEl.querySelector(`.tool-call[data-tool-id="${cssEscapeValue(toolUseId)}"]`);
+    if (!el) return;
     el.classList.remove("running");
     el.querySelector(".tool-spinner")?.remove();
-  });
-}
+    el.classList.toggle("failed", !!isError);
+  }
 
 function resetAssistantState() {
   cleanupRunningTools();
   removeGenChip();
   // 上一回合遗留的编队卡不该被下一回合的派生复用
   resetSquads();
+  updateBackgroundActivity();
   assistantEl = null; assistantTxt = ""; assistantBlocks = []; assistantRawMessages = []; assistantEvents = []; blockMap = {}; prevTurnTexts = [];
 }
 
@@ -3960,7 +4027,7 @@ function taskEventIsDone(ev) {
 /* ══════════════════════════════════════════════════════════
    派生子 agent 的统一呈现
    三种真实形态收敛到同一张编队卡（Codex 的串行 todo 除外）：
-     A  Task 工具派生   tool_use{name:"Task"} + 子 agent 的 parent_tool_use_id
+     A  Agent 工具派生  tool_use{name:"Agent"} + 子 agent 的 parent_tool_use_id
      B  后台异步任务     system/task_*  + task_id
      C  Codex todo_list  串行计划，走 checklist 而非编队卡
    Codex 自 2026-03 起也有 subagent（default/worker/explorer），但它们是独立的
@@ -3973,11 +4040,38 @@ const MIN_DWELL = 1200;   // 一旦出现，最少驻留这么久
 
 const squadCards = new Map();      // squadId -> SquadCard
 const squadOfTask = new Map();     // taskId/toolUseId -> squadId，供跨回合的后台任务找回原卡
+/* 一个子 agent 会同时出现在两条事件流里：assistant 的 tool_use{name:"Agent"}，
+   和 system 的 task_*。两条各建一项就会数成双份，所以统一归到 tool_use_id 上
+   （它同时也是子 agent 自身事件的 parent_tool_use_id，L2 工具流才落得进来）。
+   后续只带 task_id 的事件靠这张表找回同一项。 */
+const squadTaskAlias = new Map();   // task_id -> 归一后的项 id
+
+/* 项 id -> task_id，登记"完成信号要等 task_notification"的派生。
+   后台化的派生会先立刻回一条 tool_result，但那只是启动回执，正文形如
+   "Async agent launched successfully… agentId: <task_id> … working in the
+   background"。照它 settle 会让还在跑的子任务立刻显示成已完成，卡随即被
+   resetSquads 回收，之后的 progress 事件再另起新项 —— 数量就是这么炸的。
+   识别靠正文里回带的 task_id，不靠那句英文：换措辞或换语言都不受影响，
+   而同步执行的派生返回真结果时不含这个 id，照常 settle。 */
+const asyncAgentItems = new Map();
 let activeSquad = null;
 let squadSeq = 0;
 
+/* 派生子 agent 的工具名。SDK 现在叫 Agent（sdk-tools.d.ts 的 AgentInput），
+   历史上叫 Task —— 两个都认，否则换一版 SDK 编队卡就整个失效。 */
+const SUBAGENT_TOOL_NAMES = new Set(["Agent", "Task"]);
+const isSubagentTool = (name) => SUBAGENT_TOOL_NAMES.has(name);
+
 const sqShortPath = (p) => String(p || "").split(/[\\/]/).pop() || "";
 const sqHost = (u) => { try { return new URL(u).host; } catch { return String(u || "").slice(0, 30); } };
+
+// 秒到分钟就换成 m:ss —— "197s" 要在脑子里除一次才知道是三分多钟
+function formatElapsed(ms) {
+  const s = Math.max(1, Math.round(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60), rs = String(s % 60).padStart(2, "0");
+  return m < 60 ? `${m}:${rs}` : `${Math.floor(m / 60)}:${String(m % 60).padStart(2, "0")}:${rs}`;
+}
 
 // 工具调用 → 人话，用于子 agent 的 L2 工具流
 function subagentToolLabel(name, input) {
@@ -3989,17 +4083,27 @@ function subagentToolLabel(name, input) {
   if (name === "Bash") return i.description || `执行 ${String(i.command ?? "").slice(0, 36)}`;
   if (name === "WebFetch") return `抓取 ${sqHost(i.url)}`;
   if (name === "WebSearch") return `搜索 "${String(i.query ?? "").slice(0, 24)}"`;
-  if (name === "Task") return i.description || "子任务";
+  if (isSubagentTool(name)) return i.description || "子任务";
   return name || "tool";
+}
+
+function toolResultText(content) {
+  return Array.isArray(content)
+    ? content.map((c) => (typeof c === "string" ? c : c?.text || "")).join(" ")
+    : String(content ?? "");
 }
 
 // tool_result 内容 → 一句成果摘要，避免把整段 dump 塞进行尾
 function subagentResultSummary(content) {
-  const text = Array.isArray(content)
-    ? content.map((c) => (typeof c === "string" ? c : c?.text || "")).join(" ")
-    : String(content ?? "");
-  const first = text.trim().split("\n").find((l) => l.trim());
+  const first = toolResultText(content).trim().split("\n").find((l) => l.trim());
   return first ? first.trim().slice(0, 40) : "已完成";
+}
+
+/* 这条 tool_result 是"后台派生已启动"的回执，而非结果？
+   判据是正文里回带了该项的 task_id —— 只有启动回执会带它。 */
+function isAsyncLaunchAck(itemId, content) {
+  const taskId = asyncAgentItems.get(itemId);
+  return !!taskId && toolResultText(content).includes(taskId);
 }
 
 class SquadCard {
@@ -4031,7 +4135,7 @@ class SquadCard {
 
   spawn(id, label) {
     if (this.state.has(id)) return;
-    this.state.set(id, { status: "running", steps: [], result: null });
+    this.state.set(id, { status: "running", steps: [], result: null, startAt: Date.now(), endAt: 0 });
     this.labels.set(id, label);
     this.order.push(id);
     squadOfTask.set(id, this.id);
@@ -4059,13 +4163,10 @@ class SquadCard {
     this.syncChip();
   }
 
-  /* L0 用稳定计数，不用"最后一步的文本" —— 后者会随每个工具调用闪烁 */
+  /* 子任务的进度由活动条报，gen chip 让位。同一件事在两处喊，眼睛不知道看哪个 ——
+     而且 gen chip 长在消息流里，会随消息滚走，活动条不会。 */
   syncChip() {
-    const c = this.counts;
-    if (c.live === 0) return;
-    updateGenChip(c.done + c.fail > 0
-      ? `分头处理 ${c.total} 项 · ${c.done} 项已完成`
-      : `分头处理 ${c.total} 项`);
+    if (this.counts.live > 0) updateGenChip("");
   }
 
   settle(id, status, result) {
@@ -4073,6 +4174,7 @@ class SquadCard {
     if (!s || s.status === "done" || s.status === "failed") return;
     s.status = status;
     s.result = result;
+    s.endAt = Date.now();
     this.paintRow(id);
     this.refresh();
     this.syncBlock();
@@ -4094,7 +4196,7 @@ class SquadCard {
     return {
       order: [...this.order],
       labels: [...this.labels],
-      state: [...this.state].map(([k, v]) => [k, { status: v.status, result: v.result, steps: [...v.steps] }]),
+      state: [...this.state].map(([k, v]) => [k, { status: v.status, result: v.result, steps: [...v.steps], startAt: v.startAt, endAt: v.endAt }]),
       startAt: this.startAt,
       finishedAt: this.finishedAt,
     };
@@ -4108,7 +4210,10 @@ class SquadCard {
     const card = new SquadCard(id);
     card.order = [...(snap.order ?? [])];
     card.labels = new Map(snap.labels ?? []);
-    card.state = new Map((snap.state ?? []).map(([k, v]) => [k, { status: v.status, result: v.result, steps: [...(v.steps ?? [])] }]));
+    card.state = new Map((snap.state ?? []).map(([k, v]) => [k, {
+      status: v.status, result: v.result, steps: [...(v.steps ?? [])],
+      startAt: v.startAt ?? snap.startAt ?? 0, endAt: v.endAt ?? 0,
+    }]));
     card.startAt = snap.startAt ?? Date.now();
     card.finishedAt = snap.finishedAt ?? 0;
     squadCards.set(id, card);
@@ -4148,12 +4253,8 @@ class SquadCard {
       card.classList.toggle("folded");
     };
     card.querySelector(".sq-stopall").onclick = () => this.stopAll();
-    card.querySelector(".sq-re").onclick = () => {
-      card.classList.remove("done");
-      card.querySelector(".sq-head").style.display = "";
-      card.querySelector(".sq-rail").classList.remove("joined");
-      card.querySelectorAll(".sq-conn").forEach((c) => c.classList.remove("joined"));
-    };
+    // 整行可点：合流后只剩一行 11px 灰字，把命中区限制在"展开"两个字上太苛刻
+    card.querySelector(".sq-summary").onclick = () => this.unfold();
 
     this.order.forEach((id, i) => this.addRow(id, i));
     this.refresh();
@@ -4167,7 +4268,21 @@ class SquadCard {
     });
     // 重建时若早已合流，直接恢复到摘要态，不重放动画
     if (allSettled) { card.classList.add("done"); this.paintSummary(); }
+    // 此刻 card 还没被 appendChild，isConnected 仍是 false —— 直接刷新会被
+    // liveSquadCards 的死链剔除误伤。挪到调用方插完 DOM 之后。
+    queueMicrotask(updateBackgroundActivity);
     return card;
+  }
+
+  /* 从摘要态还原成完整卡。抽屉跳转和点摘要行都走这里 */
+  unfold() {
+    if (!this.el) return;
+    this.el.classList.remove("done", "folded");
+    const head = this.el.querySelector(".sq-head");
+    if (head) head.style.display = "";
+    this.el.querySelector(".sq-rail")?.classList.remove("joined");
+    this.el.querySelectorAll(".sq-conn").forEach((c) => c.classList.remove("joined"));
+    this.refresh();
   }
 
   addRow(id, i) {
@@ -4259,6 +4374,11 @@ class SquadCard {
     const c = this.counts;
     this.el.querySelector(".sq-count").textContent =
       c.done + c.fail > 0 ? `${c.done + c.fail}/${c.total}` : `${c.total} 项`;
+    // 从抽屉跳回来时卡会从摘要态还原，"分头处理中" 配 3/3 是自相矛盾的
+    const title = this.el.querySelector(".sq-title");
+    if (title) title.textContent = c.live > 0 ? "分头处理中" : "分头处理";
+    const stopAll = this.el.querySelector(".sq-stopall");
+    if (stopAll) stopAll.hidden = c.live === 0;
   }
 
   stopOne(id) {
@@ -4277,15 +4397,32 @@ class SquadCard {
     try { ws?.send(JSON.stringify({ type: "stop" })); } catch { }
   }
 
+  /* 摘要行带上"做了什么"。只报数量的话，这行灰字跟系统日志长得一模一样，
+     在滚回去找"刚才那个子任务查到了啥"时根本认不出来。 */
+  summaryTitle() {
+    const names = this.order.map((id) => this.labels.get(id)).filter(Boolean);
+    if (!names.length) return `${this.order.length} 项子任务`;
+    let text = names.join("、");
+    if (text.length > 22) {
+      // 逐个丢弃到放得下，剩下的折成"+N"，避免从中间截断把词切碎
+      let kept = names.length;
+      while (kept > 1 && names.slice(0, kept).join("、").length > 18) kept--;
+      text = names.slice(0, kept).join("、");
+      if (text.length > 20) text = text.slice(0, 19) + "…";
+      if (kept < names.length) text += ` +${names.length - kept}`;
+    }
+    return text;
+  }
+
   paintSummary() {
     if (!this.el) return;
     const c = this.counts;
     // 用合流时刻定格，否则历史回放会显示"已完成 3 项 · 84000s"
     this.finishedAt = this.finishedAt || Date.now();
-    const secs = Math.max(1, Math.round((this.finishedAt - this.startAt) / 1000));
+    const took = formatElapsed(this.finishedAt - this.startAt);
     this.el.querySelector(".sq-sumtxt").textContent = c.fail
-      ? `完成 ${c.done} 项 · ${c.fail} 项未成功 · ${secs}s`
-      : `已完成 ${c.done} 项 · ${secs}s`;
+      ? `${this.summaryTitle()} · ${c.fail} 项未成功 · ${took}`
+      : `${this.summaryTitle()} · ${took}`;
   }
 
   /* 合流：分支收回 → rail 并线 → 整卡塌成一行摘要 */
@@ -4305,6 +4442,13 @@ class SquadCard {
       }, 420);
     }, wait);
   }
+}
+
+/* 按项 id 找到拥有它的那张卡。不能只看 activeSquad —— 回合结束时 resetSquads
+   会把它置空，而后台任务的事件正是在那之后才回来的。 */
+function squadOwning(itemId) {
+  const card = squadCards.get(squadOfTask.get(itemId));
+  return card?.has(itemId) ? card : null;
 }
 
 function currentSquad(create) {
@@ -4328,15 +4472,24 @@ function resetSquads() {
       if (sid === id) squadOfTask.delete(taskId);
     }
   }
+  // 别名指向的项没了就一起收掉，否则跨回合的 task_id 会归到一个不存在的项上
+  for (const [taskId, itemId] of [...squadTaskAlias]) {
+    if (!squadOfTask.has(itemId)) squadTaskAlias.delete(taskId);
+  }
+  for (const id of [...asyncAgentItems.keys()]) {
+    if (!squadOfTask.has(id)) asyncAgentItems.delete(id);
+  }
   activeSquad = null;   // 下一轮的前台派生另起一张，不混进上一轮
   todoListEl = null;
 }
 
-/* ── 后台活动条 ──
-   只在"前台轮已结束、后台任务仍在跑"时出现。生成中不显示（那时有 gen chip）。 */
+/* ── 子任务活动条 ──
+   只要还有子 agent 在跑就常驻，不区分前台/后台 —— 恰恰是生成过程中最需要它。
+   （旧版在 isGenerating 时把自己藏起来，让位给 gen chip，结果是最该看见的
+   那段时间反而什么都没有，而 gen chip 会随消息流滚走。） */
 let bgActivityEl = null;
-let bgActivityDismissed = false;
 let bgActivityHideTimer = null;
+let bgActivityOpen = false;   // 展开状态跨轮保持：手动开过就说明你想盯着
 
 // 惰性获取并绑定：setGenerating 可能在脚本执行期就被调用，顶层 const 会踩 TDZ
 function ensureBgActivityEl() {
@@ -4344,25 +4497,11 @@ function ensureBgActivityEl() {
   const el = document.getElementById("bg-activity");
   if (!el) return null;
   bgActivityEl = el;
-  el.querySelector(".bga-view").onclick = () => {
-    let target = null;
-    squadCards.forEach((card) => { if (card.counts.live > 0 && card.el) target = card.el; });
-    target = target || [...document.querySelectorAll(".squad")].pop();
-    if (!target) return scrollBottom();
-    target.classList.remove("folded");
-    // 手动滚动 —— scrollIntoView 会连带滚坏外层容器
-    const box = document.getElementById("messages");
-    const boxRect = box.getBoundingClientRect();
-    const tRect = target.getBoundingClientRect();
-    box.scrollTop += (tRect.top - boxRect.top) - Math.max(0, (box.clientHeight - tRect.height) / 2);
-    target.animate(
-      [{ boxShadow: "0 0 0 3px var(--accent-ring)" }, { boxShadow: "0 0 0 0 transparent" }],
-      { duration: 700, easing: "cubic-bezier(0.32, 0.72, 0, 1)" },
-    );
-  };
-  el.querySelector(".bga-close").onclick = () => {
-    bgActivityDismissed = true;
-    el.hidden = true;
+  el.querySelector(".bga-head").onclick = () => {
+    bgActivityOpen = !bgActivityOpen;
+    el.classList.toggle("open", bgActivityOpen);
+    if (bgActivityOpen) renderBgActivityList();
+    else syncBgActivityTicker();   // 收起就别再空转
   };
   return el;
 }
@@ -4374,34 +4513,149 @@ function liveBackgroundTasks() {
 }
 
 function updateBackgroundActivity() {
-  const bgActivityEl = ensureBgActivityEl();
-  if (!bgActivityEl) return;
+  const el = ensureBgActivityEl();
+  if (!el) return;
   const live = liveBackgroundTasks();
-
-  // 生成中由 gen chip 负责，这里让位，避免两处同时喊
-  if (isGenerating || bgActivityDismissed) {
-    if (!live) bgActivityDismissed = false;
-    bgActivityEl.hidden = true;
-    return;
-  }
+  const tasks = allSubagentTasks();
+  const total = tasks.length;
 
   if (live > 0) {
     clearTimeout(bgActivityHideTimer);
-    bgActivityEl.classList.remove("done");
-    bgActivityEl.querySelector(".bga-text").textContent = `${live} 项仍在后台运行`;
-    bgActivityEl.querySelector(".bga-view").hidden = false;
-    bgActivityEl.hidden = false;
+    el.classList.remove("done");
+    el.querySelector(".bga-text").textContent =
+      total > live ? `${live} 个子任务进行中 · 共 ${total} 项` : `${live} 个子任务进行中`;
+    el.hidden = false;
+    el.classList.toggle("open", bgActivityOpen);
+    if (bgActivityOpen) renderBgActivityList();
     return;
   }
 
-  // 刚从"有任务"跌到 0 → 报一次完成再自动收起，不需要用户去关
-  if (!bgActivityEl.hidden && !bgActivityEl.classList.contains("done")) {
-    bgActivityEl.classList.add("done");
-    bgActivityEl.querySelector(".bga-text").textContent = "后台任务已全部完成";
-    bgActivityEl.querySelector(".bga-view").hidden = false;
+  // 刚从"有任务"跌到 0：报一次结果，留几秒够你点开看，然后自己消失
+  if (!el.hidden && !el.classList.contains("done")) {
+    const fail = tasks.filter((t) => t.s.status === "failed").length;
+    el.classList.add("done");
+    el.classList.toggle("has-fail", fail > 0);
+    el.querySelector(".bga-text").textContent = !total ? "子任务已结束"
+      : fail ? `${total - fail} 个完成 · ${fail} 个未成功`
+        : `${total} 个子任务已全部完成`;
+    if (bgActivityOpen) renderBgActivityList();
     clearTimeout(bgActivityHideTimer);
-    bgActivityHideTimer = setTimeout(() => { bgActivityEl.hidden = true; }, 6000);
+    bgActivityHideTimer = setTimeout(() => {
+      el.hidden = true;
+      el.classList.remove("open");
+      bgActivityOpen = false;
+      syncBgActivityTicker();
+    }, 8000);
   }
+}
+
+/* ══════════════════════════════════════════════════════════
+   活动条的任务索引
+   编队卡活在消息流里，后面来两条消息就把它顶出视口，而子 agent 常常还在跑，
+   后台任务甚至跨回合。活动条贴在输入框上方，负责回答"现在有几个在干活"。
+   ══════════════════════════════════════════════════════════ */
+/* 只认 squadCards 里的卡 —— 那正是"这一轮还相关的"：回合结束时 resetSquads
+   会清掉已收尾的卡，只留还在后台跑的。若改成累计整场会话，条上的数字会把前
+   几轮早已结束的子任务一起算进来，跟你这次派了几个对不上。
+   同时滤掉 DOM 已失联的（会话切换会清空 #messages），免得点了跳不过去。 */
+function liveSquadCards() {
+  const out = [];
+  squadCards.forEach((card) => { if (card.el?.isConnected) out.push(card); });
+  return out;
+}
+
+// scrollIntoView 会连带滚坏外层容器，手动算
+function scrollElementIntoMessages(target) {
+  const box = document.getElementById("messages");
+  if (!box || !target) return;
+  const boxRect = box.getBoundingClientRect();
+  const tRect = target.getBoundingClientRect();
+  box.scrollTop += (tRect.top - boxRect.top) - Math.max(0, (box.clientHeight - tRect.height) / 2);
+}
+
+function flashElement(el, radius = 3) {
+  el?.animate(
+    [{ boxShadow: `0 0 0 ${radius}px var(--accent-ring)` }, { boxShadow: "0 0 0 0 transparent" }],
+    { duration: 700, easing: "cubic-bezier(0.32, 0.72, 0, 1)" },
+  );
+}
+
+/* 跳回某张卡（可带具体子任务：顺便展开它的工具流并高亮那一行） */
+function revealSquadCard(card, taskId) {
+  if (!card?.el?.isConnected) return;
+  card.unfold();
+  if (taskId && card.state.has(taskId) && card.openId !== taskId) card.toggleDetail(taskId);
+  const row = taskId
+    ? card.el.querySelector(`.sq-row[data-id="${cssEscapeValue(taskId)}"]`)
+    : null;
+  scrollElementIntoMessages(row || card.el);
+  flashElement(row || card.el, row ? 2 : 3);
+}
+
+/* 当前所有子任务，按"未完成在前、刚结束的紧随其后"排。
+   刚完成的排在已结束一侧的最前 —— 那是最可能被回头看一眼的 */
+function allSubagentTasks() {
+  const running = [], settled = [];
+  liveSquadCards().forEach((card) => {
+    card.order.forEach((id) => {
+      const s = card.state.get(id);
+      if (!s) return;
+      (s.status === "done" || s.status === "failed" ? settled : running)
+        .push({ card, id, s, label: card.labels.get(id) || id });
+    });
+  });
+  running.sort((a, b) => (a.s.startAt ?? 0) - (b.s.startAt ?? 0));
+  settled.sort((a, b) => (b.s.endAt ?? 0) - (a.s.endAt ?? 0));
+  return running.concat(settled);
+}
+
+function renderBgActivityList() {
+  const listEl = bgActivityEl?.querySelector(".bga-list");
+  if (!listEl) return;
+  const now = Date.now();
+  listEl.innerHTML = "";
+  allSubagentTasks().forEach(({ card, id, s, label }) => {
+    const item = document.createElement("div");
+    item.className = "bga-item";
+    item.dataset.s = s.status;
+    if (s.startAt) item.dataset.start = String(s.startAt);
+    item.innerHTML = `<span class="bga-idot"></span><span class="bga-ilabel"></span><span class="bga-imeta"></span>`;
+    item.querySelector(".bga-ilabel").textContent = label;
+    // 跑着的显示走动的秒数：静态的"运行中"分不出刚起步和卡了三分钟
+    item.querySelector(".bga-imeta").textContent =
+      s.status === "running" ? (s.startAt ? formatElapsed(now - s.startAt) : "运行中")
+        : s.status === "failed" ? "未完成"
+          : s.endAt && s.startAt ? formatElapsed(s.endAt - s.startAt) : "";
+    item.title = label;
+    // 点一项 = 跳到它所在的卡并就地展开它的工具流，比自己翻回去快得多
+    item.onclick = () => revealSquadCard(card, id);
+    listEl.appendChild(item);
+  });
+  syncBgActivityTicker();
+}
+
+/* 秒表只在"展开着 + 确实有东西在跑"时走，收起或跑完立刻停 */
+let bgActivityTicker = null;
+
+function syncBgActivityTicker() {
+  const needed = bgActivityOpen && bgActivityEl && !bgActivityEl.hidden
+    && !!bgActivityEl.querySelector('.bga-item[data-s="running"][data-start]');
+  if (needed && !bgActivityTicker) {
+    bgActivityTicker = setInterval(tickBgActivityElapsed, 1000);
+  } else if (!needed && bgActivityTicker) {
+    clearInterval(bgActivityTicker);
+    bgActivityTicker = null;
+  }
+}
+
+// 只改文本节点，不重建 DOM —— 每秒重建会打断 hover 和点击
+function tickBgActivityElapsed() {
+  const rows = bgActivityEl?.querySelectorAll('.bga-item[data-s="running"][data-start]');
+  if (!rows?.length) return syncBgActivityTicker();
+  const now = Date.now();
+  rows.forEach((el) => {
+    el.querySelector(".bga-imeta").textContent = formatElapsed(now - Number(el.dataset.start));
+  });
 }
 
 /* ── Codex 的串行 checklist ── */
@@ -4441,8 +4695,8 @@ function subagentIngest(ev) {
   //    默认 forwardSubagentText:false 时这里只有 tool_use/tool_result，
   //    已经够喂 L2；开了才有 text/thinking。无论如何都不该漏进主流。
   if (ev.parent_tool_use_id) {
-    const card = currentSquad(false);
-    if (card && card.has(ev.parent_tool_use_id)) {
+    const card = squadOwning(ev.parent_tool_use_id);
+    if (card) {
       for (const b of ev.message?.content ?? []) {
         if (b.type === "tool_use" || b.type === "server_tool_use" || b.type === "mcp_tool_use") {
           card.step(ev.parent_tool_use_id, subagentToolLabel(b.name, b.input));
@@ -4454,9 +4708,9 @@ function subagentIngest(ev) {
     return true;
   }
 
-  // ── A2 · 主 agent 发起 Task 工具派生
+  // ── A2 · 主 agent 发起 Agent 工具派生
   if (ev.type === "assistant") {
-    const tasks = (ev.message?.content ?? []).filter((b) => b.type === "tool_use" && b.name === "Task");
+    const tasks = (ev.message?.content ?? []).filter((b) => b.type === "tool_use" && isSubagentTool(b.name));
     if (tasks.length) {
       const card = currentSquad(true);
       tasks.forEach((b) => card.spawn(b.id, b.input?.description || b.input?.subagent_type || "子任务"));
@@ -4464,32 +4718,38 @@ function subagentIngest(ev) {
     }
   }
 
-  // ── A3 · Task 返回 → 该分支合流
+  // ── A3 · 派生返回 → 该分支合流
   if (ev.type === "user") {
-    const card = currentSquad(false);
-    if (card) {
-      let hit = false;
-      for (const b of ev.message?.content ?? []) {
-        if (b.type === "tool_result" && card.has(b.tool_use_id)) {
-          card.settle(b.tool_use_id, b.is_error ? "failed" : "done", subagentResultSummary(b.content));
-          hit = true;
-        }
-      }
-      if (hit) return true;
+    let hit = false;
+    for (const b of ev.message?.content ?? []) {
+      if (b.type !== "tool_result") continue;
+      const card = squadOwning(b.tool_use_id);
+      if (!card) continue;
+      hit = true;
+      if (isAsyncLaunchAck(b.tool_use_id, b.content)) continue;   // 只是启动回执
+      card.settle(b.tool_use_id, b.is_error ? "failed" : "done", subagentResultSummary(b.content));
     }
+    if (hit) return true;
   }
 
   // ── B · 后台异步任务。可能跨回合回来，先按 taskId 找回它原来那张卡
   if (ev.type === "system" && TASK_EVENT_TYPES.has(ev.subtype)) {
-    const id = taskEventId(ev);
-    const card = squadCards.get(squadOfTask.get(id)) ?? currentSquad(true);
+    const taskId = taskEventId(ev);
+    /* 归一到 tool_use_id：A2 已经用它建过项了（或稍后会用它来建），
+       而子 agent 自身事件的 parent_tool_use_id 也是它 —— 一个键贯穿三条流。 */
+    const toolUseId = ev.tool_use_id ?? ev.toolUseID ?? null;
+    if (toolUseId) squadTaskAlias.set(taskId, toolUseId);
+    const id = squadTaskAlias.get(taskId) ?? taskId;
+    const card = squadOwning(id) ?? currentSquad(true);
     const status = String(ev.status ?? ev.patch?.status ?? ev.task?.status ?? "").trim().toLowerCase();
     const desc = taskEventDetail(ev);
     if (!card.has(id)) card.spawn(id, desc || "后台任务");
     if (taskEventIsDone(ev)) {
+      asyncAgentItems.delete(id);
       card.settle(id, (status === "failed" || status === "error") ? "failed" : "done", desc || "已完成");
-    } else if (desc) {
-      card.step(id, desc);
+    } else {
+      asyncAgentItems.set(id, taskId);   // 记下 task_id，供识别启动回执
+      if (desc) card.step(id, desc);
     }
     return true;
   }
@@ -4753,7 +5013,7 @@ function handleEvent(ev) {
       } else if (isToolUseType(block.type)) {
         // Task 走编队卡。此刻 input 还在流式累积中，等 content_block_stop
         // 拿到完整 JSON 才知道 description，所以先只登记不渲染。
-        if (block.name === "Task") {
+        if (isSubagentTool(block.name)) {
           blockMap[idx] = { el: null, type: block.type, accumulated: "", id: block.id, isTask: true };
           updateGenChip("正在分派子任务…");
           return;
@@ -4875,7 +5135,10 @@ function handleEvent(ev) {
   }
 
   if (ev.type === "user" && isToolResultEvent(ev)) {
-    subagentIngest(ev);   // Task 的 tool_result → 该分支合流
+    subagentIngest(ev);   // 派生的 tool_result → 该分支合流
+    for (const b of ev.message?.content ?? []) {
+      if (b?.type === "tool_result") markToolSettled(b.tool_use_id, b.is_error);
+    }
     cleanupRunningTools();
     return;
   }
@@ -5964,6 +6227,7 @@ async function loadConversation(conv) {
     ws.send(JSON.stringify({ setSession: conv.sessionId, conversationId: conv.id }));
   }
   closeHistoryPanel();
+  updateBackgroundActivity();   // 历史里的编队卡由 renderAssistantBlocks 重建，活动条要跟着重算
   scrollBottom();
 }
 
@@ -6225,6 +6489,7 @@ document.getElementById("btn-history").addEventListener("click", (e) => {
 document.getElementById("btn-new").addEventListener("click", startNewConversation);
 document.getElementById("history-close").addEventListener("click", closeHistoryPanel);
 historyBackdrop.addEventListener("click", closeHistoryPanel);
+
 
 // Rotating placeholder logic
 (function initRotatingPlaceholder() {
