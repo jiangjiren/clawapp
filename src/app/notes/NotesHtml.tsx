@@ -11,6 +11,9 @@ const injectHeightScript = (html: string): string => {
   const script = `<script>(function(){
     var resizeObserver;
     var resizeFrame = 0;
+    var lastViewportWidth = window.innerWidth;
+    var lastViewportHeight = window.innerHeight;
+    var suppressedHeight = null;
 
     function saveStyle(element, property) {
       return [element.style.getPropertyValue(property), element.style.getPropertyPriority(property)];
@@ -39,23 +42,71 @@ const injectHeightScript = (html: string): string => {
       body.style.setProperty("height", "auto", "important");
       body.style.setProperty("min-height", "0", "important");
 
+      var scrollTop = window.scrollY || root.scrollTop || body.scrollTop || 0;
+      var viewportHeight = Math.max(1, window.innerHeight || root.clientHeight || 1);
+      var rootRect = root.getBoundingClientRect();
+      var bodyRect = body.getBoundingClientRect();
       var bodyStyle = window.getComputedStyle(body);
       var marginTop = parseFloat(bodyStyle.marginTop) || 0;
       var marginBottom = parseFloat(bodyStyle.marginBottom) || 0;
-      var height = Math.ceil(body.getBoundingClientRect().height + marginTop + marginBottom);
+      var height = Math.max(
+        rootRect.bottom + scrollTop,
+        bodyRect.height + marginTop + marginBottom,
+        bodyRect.top + scrollTop + body.scrollHeight + marginBottom,
+        root.scrollHeight > viewportHeight + 0.5 ? root.scrollHeight : 0
+      );
+
+      // body/root boxes do not include every out-of-flow visual box. In
+      // particular, an HTML document made only from positioned elements can
+      // otherwise collapse to 1px. Include descendant render bounds while the
+      // document still has its height constraints neutralised.
+      var elements = body.querySelectorAll("*");
+      for (var i = 0; i < elements.length; i++) {
+        var rect = elements[i].getBoundingClientRect();
+        if (Number.isFinite(rect.bottom)) {
+          height = Math.max(height, rect.bottom + scrollTop);
+        }
+      }
 
       restoreStyle(root, "height", rootHeight);
       restoreStyle(root, "min-height", rootMinHeight);
       restoreStyle(body, "height", bodyHeight);
       restoreStyle(body, "min-height", bodyMinHeight);
 
-      return Math.max(1, height);
+      return Math.max(1, Math.ceil(height));
     }
 
     function reportHeight() {
       resizeFrame = 0;
+      var viewportWidth = window.innerWidth;
+      var viewportHeight = window.innerHeight;
+      var widthChanged = Math.abs(viewportWidth - lastViewportWidth) >= 0.5;
+      var heightChanged = Math.abs(viewportHeight - lastViewportHeight) >= 0.5;
+      lastViewportWidth = viewportWidth;
+      lastViewportHeight = viewportHeight;
+
+      // Applying the previous report changes the iframe viewport height. A
+      // descendant using vh can then resize by exactly the same amount and
+      // create an endless parent/child feedback loop. A height-only viewport
+      // change is the response to our own report. Remember that resulting
+      // measurement as well, because restoring the temporary measurement
+      // styles can enqueue one more ResizeObserver callback.
+      var measuredHeight = measureIntrinsicHeight();
+      if (heightChanged && !widthChanged) {
+        suppressedHeight = measuredHeight;
+        return;
+      }
+      if (
+        !widthChanged &&
+        suppressedHeight !== null &&
+        Math.abs(measuredHeight - suppressedHeight) < 0.5
+      ) {
+        return;
+      }
+      suppressedHeight = null;
+
       try {
-        window.parent.postMessage({type:"iframeHeight",h:measureIntrinsicHeight()},"*");
+        window.parent.postMessage({type:"iframeHeight",h:measuredHeight},"*");
       } catch (e) {}
     }
 
