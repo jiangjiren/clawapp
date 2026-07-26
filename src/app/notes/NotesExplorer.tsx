@@ -3467,20 +3467,6 @@ export default function NotesExplorer() {
                 <span className={styles.sidebarToggleBadge} aria-hidden="true" />
               )}
             </button>
-            {!isDesktopGitView && (activePath || isDraft) ? (
-              <button
-                type="button"
-                className={`${styles.iconButton} ${styles.homeBtn}`}
-                onClick={goHome}
-                aria-label="回到首页"
-                title="回到首页"
-              >
-                <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M3 10.5 12 3l9 7.5" />
-                  <path d="M5 9.5V20a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V9.5" />
-                </svg>
-              </button>
-            ) : null}
             {!isDesktopGitView && (navCanGoBack || navCanGoForward) ? (
               <>
                 <button

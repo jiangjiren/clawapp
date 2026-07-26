@@ -5443,10 +5443,6 @@
 }
 
 /* ── 阅读页 Home 回首页按钮（沿用 iconButton 外观）────────── */
-.homeBtn {
-  margin-left: 6px;
-}
-
 /* ── ⋯ 更多菜单 ────────────────────────────────────────────── */
 .moreMenuWrapper {
   position: relative;
