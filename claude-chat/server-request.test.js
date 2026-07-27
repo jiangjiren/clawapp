@@ -82,6 +82,30 @@ test("WebSocket requests are acknowledged and duplicate IDs are not executed twi
       ws.once("error", reject);
     });
 
+    const providersResponse = await fetch(`http://127.0.0.1:${port}/api/providers?token=${encodeURIComponent(token)}`);
+    assert.equal(providersResponse.status, 200);
+    const providerPayload = await providersResponse.json();
+    assert.ok(Array.isArray(providerPayload.providers));
+    const codexProvider = providerPayload.providers.find(profile => profile.provider === "codex");
+    assert.equal(codexProvider?.model, "gpt-5.6-sol");
+    assert.match(codexProvider?.goodAt || "", /重构|多文件/);
+    assert.ok(providerPayload.providers.every(profile => typeof profile.goodAt === "string" && profile.goodAt.length > 0));
+    const profileUpdateResponse = await fetch(
+      `http://127.0.0.1:${port}/api/auth-profile?token=${encodeURIComponent(token)}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "update",
+          profile: { id: "p_codex", name: "Codex renamed probe" },
+        }),
+      },
+    );
+    assert.equal(profileUpdateResponse.status, 200);
+    const profileUpdatePayload = await profileUpdateResponse.json();
+    const updatedCodex = profileUpdatePayload.data?.profiles?.find(profile => profile.id === "p_codex");
+    assert.match(updatedCodex?.goodAt || "", /重构|多文件/, "profile updates must preserve goodAt");
+
     const request = {
       conversationId: "conv_ack_probe",
       userMessageId: "user_ack_probe",
@@ -112,6 +136,42 @@ test("WebSocket requests are acknowledged and duplicate IDs are not executed twi
       startedCount,
       "an acknowledged request ID must not execute a second time",
     );
+
+    const dispatchStart = events.length;
+    const dispatchRequest = {
+      ...request,
+      conversationId: "conv_dispatch_probe",
+      userMessageId: "user_dispatch_probe",
+      displayText: "@missing-vendor 验证结构化派发错误",
+      prompt: "验证结构化派发错误",
+      dispatchProvider: "missing-vendor",
+      dispatchReason: "离线协议测试",
+    };
+    ws.send(JSON.stringify(dispatchRequest));
+    await waitForMessage(
+      events,
+      event => event.type === "done" && event.userMessageId === dispatchRequest.userMessageId,
+      dispatchStart,
+    );
+    const dispatchEvents = events.slice(dispatchStart);
+    const dispatchToolUse = dispatchEvents.find(event =>
+      event.type === "assistant"
+      && event.message?.content?.some(block => block.type === "tool_use" && block.name === "dispatch_to_provider")
+    );
+    assert.equal(
+      dispatchToolUse?.message?.content?.find(block => block.name === "dispatch_to_provider")?.input?.provider,
+      "missing-vendor",
+    );
+    const dispatchToolResult = dispatchEvents.find(event =>
+      event.type === "user"
+      && event.message?.content?.some(block => block.type === "tool_result" && block.is_error)
+    );
+    assert.ok(dispatchToolResult, "manual provider dispatch must close the squad branch with an error result");
+    assert.ok(dispatchEvents.some(event =>
+      event.type === "error"
+      && /当前可用厂商/.test(event.text || "")
+      && /Codex renamed probe/.test(event.text || "")
+    ));
 
     const runStateResponse = await fetch(`http://127.0.0.1:${port}/api/run-state?token=${encodeURIComponent(token)}`);
     assert.equal(runStateResponse.status, 200);
@@ -166,7 +226,7 @@ test("buildAgentEnv opts into session_state_changed for every provider", { timeo
 
   try {
     const probe = `
-      const { buildAgentEnv } = await import(${JSON.stringify(new URL("server.js", import.meta.url).href)});
+      const { buildAgentEnv, resolveDispatchProfile, listDispatchProviders } = await import(${JSON.stringify(new URL("server.js", import.meta.url).href)});
       const KEY = "CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS";
       const cases = {
         claude: { activeProfileId: "p_claude", profiles: [{ id: "p_claude", provider: "claude" }] },
@@ -177,10 +237,26 @@ test("buildAgentEnv opts into session_state_changed for every provider", { timeo
         custom: { activeProfileId: "p_custom", profiles: [{ id: "p_custom", provider: "custom", apiKey: "k", baseUrl: "https://x", opusModel: "m" }] },
         codex: { activeProfileId: "p_codex", profiles: [{ id: "p_codex", provider: "codex" }] },
       };
-      const out = { inherited: process.env[KEY], providers: {} };
+      const out = { inherited: process.env[KEY], providers: {}, override: {} };
       for (const [name, data] of Object.entries(cases)) {
         out.providers[name] = buildAgentEnv(data, "medium", null)[KEY];
       }
+      const mixed = {
+        activeProfileId: "p_claude",
+        profiles: [
+          { id: "p_claude", provider: "claude" },
+          { id: "p_d", name: "Deep Reasoner", provider: "deepseek", apiKey: "override-key", baseUrl: "https://override.example", sonnetModel: "deepseek-override", goodAt: "reasoning" },
+        ],
+      };
+      const overrideEnv = buildAgentEnv(mixed, "medium", null, mixed.profiles[1]);
+      out.override = {
+        baseUrl: overrideEnv.ANTHROPIC_BASE_URL,
+        token: overrideEnv.ANTHROPIC_AUTH_TOKEN,
+        model: overrideEnv.ANTHROPIC_MODEL,
+        byProvider: resolveDispatchProfile(mixed, "deepseek")?.id,
+        byName: resolveDispatchProfile(mixed, "Deep Reasoner")?.id,
+        listedModel: listDispatchProviders(mixed).find(profile => profile.id === "p_d")?.model,
+      };
       process.stdout.write("PROBE:" + JSON.stringify(out) + "\\n", () => process.exit(0));
     `;
     child = spawn(process.execPath, ["--input-type=module", "-e", probe], {
@@ -228,6 +304,14 @@ test("buildAgentEnv opts into session_state_changed for every provider", { timeo
     for (const provider of ["claude", "anthropic", "deepseek", "openrouter", "minimax", "custom", "codex"]) {
       assert.equal(result.providers[provider], "1", `${provider} profile must opt into session state events`);
     }
+    assert.deepEqual(result.override, {
+      baseUrl: "https://override.example",
+      token: "override-key",
+      model: "deepseek-override",
+      byProvider: "p_d",
+      byName: "p_d",
+      listedModel: "deepseek-override",
+    });
   } finally {
     if (child && !childClosed) {
       await new Promise((resolve, reject) => {

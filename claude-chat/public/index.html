@@ -223,6 +223,22 @@ html, body {
 .sq-label { flex: 1; min-width: 0; font-size: 12px; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: color 0.3s ease; }
 .sq-row[data-s="done"] .sq-label { color: var(--text-dim); }
 .sq-row[data-s="asking"] .sq-label { color: var(--accent); font-weight: 550; }
+.sq-origin {
+  display: none;
+  flex-shrink: 0;
+  max-width: 42%;
+  padding: 1px 6px;
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg));
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sq-origin.visible { display: block; }
 /* 成果摘要用 sans：mono 排中文会散架，等宽只留给时间和数字 */
 .sq-meta { flex-shrink: 0; max-width: 52%; font-size: 10.5px; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: opacity 0.15s; }
 .sq-meta.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
@@ -313,6 +329,7 @@ html, body {
 .bga-item[data-s="failed"] .bga-idot::after { content: ''; width: 1.5px; height: 4px; background: var(--bg); border-radius: 1px; }
 .bga-ilabel { flex: 1; min-width: 0; font-size: 12px; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bga-item[data-s="done"] .bga-ilabel, .bga-item[data-s="failed"] .bga-ilabel { color: var(--text-dim); }
+.bga-iorigin { flex-shrink: 0; max-width: 38%; color: var(--accent); font-family: var(--font-mono); font-size: 9.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bga-imeta { flex-shrink: 0; font-size: 10px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
 
 /* ── Codex 的 todo_list：串行计划，刻意不长成编队卡 ── */
@@ -553,6 +570,11 @@ html, body {
   background: rgba(146, 96, 10, 0.08);
   color: var(--yellow);
   border: 1px solid rgba(146, 96, 10, 0.16);
+}
+.slash-badge.provider {
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 18%, transparent);
 }
 .mention-item .slash-cmd {
   font-family: var(--font-sans);
@@ -1780,6 +1802,13 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
 }
 .form-group-title.hidden { display: none; }
 
+.add-hint {
+  margin: 5px 0 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
 .form-group {
   display: flex;
   flex-direction: column;
@@ -2187,6 +2216,16 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
             </div>
           </div>
 
+          <!-- 分组 3: 派发提示 -->
+          <div class="form-group-title">擅长领域（选填）</div>
+          <div class="form-group">
+            <div class="add-field" id="add-field-goodat">
+              <label for="add-goodat">擅长什么任务</label>
+              <input id="add-goodat" type="text" autocomplete="off" spellcheck="false" placeholder="留空用默认描述，如：超长上下文通读、跨大量文件梳理" />
+              <p class="add-hint">跨厂商派发时给主模型看，用来判断什么任务适合交给这个账号。</p>
+            </div>
+          </div>
+
           <p class="add-error" id="add-error"></p>
           <div class="add-actions">
             <button class="add-submit" id="add-submit" type="button">确认添加</button>
@@ -2226,7 +2265,7 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
       </div>
       <div id="prompt-row">
         <input type="file" id="file-input" accept="image/*" style="display:none" />
-        <textarea id="prompt" rows="1" placeholder="发消息给 Fellow…（@ 引用笔记，/ 调用 skill）"></textarea>
+        <textarea id="prompt" rows="1" placeholder="发消息给 Fellow…（@ 引用笔记，&gt; 派发给其他厂商，/ 调用 skill）"></textarea>
       </div>
       <div id="input-toolbar">
         <button id="btn-attach" title="附加图片（或直接粘贴）" aria-label="附加图片">
@@ -2539,8 +2578,17 @@ const CLAUDE_MODELS = [
 const MODEL_MIGRATIONS = { "claude-opus-4-8": "claude-opus-5" };
 
 let _profileData = { activeProfileId: localStorage.getItem("activeProfileId") || "p_claude", profiles: [] };
+let _dispatchProviders = [];
 let _claudeAuthStatus = null; // null=checking, true=ok, false=not logged in
 let _codexAuthStatus  = null;
+
+async function fetchDispatchProviders() {
+  try {
+    const res = await fetch("api/providers", { cache: "no-store" });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && Array.isArray(data.providers)) _dispatchProviders = data.providers;
+  } catch { }
+}
 
 async function checkClaudeAuth() {
   try {
@@ -2566,6 +2614,7 @@ async function checkCodexAuth() {
 
 checkClaudeAuth();
 checkCodexAuth();
+void fetchDispatchProviders();
 
 function getActiveProfile() {
   return _profileData.profiles.find(p => p.id === _profileData.activeProfileId) ?? _profileData.profiles[0] ?? null;
@@ -3023,6 +3072,7 @@ function renderProfileList(data) {
   }).join("");
   renderModelOptions(getActiveProfile());
   requestSkillRefresh();
+  void fetchDispatchProviders();
 }
 
 // ── Activate / delete ─────────────────────────────────────
@@ -3067,6 +3117,7 @@ const addOpusInput    = document.getElementById("add-opus");
 const addSonnetInput  = document.getElementById("add-sonnet");
 const addHaikuInput   = document.getElementById("add-haiku");
 const addBaseUrlInput = document.getElementById("add-baseurl");
+const addGoodAtInput  = document.getElementById("add-goodat");
 const addFieldBaseUrl = document.getElementById("add-field-baseurl");
 const addSubmitBtn    = document.getElementById("add-submit");
 const addErrorEl      = document.getElementById("add-error");
@@ -3079,6 +3130,16 @@ const ADD_PRESETS = {
   minimax:    { baseUrl: "https://api.minimaxi.com/anthropic", opusModel: "MiniMax-M3",                      sonnetModel: "MiniMax-M3",                       haikuModel: "MiniMax-M3",                    keyPlaceholder: "",    namePlaceholder: "MiniMax" },
   custom:     { baseUrl: "",                                    opusModel: "",                                sonnetModel: "",                                 haikuModel: "",                              keyPlaceholder: "",    namePlaceholder: "自定义账号" },
 };
+// 与 server.js 的 PROVIDER_GOOD_AT 对应，仅用于 placeholder 提示留空的默认值
+const DEFAULT_GOOD_AT = {
+  claude:     "综合能力强，写代码和长文本理解均衡",
+  anthropic:  "综合能力强，写代码和长文本理解均衡",
+  deepseek:   "长链条推理、算法与数学、疑难 bug 根因分析",
+  openrouter: "按所配置模型处理通用推理、写作与代码任务",
+  codex:      "大范围重构、需要反复跑测试收敛的任务、复杂多文件实现",
+  custom:     "按所配置模型处理专项任务",
+};
+
 let _addProvider = "anthropic";
 let _editingProfileId = null;  // null = add mode; string = edit mode (profile id)
 
@@ -3091,6 +3152,9 @@ function setAddProvider(value) {
   addHaikuInput.value  = p.haikuModel;
   addKeyInput.placeholder = p.keyPlaceholder;
   addBaseUrlInput.value = p.baseUrl;
+  // 擅长领域是账号维度的描述，换厂商时清空；placeholder 提示留空会落到什么默认值
+  addGoodAtInput.value = "";
+  addGoodAtInput.placeholder = DEFAULT_GOOD_AT[value] || DEFAULT_GOOD_AT.custom;
   const isCustom = value === "custom";
   addFieldBaseUrl.classList.toggle("hidden", !isCustom);
   if (!addNameInput.value.trim()) addNameInput.placeholder = p.namePlaceholder;
@@ -3130,6 +3194,12 @@ function openAccountForm(existingProfile) {
     addHaikuInput.value  = existingProfile.haikuModel  || "";
     const baseUrl = existingProfile.baseUrl || (ADD_PRESETS[provider]?.baseUrl ?? "");
     addBaseUrlInput.value = baseUrl;
+    // 后端会把留空的 goodAt 填成 provider 默认值；这里认出默认值就仍留空，
+    // 免得用户一保存就把默认描述固化成自定义值
+    const defaultGoodAt = DEFAULT_GOOD_AT[provider] || DEFAULT_GOOD_AT.custom;
+    const savedGoodAt = existingProfile.goodAt || "";
+    addGoodAtInput.value = savedGoodAt === defaultGoodAt ? "" : savedGoodAt;
+    addGoodAtInput.placeholder = defaultGoodAt;
     const isCustom = provider === "custom";
     addFieldBaseUrl.classList.toggle("hidden", !isCustom);
   } else {
@@ -3159,14 +3229,15 @@ addSubmitBtn.addEventListener("click", async () => {
   const baseUrl   = provider === "custom"
     ? addBaseUrlInput.value.trim()
     : (ADD_PRESETS[provider]?.baseUrl ?? "");
+  const goodAt    = addGoodAtInput.value.trim();  // 选填，留空由后端回落到默认描述
   addErrorEl.textContent = "";
   if (!isEdit && !apiKey)  { addErrorEl.textContent = "API Key 不能为空";  return; }
   if (!baseUrl && provider === "custom") { addErrorEl.textContent = "Base URL 不能为空"; return; }
   addSubmitBtn.disabled = true;
   try {
     const profilePayload = isEdit
-      ? { id: _editingProfileId, name, opusModel, sonnetModel, haikuModel, ...(apiKey ? { apiKey } : {}), ...(provider === "custom" ? { baseUrl } : {}) }
-      : { name, provider, apiKey, opusModel, sonnetModel, haikuModel, baseUrl };
+      ? { id: _editingProfileId, name, opusModel, sonnetModel, haikuModel, goodAt, ...(apiKey ? { apiKey } : {}), ...(provider === "custom" ? { baseUrl } : {}) }
+      : { name, provider, apiKey, opusModel, sonnetModel, haikuModel, baseUrl, goodAt };
     const res = await fetch("api/auth-profile", { method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action: isEdit ? "update" : "add", profile: profilePayload }) });
@@ -4109,8 +4180,10 @@ let squadSeq = 0;
 
 /* 派生子 agent 的工具名。SDK 现在叫 Agent（sdk-tools.d.ts 的 AgentInput），
    历史上叫 Task —— 两个都认，否则换一版 SDK 编队卡就整个失效。 */
-const SUBAGENT_TOOL_NAMES = new Set(["Agent", "Task"]);
-const isSubagentTool = (name) => SUBAGENT_TOOL_NAMES.has(name);
+const SUBAGENT_TOOL_NAMES = new Set(["Agent", "Task", "dispatch_to_provider"]);
+const isDispatchTool = (name) => String(name || "") === "dispatch_to_provider"
+  || String(name || "").endsWith("__dispatch_to_provider");
+const isSubagentTool = (name) => SUBAGENT_TOOL_NAMES.has(name) || isDispatchTool(name);
 
 const sqShortPath = (p) => String(p || "").split(/[\\/]/).pop() || "";
 const sqHost = (u) => { try { return new URL(u).host; } catch { return String(u || "").slice(0, 30); } };
@@ -4124,8 +4197,16 @@ function formatElapsed(ms) {
 }
 
 // 工具调用 → 人话，用于子 agent 的 L2 工具流
+function dispatchCardLabel(input) {
+  const i = input || {};
+  const reason = String(i.reason || "").trim();
+  if (reason && !reason.startsWith("用户通过")) return reason;
+  return i.task || reason || `交给 ${i.provider || "其他厂商"}`;
+}
+
 function subagentToolLabel(name, input) {
   const i = input || {};
+  if (isDispatchTool(name)) return dispatchCardLabel(i);
   if (name === "Read") return `读取 ${sqShortPath(i.file_path)}`;
   if (name === "Edit" || name === "Write") return `写入 ${sqShortPath(i.file_path)}`;
   if (name === "Grep") return `检索 "${String(i.pattern ?? "").slice(0, 24)}"`;
@@ -4143,8 +4224,70 @@ function toolResultText(content) {
     : String(content ?? "");
 }
 
+function findDispatchProvider(selector) {
+  const wanted = String(selector || "").trim().toLocaleLowerCase();
+  if (!wanted) return null;
+  return _dispatchProviders.find((item) => String(item.id || "").toLocaleLowerCase() === wanted)
+    ?? _dispatchProviders.find((item) => String(item.provider || "").toLocaleLowerCase() === wanted)
+    ?? _dispatchProviders.find((item) => String(item.name || "").toLocaleLowerCase() === wanted)
+    ?? null;
+}
+
+// 生成 ">xxx" 里用的标识：优先账号名（custom 厂商的 provider 都是 "custom"，
+// 只有账号名能区分），其次 provider，最后兜底用 id。候选必须不含空白（否则
+// 会被 parseProviderDispatchText 的正则截断），且能反查回同一个账号才算数。
+function dispatchTokenFor(profile) {
+  for (const candidate of [profile.name, profile.provider, profile.id]) {
+    const token = String(candidate || "").trim();
+    if (!token || /\s/.test(token)) continue;
+    if (findDispatchProvider(token)?.id === profile.id) return token;
+  }
+  return profile.id;
+}
+
+function dispatchProviderInfo(selector) {
+  const profile = findDispatchProvider(selector);
+  return profile ? {
+    provider: profile.provider,
+    providerName: profile.name,
+    model: profile.model || "",
+  } : {
+    provider: String(selector),
+    providerName: String(selector),
+    model: "",
+  };
+}
+
+function parseDispatchResult(content) {
+  const text = toolResultText(content).trim();
+  if (!text.startsWith("{")) return null;
+  try {
+    const parsed = JSON.parse(text);
+    if (!parsed || (!parsed.provider && !parsed.providerName)) return null;
+    return {
+      provider: parsed.provider || "",
+      providerName: parsed.providerName || parsed.provider || "",
+      model: parsed.model || "",
+      output: typeof parsed.output === "string" ? parsed.output : "",
+    };
+  } catch {
+    return null;
+  }
+}
+
+function formatDispatchOrigin(origin) {
+  if (!origin) return "";
+  const providerName = origin.providerName || origin.provider || "";
+  return [providerName, origin.model].filter(Boolean).join(" · ");
+}
+
 // tool_result 内容 → 一句成果摘要，避免把整段 dump 塞进行尾
 function subagentResultSummary(content) {
+  const dispatchResult = parseDispatchResult(content);
+  if (dispatchResult?.output) {
+    const firstOutputLine = dispatchResult.output.trim().split("\n").find((line) => line.trim());
+    if (firstOutputLine) return firstOutputLine.trim().slice(0, 40);
+  }
   const first = toolResultText(content).trim().split("\n").find((l) => l.trim());
   return first ? first.trim().slice(0, 40) : "已完成";
 }
@@ -4183,13 +4326,16 @@ class SquadCard {
     return { done, live, fail, total: this.order.length };
   }
 
-  spawn(id, label) {
+  spawn(id, label, origin = null) {
     if (this.state.has(id)) return;
-    this.state.set(id, { status: "running", steps: [], result: null, startAt: Date.now(), endAt: 0 });
+    this.state.set(id, { status: "running", steps: [], result: null, origin, startAt: Date.now(), endAt: 0 });
     this.labels.set(id, label);
     this.order.push(id);
     squadOfTask.set(id, this.id);
     if (this.el) this.addRow(id, this.order.length - 1);
+    // 跨厂商归属是产品语义，不应被“短任务不闪卡”的延迟规则吞掉；
+    // 即使很快完成，也要让用户一眼看到这段工作由谁执行。
+    else if (origin) this.mount();
     else this.armMount();
     this.refresh();
     this.syncBlock();
@@ -4219,11 +4365,12 @@ class SquadCard {
     if (this.counts.live > 0) updateGenChip("");
   }
 
-  settle(id, status, result) {
+  settle(id, status, result, origin = null) {
     const s = this.state.get(id);
     if (!s || s.status === "done" || s.status === "failed") return;
     s.status = status;
     s.result = result;
+    if (origin) s.origin = origin;
     s.endAt = Date.now();
     this.paintRow(id);
     this.refresh();
@@ -4246,7 +4393,7 @@ class SquadCard {
     return {
       order: [...this.order],
       labels: [...this.labels],
-      state: [...this.state].map(([k, v]) => [k, { status: v.status, result: v.result, steps: [...v.steps], startAt: v.startAt, endAt: v.endAt }]),
+      state: [...this.state].map(([k, v]) => [k, { status: v.status, result: v.result, origin: v.origin ?? null, steps: [...v.steps], startAt: v.startAt, endAt: v.endAt }]),
       startAt: this.startAt,
       finishedAt: this.finishedAt,
     };
@@ -4261,7 +4408,7 @@ class SquadCard {
     card.order = [...(snap.order ?? [])];
     card.labels = new Map(snap.labels ?? []);
     card.state = new Map((snap.state ?? []).map(([k, v]) => [k, {
-      status: v.status, result: v.result, steps: [...(v.steps ?? [])],
+      status: v.status, result: v.result, origin: v.origin ?? null, steps: [...(v.steps ?? [])],
       startAt: v.startAt ?? snap.startAt ?? 0, endAt: v.endAt ?? 0,
     }]));
     card.startAt = snap.startAt ?? Date.now();
@@ -4346,6 +4493,7 @@ class SquadCard {
       <i class="sq-conn"></i>
       <span class="sq-dot"></span>
       <span class="sq-label"></span>
+      <span class="sq-origin"></span>
       <span class="sq-meta num"></span>
       <button class="sq-stop">停止</button>`;
     row.querySelector(".sq-label").textContent = this.labels.get(id) || id;
@@ -4375,6 +4523,11 @@ class SquadCard {
     const s = this.state.get(id);
     if (!row || !s) return;
     row.dataset.s = s.status;
+    const origin = row.querySelector(".sq-origin");
+    const originText = formatDispatchOrigin(s.origin);
+    origin.textContent = originText;
+    origin.title = originText;
+    origin.classList.toggle("visible", !!originText);
     const meta = row.querySelector(".sq-meta");
     if (s.status === "done" || s.status === "failed") {
       meta.textContent = s.result || "";
@@ -4426,7 +4579,25 @@ class SquadCard {
       c.done + c.fail > 0 ? `${c.done + c.fail}/${c.total}` : `${c.total} 项`;
     // 从抽屉跳回来时卡会从摘要态还原，"分头处理中" 配 3/3 是自相矛盾的
     const title = this.el.querySelector(".sq-title");
-    if (title) title.textContent = c.live > 0 ? "分头处理中" : "分头处理";
+    if (title) {
+      // 跨厂商时直接报出是谁在干活——"厂商"是内部说法，用户只关心哪个模型接了活
+      const names = [...new Set(
+        this.order
+          .map((id) => this.state.get(id)?.origin)
+          .filter(Boolean)
+          .map((o) => o.providerName || o.provider)
+          .filter(Boolean)
+      )];
+      if (names.length > 0) {
+        const verb = c.live > 0 ? "处理中" : "已处理";
+        // 列举名字时中英文之间留空格，"…个模型"后面直接接动词，不留空
+        title.textContent = names.length <= 2
+          ? `${names.join("、")} ${verb}`
+          : `${names[0]} 等 ${names.length} 个模型${verb}`;
+      } else {
+        title.textContent = c.live > 0 ? "分头处理中" : "分头处理";
+      }
+    }
     const stopAll = this.el.querySelector(".sq-stopall");
     if (stopAll) stopAll.hidden = c.live === 0;
   }
@@ -4499,6 +4670,19 @@ class SquadCard {
 function squadOwning(itemId) {
   const card = squadCards.get(squadOfTask.get(itemId));
   return card?.has(itemId) ? card : null;
+}
+
+// 跨厂商派发的步骤归位：MCP 工具内部没有自己的 tool_use_id，只能靠
+// provider+task 前缀反查。与 server.js 的 dispatchStepKey 必须保持一致。
+const dispatchKeyToTaskId = new Map();
+
+function dispatchStepKeyOf(input) {
+  return `${String(input?.provider || "").trim()}|${String(input?.task || "").trim().slice(0, 100)}`;
+}
+
+function registerDispatchKey(input, toolUseId) {
+  const key = dispatchStepKeyOf(input);
+  if (key.trim() !== "|") dispatchKeyToTaskId.set(key, toolUseId);
 }
 
 function currentSquad(create) {
@@ -4669,8 +4853,9 @@ function renderBgActivityList() {
     item.className = "bga-item";
     item.dataset.s = s.status;
     if (s.startAt) item.dataset.start = String(s.startAt);
-    item.innerHTML = `<span class="bga-idot"></span><span class="bga-ilabel"></span><span class="bga-imeta"></span>`;
+    item.innerHTML = `<span class="bga-idot"></span><span class="bga-ilabel"></span><span class="bga-iorigin"></span><span class="bga-imeta"></span>`;
     item.querySelector(".bga-ilabel").textContent = label;
+    item.querySelector(".bga-iorigin").textContent = formatDispatchOrigin(s.origin);
     // 跑着的显示走动的秒数：静态的"运行中"分不出刚起步和卡了三分钟
     item.querySelector(".bga-imeta").textContent =
       s.status === "running" ? (s.startAt ? formatElapsed(now - s.startAt) : "运行中")
@@ -4763,7 +4948,17 @@ function subagentIngest(ev) {
     const tasks = (ev.message?.content ?? []).filter((b) => b.type === "tool_use" && isSubagentTool(b.name));
     if (tasks.length) {
       const card = currentSquad(true);
-      tasks.forEach((b) => card.spawn(b.id, b.input?.description || b.input?.subagent_type || "子任务"));
+      tasks.forEach((b) => {
+        card.spawn(
+          b.id,
+          isDispatchTool(b.name)
+            ? dispatchCardLabel(b.input)
+            : (b.input?.description || b.input?.subagent_type || "子任务"),
+          isDispatchTool(b.name) ? dispatchProviderInfo(b.input?.provider) : null,
+        );
+        // 记下 key→id，好让后续 dispatch_step 找得到这张卡
+        if (isDispatchTool(b.name)) registerDispatchKey(b.input, b.id);
+      });
       return false;   // 这条 assistant 消息还有别的内容，交回主流继续渲染
     }
   }
@@ -4777,7 +4972,12 @@ function subagentIngest(ev) {
       if (!card) continue;
       hit = true;
       if (isAsyncLaunchAck(b.tool_use_id, b.content)) continue;   // 只是启动回执
-      card.settle(b.tool_use_id, b.is_error ? "failed" : "done", subagentResultSummary(b.content));
+      card.settle(
+        b.tool_use_id,
+        b.is_error ? "failed" : "done",
+        subagentResultSummary(b.content),
+        parseDispatchResult(b.content),
+      );
     }
     if (hit) return true;
   }
@@ -4822,6 +5022,17 @@ function handleEvent(ev) {
   // Server heartbeat (every 30s) — only used to keep lastWsEventAt fresh so the
   // dead-socket detector below never fires on a healthy connection.
   if (ev.type === "ping") return;
+
+  // 跨厂商子 agent 的工具动作：它跑在独立进程里，事件不会带 parent_tool_use_id
+  // 冒泡上来，只能由服务端单独转发，这里补进对应卡片的步骤流。
+  if (ev.type === "dispatch_step") {
+    const taskId = ev.toolUseId || dispatchKeyToTaskId.get(ev.key || "");
+    if (taskId) {
+      const card = squadOwning(taskId);
+      if (card) card.step(taskId, subagentToolLabel(ev.name, ev.input));
+    }
+    return;
+  }
 
   if (ev.type === "reset_complete") {
     resetRequested = false;
@@ -5064,7 +5275,7 @@ function handleEvent(ev) {
         // Task 走编队卡。此刻 input 还在流式累积中，等 content_block_stop
         // 拿到完整 JSON 才知道 description，所以先只登记不渲染。
         if (isSubagentTool(block.name)) {
-          blockMap[idx] = { el: null, type: block.type, accumulated: "", id: block.id, isTask: true };
+          blockMap[idx] = { el: null, type: block.type, accumulated: "", id: block.id, name: block.name, isTask: true };
           updateGenChip("正在分派子任务…");
           return;
         }
@@ -5135,11 +5346,15 @@ function handleEvent(ev) {
       // Task 的 input 到这里才完整，此时才知道该给分支起什么名字
       if (b?.isTask) {
         let desc = "";
+        let origin = null;
         try {
           const raw = JSON.parse(b.accumulated || "{}");
-          desc = raw.description || raw.subagent_type || "";
+          desc = isDispatchTool(b.name)
+            ? dispatchCardLabel(raw)
+            : (raw.description || raw.subagent_type || "");
+          if (isDispatchTool(b.name)) origin = dispatchProviderInfo(raw.provider);
         } catch { }
-        currentSquad(true).spawn(b.id, desc || "子任务");
+        currentSquad(true).spawn(b.id, desc || "子任务", origin);
         return;
       }
       if (isToolUseType(b?.type)) {
@@ -5517,6 +5732,44 @@ function getMentionQuery() {
   return { query, start: mentionStart, end: cursor };
 }
 
+// 厂商派发用 ">" 触发，与笔记引用的 "@" 分开，互不遮挡。
+// 只认消息开头，且 ">" 后不含空白 —— 这样 markdown 引用块（"> 引用的话"）不会误触发。
+function getProviderQuery() {
+  const cursor = promptEl.selectionStart ?? promptEl.value.length;
+  const beforeCursor = promptEl.value.slice(0, cursor);
+  if (!beforeCursor.startsWith(">")) return null;
+  const query = beforeCursor.slice(1);
+  if (/\s/.test(query) || query.length > 40) return null;
+  return { query, start: 0, end: cursor };
+}
+
+function renderProviderPopup(mention) {
+  if (mention.start !== 0) return false;
+  const query = normalizeMentionSearch(mention.query);
+  const matches = _dispatchProviders
+    .filter((profile) => !query
+      || normalizeMentionSearch(profile.provider).includes(query)
+      || normalizeMentionSearch(profile.name).includes(query))
+    .slice(0, 12);
+  if (matches.length === 0) return false;
+
+  popupItems = matches;
+  activeIndex = 0;
+  popupMode = "provider";
+  popupEl.innerHTML = `
+    <div class="slash-header">派发给其他厂商</div>
+    ${matches.map((profile, index) => `
+      <button class="slash-item mention-item${index === 0 ? " active" : ""}" data-i="${index}" role="option">
+        <span class="slash-cmd">&gt;${highlightPopupMatch(dispatchTokenFor(profile), mention.query)}</span>
+        <span class="slash-desc" title="${escapeAttr(profile.goodAt || "")}">${escapeHtml(profile.goodAt || profile.name)}</span>
+        <span class="slash-badge provider">${escapeHtml(profile.model || profile.name)}</span>
+      </button>
+    `).join("")}`;
+  popupEl.setAttribute("aria-label", "厂商列表");
+  popupEl.classList.add("open");
+  return true;
+}
+
 function mentionScore(note, query) {
   if (!query) return 4;
   if (note.searchTitle === query) return 0;
@@ -5574,6 +5827,19 @@ function setActive(i) {
 function selectItem(i) {
   const item = popupItems[i];
   if (!item) return;
+  if (popupMode === "provider") {
+    const range = getProviderQuery();
+    if (!range) {
+      hidePopup();
+      return;
+    }
+    promptEl.setRangeText(`>${dispatchTokenFor(item)} `, range.start, range.end, "end");
+    promptEl.style.height = "36px";
+    promptEl.style.height = Math.min(promptEl.scrollHeight, 160) + "px";
+    hidePopup();
+    promptEl.focus();
+    return;
+  }
   if (popupMode === "mention") {
     const range = getMentionQuery();
     if (!range) {
@@ -5613,6 +5879,10 @@ function updateComposerPopup() {
   promptEl.style.height = "36px";
   promptEl.style.height = Math.min(promptEl.scrollHeight, 160) + "px";
 
+  const providerQuery = getProviderQuery();
+  if (providerQuery && renderProviderPopup(providerQuery)) {
+    return;
+  }
   const mention = getMentionQuery();
   if (mention && vaultNotes.length > 0) {
     renderMentionPopup(mention);
@@ -5668,11 +5938,30 @@ document.addEventListener("mousedown", (e) => {
 });
 
 // ── Send ──────────────────────────────────────────────────
+function parseProviderDispatchText(value) {
+  // ">" 紧跟厂商名（中间无空格）才算派发指令；"> 引用的话" 这种 markdown
+  // 引用块因为紧跟空格而匹配不上，会照常当普通消息发出去。
+  const match = String(value || "").trim().match(/^>([^\s]+)\s+([\s\S]+)$/);
+  if (!match) return null;
+  const profile = findDispatchProvider(match[1]);
+  const task = match[2].trim();
+  if (!profile || !task) return null;
+  return {
+    profile,
+    task,
+    displayText: String(value || "").trim(),
+  };
+}
+
 function takeRequestDraft(textOverride = null, { consumeComposer = textOverride == null, noteFile = undefined } = {}) {
-  const text = String(textOverride ?? promptEl.value).trim();
-  if (!text) return null;
+  const rawText = String(textOverride ?? promptEl.value).trim();
+  if (!rawText) return null;
+  const providerDispatch = parseProviderDispatchText(rawText);
   const draft = {
-    text,
+    text: providerDispatch?.task || rawText,
+    displayText: providerDispatch?.displayText || null,
+    dispatchProvider: providerDispatch?.profile.id || null,
+    dispatchReason: providerDispatch ? "用户通过 > 明确指定厂商" : null,
     mentionedNotes: consumeComposer ? [...selectedMentionNotes.values()] : [],
     images: consumeComposer ? pendingImages.map((image) => ({ ...image })) : [],
     noteFile: noteFile !== undefined
@@ -5814,6 +6103,10 @@ function dispatchRequestDraft(draft) {
     effort: draft.effort,
     profileId: draft.profileId,
   };
+  if (draft.dispatchProvider) {
+    wsPayload.dispatchProvider = draft.dispatchProvider;
+    wsPayload.dispatchReason = draft.dispatchReason;
+  }
   if (draft.images.length > 0) {
     wsPayload.images = draft.images.map((image) => ({ data: image.data, mediaType: image.mediaType }));
   }

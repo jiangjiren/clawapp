@@ -155,6 +155,55 @@ test("an event callback failure does not stop the query event pump", async () =>
   runtime.close();
 });
 
+test("persistent runtime forwards cross-provider dispatch events without closing the session", async () => {
+  let fake;
+  const seen = [];
+  const runtime = new PersistentQueryRuntime({
+    queryFactory: ({ prompt }) => (fake = new FakeQuery(prompt)),
+    onEvent: event => seen.push(event),
+  });
+  runtime.start({ mcpServers: { dispatch: { name: "provider-dispatch" } } });
+  runtime.send({ type: "user", message: { role: "user", content: "dispatch" } });
+  await flush();
+  fake.events.push({
+    type: "assistant",
+    message: {
+      role: "assistant",
+      content: [{
+        type: "tool_use",
+        id: "dispatch-1",
+        name: "mcp__dispatch__dispatch_to_provider",
+        input: { provider: "deepseek", task: "find root cause" },
+      }],
+    },
+  });
+  fake.events.push({
+    type: "user",
+    message: {
+      role: "user",
+      content: [{
+        type: "tool_result",
+        tool_use_id: "dispatch-1",
+        content: JSON.stringify({
+          provider: "deepseek",
+          providerName: "DeepSeek",
+          model: "deepseek-v4-pro[1m]",
+          output: "root cause",
+        }),
+      }],
+    },
+  });
+  fake.events.push({ type: "system", subtype: "session_state_changed", state: "idle" });
+  await flush();
+
+  assert.deepEqual(seen.map(event => event.type), ["assistant", "user", "system"]);
+  assert.equal(runtime.started, true);
+  runtime.send({ type: "user", message: { role: "user", content: "continue" } });
+  await flush();
+  assert.equal(fake.received.length, 2, "dispatch result must not force a replacement query");
+  runtime.close();
+});
+
 test("real SDK query keeps one CLI process open across AsyncIterable turns", async () => {
   const sessionId = "11111111-1111-4111-8111-111111111111";
   const emitter = new EventEmitter();

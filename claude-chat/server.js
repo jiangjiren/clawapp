@@ -171,6 +171,14 @@ const PROVIDER_PRESETS = {
   openrouter: { baseUrl: "https://openrouter.ai/api",          opusModel: "~anthropic/claude-opus-latest",   sonnetModel: "~anthropic/claude-sonnet-latest",  haikuModel: "~anthropic/claude-haiku-latest" },
   codex:      { baseUrl: "",                                    ...CODEX_DEFAULT_MODELS },
 };
+const PROVIDER_GOOD_AT = {
+  claude: "综合能力强，写代码和长文本理解均衡",
+  anthropic: "综合能力强，写代码和长文本理解均衡",
+  deepseek: "长链条推理、算法与数学、疑难 bug 根因分析",
+  openrouter: "按所配置模型处理通用推理、写作与代码任务",
+  codex: "大范围重构、需要反复跑测试收敛的任务、复杂多文件实现",
+  custom: "按所配置模型处理专项任务",
+};
 const CLAUDE_COMPAT_ENV_KEYS = [
   "ANTHROPIC_API_KEY",
   "ANTHROPIC_AUTH_TOKEN",
@@ -404,6 +412,7 @@ function normalizeProfile(raw) {
     sonnetModel: str(p.sonnetModel) || legacyModel          || preset.sonnetModel || "",
     haikuModel:  str(p.haikuModel)  || legacyFastModel || legacyModel || preset.haikuModel  || "",
     baseUrl:     str(p.baseUrl)     || preset.baseUrl || "",
+    goodAt:      str(p.goodAt)      || PROVIDER_GOOD_AT[provider] || PROVIDER_GOOD_AT.custom,
   };
 }
 
@@ -411,7 +420,7 @@ function normalizeProfile(raw) {
 function migrateOldFormat(old) {
   const profiles = [];
   // Claude 始终存在
-  profiles.push({ id: "p_claude", name: "Claude 会员", provider: "claude", apiKey: "", opusModel: "", sonnetModel: "", haikuModel: "", baseUrl: "" });
+  profiles.push({ id: "p_claude", name: "Claude 会员", provider: "claude", apiKey: "", opusModel: "", sonnetModel: "", haikuModel: "", baseUrl: "", goodAt: PROVIDER_GOOD_AT.claude });
 
   // 迁移 DeepSeek keys
   const dsKeys = Array.isArray(old.deepseek?.keys) ? old.deepseek.keys : [];
@@ -431,6 +440,7 @@ function migrateOldFormat(old) {
         sonnetModel: legacyModel,
         haikuModel:  legacyFastModel,
         baseUrl: PROVIDER_PRESETS.deepseek.baseUrl,
+        goodAt: PROVIDER_GOOD_AT.deepseek,
       });
     }
   }
@@ -446,11 +456,12 @@ function migrateOldFormat(old) {
       sonnetModel: old.openrouter.sonnetModel || PROVIDER_PRESETS.openrouter.sonnetModel,
       haikuModel:  old.openrouter.haikuModel  || PROVIDER_PRESETS.openrouter.haikuModel,
       baseUrl: PROVIDER_PRESETS.openrouter.baseUrl,
+      goodAt: PROVIDER_GOOD_AT.openrouter,
     });
   }
 
   if (isCodexAuthAvailable()) {
-    profiles.push({ id: "p_codex", name: "Codex（GPT 会员）", provider: "codex", apiKey: "", baseUrl: "", ...CODEX_DEFAULT_MODELS });
+    profiles.push({ id: "p_codex", name: "Codex（GPT 会员）", provider: "codex", apiKey: "", baseUrl: "", goodAt: PROVIDER_GOOD_AT.codex, ...CODEX_DEFAULT_MODELS });
   }
   let activeProfileId = "p_claude";
   if (old.provider === "deepseek") {
@@ -473,7 +484,7 @@ function normalizeProfiles(raw) {
     p.provider === "claude" || p.provider === "codex" || p.apiKey
   );
   if (!profiles.some(p => p.provider === "claude")) {
-    profiles.unshift({ id: "p_claude", name: "Claude 会员", provider: "claude", apiKey: "", opusModel: "", sonnetModel: "", haikuModel: "", baseUrl: "" });
+    profiles.unshift({ id: "p_claude", name: "Claude 会员", provider: "claude", apiKey: "", opusModel: "", sonnetModel: "", haikuModel: "", baseUrl: "", goodAt: PROVIDER_GOOD_AT.claude });
   }
   // 注入或同步 Codex 会员 profile（强制覆盖模型字段，防止旧数据残留）
   const existingCodex = profiles.find(p => p.provider === "codex");
@@ -481,7 +492,7 @@ function normalizeProfiles(raw) {
     if (existingCodex) {
       Object.assign(existingCodex, CODEX_DEFAULT_MODELS);
     } else {
-      profiles.push({ id: "p_codex", name: "Codex（GPT 会员）", provider: "codex", apiKey: "", baseUrl: "", ...CODEX_DEFAULT_MODELS });
+      profiles.push({ id: "p_codex", name: "Codex（GPT 会员）", provider: "codex", apiKey: "", baseUrl: "", goodAt: PROVIDER_GOOD_AT.codex, ...CODEX_DEFAULT_MODELS });
     }
   }
   const activeProfileId = typeof data.activeProfileId === "string" && profiles.some(p => p.id === data.activeProfileId)
@@ -521,6 +532,7 @@ function toPublicProfiles(data = readProfiles()) {
       opusModel:   p.opusModel,
       sonnetModel: p.sonnetModel,
       haikuModel:  p.haikuModel,
+      goodAt:      p.goodAt,
       // 仅 custom provider 暴露 baseUrl（内置厂商不需要显示）
       ...(p.provider === "custom" ? { baseUrl: p.baseUrl } : {}),
     })),
@@ -531,7 +543,9 @@ function getActiveProfile(data = readProfiles()) {
   return data.profiles.find(p => p.id === data.activeProfileId) ?? data.profiles[0] ?? null;
 }
 
-export function buildAgentEnv(profileData, effort, requestedModel) {
+// overrideProfile：跨厂商派发时传入目标 profile，为它单独构造一套 env，
+// 不受 activeProfileId 影响（见 _buildDispatchMcpServer）。不传则沿用当前激活的。
+export function buildAgentEnv(profileData, effort, requestedModel, overrideProfile = null) {
   const env = { ...process.env };
   for (const key of CLAUDE_COMPAT_ENV_KEYS) delete env[key];
 
@@ -541,7 +555,7 @@ export function buildAgentEnv(profileData, effort, requestedModel) {
   // return 之前设置，否则对 Claude 会员账号不生效。
   env.CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS = "1";
 
-  const active = getActiveProfile(profileData);
+  const active = overrideProfile || getActiveProfile(profileData);
   if (!active || active.provider === "claude") return env;
   if (!active.apiKey) return env;
   // anthropic provider uses the default Anthropic base URL — no baseUrl required
@@ -1999,6 +2013,216 @@ function hasSchedulerIntent(prompt) {
   return SCHEDULER_INTENT_RE.test(String(prompt || ""));
 }
 
+function normalizeProviderSelector(value) {
+  return String(value || "").trim().toLocaleLowerCase();
+}
+
+export function resolveDispatchProfile(profileData, selector) {
+  const wanted = normalizeProviderSelector(selector);
+  if (!wanted) return null;
+  const profiles = Array.isArray(profileData?.profiles) ? profileData.profiles : [];
+  return profiles.find(profile => normalizeProviderSelector(profile.id) === wanted)
+    ?? profiles.find(profile => normalizeProviderSelector(profile.provider) === wanted)
+    ?? profiles.find(profile => normalizeProviderSelector(profile.name) === wanted)
+    ?? null;
+}
+
+function dispatchModelForProfile(profile) {
+  if (!profile) return "";
+  if (profile.provider === "codex") {
+    return profile.opusModel || profile.sonnetModel || profile.haikuModel || CODEX_DEFAULT_MODELS.opusModel;
+  }
+  if (profile.provider === "claude") {
+    return profile.sonnetModel || profile.opusModel || "claude-sonnet-5";
+  }
+  return profile.sonnetModel || profile.opusModel || profile.haikuModel || "";
+}
+
+export function listDispatchProviders(profileData = readProfiles()) {
+  return (profileData?.profiles ?? []).map(profile => ({
+    id: profile.id,
+    name: profile.name,
+    provider: profile.provider,
+    goodAt: profile.goodAt || PROVIDER_GOOD_AT[profile.provider] || PROVIDER_GOOD_AT.custom,
+    model: dispatchModelForProfile(profile),
+  }));
+}
+
+function unavailableProviderMessage(profileData, selector) {
+  const available = listDispatchProviders(profileData)
+    .map(profile => `${profile.name}（${profile.provider}）`)
+    .join("、");
+  return `未找到可派发的厂商「${String(selector || "").trim() || "（空）"}」。当前可用厂商：${available || "无"}`;
+}
+
+// 主模型自主判断并派发给其他厂商的能力开关。关闭时只保留 ">厂商 任务" 的手动派发，
+// 主模型看不到 dispatch_to_provider / list_providers 工具，不会自作主张外包。
+const DISPATCH_AUTO_ENABLED = process.env.INKFELLOW_DISPATCH_AUTO === "1";
+
+/** 派发步骤的关联键：前端从 tool_use 的 input 里能算出同样的值，用来把步骤挂回正确的卡片 */
+function dispatchStepKey(provider, task) {
+  return `${String(provider || "").trim()}|${String(task || "").trim().slice(0, 100)}`;
+}
+
+async function executeProviderDispatch({
+  provider,
+  task,
+  cwd,
+  permissionMode,
+  profileData = readProfiles(),
+  abortController = null,
+  onStep = null,   // (name, input) => void：子 agent 每次调工具时回调，供前端画步骤流
+}) {
+  const targetProfile = resolveDispatchProfile(profileData, provider);
+  if (!targetProfile) throw new Error(unavailableProviderMessage(profileData, provider));
+  if (targetProfile.provider === "codex" && !isCodexAuthAvailable()) {
+    throw new Error(`${targetProfile.name} 尚未登录，请先打开 Codex 客户端或运行 codex login。`);
+  }
+  if (targetProfile.provider !== "claude" && targetProfile.provider !== "codex" && !targetProfile.apiKey) {
+    throw new Error(`${targetProfile.name} 的 API Key 还没有配置。`);
+  }
+
+  const model = dispatchModelForProfile(targetProfile);
+  const controller = abortController || new AbortController();
+  let output = "";
+
+  if (targetProfile.provider === "codex") {
+    const codex = new Codex();
+    const thread = codex.startThread({
+      workingDirectory: cwd,
+      approvalPolicy: "never",
+      sandboxMode: codexSandboxMode(permissionMode),
+      modelReasoningEffort: "medium",
+      ...(model ? { model } : {}),
+    });
+    const { events } = await thread.runStreamed(task, { signal: controller.signal });
+    const answerParts = [];
+    for await (const event of events) {
+      // 工具动作实时抛给前端，否则卡片只能一直显示"等待子任务的第一个动作"
+      if (onStep && event.type === "item.started" && event.item && event.item.type !== "agent_message") {
+        try { onStep(codexToolName(event.item) || event.item.type, codexToolInput(event.item)); } catch { /* 步骤上报失败不该影响主流程 */ }
+      }
+      if (event.type === "item.completed" && event.item?.type === "agent_message") {
+        const text = codexItemText(event.item).trim();
+        if (text) answerParts.push(text);
+      } else if (event.type === "turn.failed") {
+        throw new Error(event.error?.message || `${targetProfile.name} 请求失败`);
+      } else if (event.type === "error") {
+        throw new Error(event.message || `${targetProfile.name} 请求失败`);
+      }
+    }
+    output = answerParts.join("\n\n").trim();
+  } else {
+    const env = buildAgentEnv(profileData, "medium", null, targetProfile);
+    env.PWD = cwd;
+    const options = {
+      cwd,
+      env,
+      permissionMode,
+      allowDangerouslySkipPermissions: permissionMode === "bypassPermissions",
+      abortController: controller,
+      includePartialMessages: false,
+      ...(targetProfile.provider === "claude" && model ? { model } : {}),
+    };
+    const answerParts = [];
+    const generator = query({ prompt: task, options });
+    for await (const event of generator) {
+      // 子 agent 的工具调用实时上报，前端据此画步骤流
+      if (onStep && event.type === "assistant") {
+        for (const block of (event.message?.content ?? event.content ?? [])) {
+          if (block?.type === "tool_use" || block?.type === "server_tool_use" || block?.type === "mcp_tool_use") {
+            try { onStep(block.name, block.input); } catch { /* 步骤上报失败不该影响主流程 */ }
+          }
+        }
+      }
+      if (event.type === "assistant") {
+        const text = (event.message?.content ?? event.content ?? [])
+          .filter(block => block?.type === "text")
+          .map(block => block.text)
+          .join("")
+          .trim();
+        if (text) answerParts.push(text);
+      } else if (event.type === "result") {
+        if (event.subtype !== "success" || event.is_error) {
+          throw new Error(event.result || `${targetProfile.name} 请求失败`);
+        }
+        if (typeof event.result === "string" && event.result.trim()) output = event.result.trim();
+      }
+    }
+    if (!output) output = answerParts.join("\n\n").trim();
+  }
+
+  if (!output) throw new Error(`${targetProfile.name} 没有返回可用的文本结果。`);
+  return {
+    provider: targetProfile.provider,
+    providerName: targetProfile.name,
+    profileId: targetProfile.id,
+    model,
+    output,
+  };
+}
+
+function _buildDispatchMcpServer({ cwd, permissionMode, profileData, sendStep = null }) {
+  // 持久 Query 会跨多轮复用 MCP server；每次调用都重新读取配置，避免用户在
+  // 会话中编辑了非当前账号后，派发仍拿着旧 key / 模型 / goodAt。
+  const currentProfiles = () => {
+    const latest = readProfiles();
+    return latest?.profiles?.length ? latest : profileData;
+  };
+  const dispatchTool = tool(
+    "dispatch_to_provider",
+    "把一个完整子任务交给另一个已配置厂商的 agent 执行。子 agent 使用当前会话相同的工作目录和文件权限；返回实际厂商、模型与完整输出。",
+    {
+      provider: z.string().describe("目标厂商的 provider、账号名称或 profile id；先用 list_providers 查看"),
+      task: z.string().describe("交给目标 agent 的完整、可独立执行的任务描述"),
+      reason: z.string().optional().describe("为什么选择该厂商；会展示给用户"),
+    },
+    async ({ provider, task, reason }) => {
+      try {
+        const result = await executeProviderDispatch({
+          provider,
+          task,
+          cwd,
+          permissionMode,
+          profileData: currentProfiles(),
+          // MCP 工具内部拿不到自己的 tool_use_id，改用 provider+task 前缀做关联键，
+          // 前端从 tool_use 的 input 能算出同样的键，据此把步骤挂回对应卡片
+          onStep: sendStep
+            ? (name, input) => sendStep({ key: dispatchStepKey(provider, task), name, input })
+            : null,
+        });
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({ ok: true, reason: reason || null, ...result }),
+          }],
+        };
+      } catch (error) {
+        return {
+          isError: true,
+          content: [{ type: "text", text: String(error?.message || error) }],
+        };
+      }
+    },
+  );
+
+  const listProvidersTool = tool(
+    "list_providers",
+    "列出当前可以派发的厂商、实际派发模型和各自擅长的任务。选择跨厂商子 agent 前先参考此列表。",
+    {},
+    async () => ({
+      content: [{ type: "text", text: JSON.stringify(listDispatchProviders(currentProfiles())) }],
+    }),
+  );
+
+  return createSdkMcpServer({
+    name: "provider-dispatch",
+    instructions: "需要让另一个厂商独立完成子任务时，先用 list_providers 了解能力，再用 dispatch_to_provider 派发。必须把完整任务上下文写入 task，并把返回结果整合进当前回复。",
+    tools: [dispatchTool, listProvidersTool],
+    alwaysLoad: true,
+  });
+}
+
 function _buildSchedulerMcpServer({ sourceChannel, sourcePeer, defaultOutputs = [] }) {
   const nowMs = Date.now();
   const nowStr = new Date(nowMs).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" });
@@ -2146,9 +2370,18 @@ async function processWechatQuery(baseUrl, token, sender, prompt, contextToken, 
           fullPrompt = `以下是本次对话的历史记录：\n${historyText}\n\n用户：${prompt}`;
         }
         const agentUserContent = buildWechatUserContent(fullPrompt, mediaFiles, { includeImageBlocks });
-        const extraMcpServers = hasScheduler
-          ? { scheduler: _buildSchedulerMcpServer({ sourceChannel: "wechat", sourcePeer: sender }) }
-          : {};
+        const extraMcpServers = {
+          ...(DISPATCH_AUTO_ENABLED ? {
+            dispatch: _buildDispatchMcpServer({
+              cwd: wechatCwd,
+              permissionMode: "auto",
+              profileData,
+            }),
+          } : {}),
+          ...(hasScheduler
+            ? { scheduler: _buildSchedulerMcpServer({ sourceChannel: "wechat", sourcePeer: sender }) }
+            : {}),
+        };
         console.log(`[WeChat Agent] query() via Agent SDK (history: ${history.length} turns, scheduler: ${hasScheduler})`);
         const userMsg = {
           type: "user",
@@ -2505,6 +2738,12 @@ const http = createServer((req, res) => {
   if (url === "/api/auth-profile" && method === "GET") {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(toPublicProfiles()));
+    return;
+  }
+
+  if (url === "/api/providers" && method === "GET") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ providers: listDispatchProviders() }));
     return;
   }
 
@@ -3444,7 +3683,12 @@ wss.on("connection", (ws) => {
     if (msg.profileId && incomingProfileData.profiles.some(p => p.id === msg.profileId)) {
       incomingProfileData.activeProfileId = msg.profileId;
     }
-    const incomingProvider = getActiveProfile(incomingProfileData)?.provider ?? "claude";
+    const incomingDispatchProfile = msg.dispatchProvider
+      ? resolveDispatchProfile(incomingProfileData, msg.dispatchProvider)
+      : null;
+    const incomingProvider = incomingDispatchProfile?.provider
+      ?? getActiveProfile(incomingProfileData)?.provider
+      ?? "claude";
     const crossesActiveClaudeTasks = incomingProvider === "codex" && claudeRuntime.taskIds.size > 0;
     if (shouldQueueClientPrompt() || crossesActiveClaudeTasks) {
       if (fromQueue) queuedClientPrompts.unshift(msg);
@@ -3498,7 +3742,7 @@ wss.on("connection", (ws) => {
     }
     const activeProfile = getActiveProfile(profileData);
 
-    if (activeProfile && activeProfile.provider !== "claude" && activeProfile.provider !== "codex" && !activeProfile.apiKey) {
+    if (!msg.dispatchProvider && activeProfile && activeProfile.provider !== "claude" && activeProfile.provider !== "codex" && !activeProfile.apiKey) {
       send({ type: "error", text: `${activeProfile.name} 的 API Key 还没有配置，请先在账号设置里保存。` });
       send({ type: "done" });
       completeClientRequest("error", requestId);
@@ -3506,7 +3750,7 @@ wss.on("connection", (ws) => {
       scheduleQueuedClientPromptDrain();
       return;
     }
-    if (activeProfile?.provider === "codex" && !isCodexAuthAvailable()) {
+    if (!msg.dispatchProvider && activeProfile?.provider === "codex" && !isCodexAuthAvailable()) {
       send({ type: "error", text: "Codex 还没有登录，请先打开 Codex 客户端或运行 codex login 完成 ChatGPT 账号登录。" });
       send({ type: "done" });
       completeClientRequest("error", requestId);
@@ -3514,7 +3758,7 @@ wss.on("connection", (ws) => {
       scheduleQueuedClientPromptDrain();
       return;
     }
-    if (activeProfile?.provider === "codex" && schedulerRequest) {
+    if (!msg.dispatchProvider && activeProfile?.provider === "codex" && schedulerRequest) {
       send({ type: "error", text: "定时任务目前需要 Claude 会员通道的 scheduler 工具。请切换到 Claude 会员后再创建、查看或修改提醒任务。" });
       send({ type: "done" });
       completeClientRequest("error", requestId);
@@ -3524,6 +3768,120 @@ wss.on("connection", (ws) => {
     }
 
     const resolvedCwd = resolveAllowedCwd(msg.cwd);
+
+    // 用户通过 >厂商 明确指定时，不再让主模型二次判断；直接调用同一派发执行器，
+    // 同时合成标准的 tool_use/tool_result 事件，复用现有编队卡与历史链路。
+    if (msg.dispatchProvider) {
+      const dispatchTurnEpoch = ++claudeTurnEpoch;
+      const dispatchToolUseId = `dispatch_${crypto.randomUUID()}`;
+      const dispatchReason = typeof msg.dispatchReason === "string" && msg.dispatchReason.trim()
+        ? msg.dispatchReason.trim()
+        : "用户通过 > 明确指定厂商";
+      const dispatchInput = {
+        provider: msg.dispatchProvider,
+        task: msg.prompt,
+        reason: dispatchReason,
+      };
+      abortCtrl = ac;
+      const isCurrentDispatchTurn = () => (
+        dispatchTurnEpoch === claudeTurnEpoch
+        && abortCtrl === ac
+        && activeForegroundRequestId === requestId
+      );
+      send({
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [{
+            type: "tool_use",
+            id: dispatchToolUseId,
+            name: "dispatch_to_provider",
+            input: dispatchInput,
+          }],
+        },
+      });
+      (async () => {
+        try {
+          const dispatchResult = await executeProviderDispatch({
+            provider: msg.dispatchProvider,
+            task: msg.prompt,
+            cwd: resolvedCwd,
+            permissionMode,
+            profileData,
+            abortController: ac,
+            // 这条路径手里就有 tool_use_id，前端直接按 id 归位，不必再算 key
+            onStep: (name, input) => {
+              if (!isCurrentDispatchTurn()) return;
+              try {
+                send({ type: "dispatch_step", toolUseId: dispatchToolUseId, name, input });
+              } catch { /* 连接已断则忽略 */ }
+            },
+          });
+          if (!isCurrentDispatchTurn()) return;
+          const resultText = JSON.stringify({ ok: true, reason: dispatchReason, ...dispatchResult });
+          send({
+            type: "user",
+            message: {
+              role: "user",
+              content: [{
+                type: "tool_result",
+                tool_use_id: dispatchToolUseId,
+                content: [{ type: "text", text: resultText }],
+              }],
+            },
+          });
+          send({
+            type: "assistant",
+            message: {
+              role: "assistant",
+              content: [{ type: "text", text: dispatchResult.output }],
+            },
+            dispatch: {
+              provider: dispatchResult.provider,
+              providerName: dispatchResult.providerName,
+              model: dispatchResult.model,
+            },
+          });
+          send({
+            type: "result",
+            subtype: "success",
+            provider: dispatchResult.provider,
+            model: dispatchResult.model,
+            dispatched: true,
+          });
+          send({ type: "done" });
+          completeClientRequest("complete", requestId);
+        } catch (error) {
+          if (!isCurrentDispatchTurn()) return;
+          if (error?.name === "AbortError") {
+            send({ type: "stopped" });
+            completeClientRequest("stopped", requestId);
+          } else {
+            const errorText = String(error?.message || error);
+            send({
+              type: "user",
+              message: {
+                role: "user",
+                content: [{
+                  type: "tool_result",
+                  tool_use_id: dispatchToolUseId,
+                  is_error: true,
+                  content: [{ type: "text", text: errorText }],
+                }],
+              },
+            });
+            send({ type: "error", text: errorText });
+            send({ type: "done" });
+            completeClientRequest("error", requestId);
+          }
+        } finally {
+          if (abortCtrl === ac) abortCtrl = null;
+          scheduleQueuedClientPromptDrain();
+        }
+      })();
+      return;
+    }
+
     const webEnv = buildAgentEnv(profileData, effort, msg.model);
     webEnv.PWD = resolvedCwd; // 让 agent 报告的工作目录与实际 cwd 一致
     const options = {
@@ -3534,9 +3892,20 @@ wss.on("connection", (ws) => {
       includePartialMessages: true,
       effort,
       env: webEnv,
+      mcpServers: {
+        ...(DISPATCH_AUTO_ENABLED ? {
+          dispatch: _buildDispatchMcpServer({
+            cwd: resolvedCwd,
+            permissionMode,
+            profileData,
+            sendStep: (payload) => { try { send({ type: "dispatch_step", ...payload }); } catch { /* 连接已断则忽略 */ } },
+          }),
+        } : {}),
+      },
     };
     if (schedulerRequest) {
       options.mcpServers = {
+        ...options.mcpServers,
         scheduler: _buildSchedulerMcpServer({
           sourceChannel: "web",
           sourcePeer: WEB_SCHEDULER_PEER,
