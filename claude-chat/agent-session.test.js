@@ -94,6 +94,29 @@ test("persistent runtime reuses one query across turns and preserves background 
   runtime.close();
 });
 
+test("follow-up priority is delivered while the foreground turn is still running", async () => {
+  let fake;
+  const runtime = new PersistentQueryRuntime({
+    queryFactory: ({ prompt }) => (fake = new FakeQuery(prompt)),
+  });
+  runtime.start({});
+  runtime.send({
+    type: "user",
+    message: { role: "user", content: "first" },
+    priority: "next",
+  });
+  runtime.send({
+    type: "user",
+    message: { role: "user", content: "steer at the next safe boundary" },
+    priority: "next",
+  });
+  await flush();
+  assert.equal(fake.received.length, 2);
+  assert.equal(fake.received[1].priority, "next");
+  assert.equal(runtime.foregroundRunning, true);
+  runtime.close();
+});
+
 test("interrupt stops the foreground turn without closing the reusable query", async () => {
   let fake;
   const runtime = new PersistentQueryRuntime({
