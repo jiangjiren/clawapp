@@ -226,7 +226,7 @@ test("buildAgentEnv opts into session_state_changed for every provider", { timeo
 
   try {
     const probe = `
-      const { buildAgentEnv, resolveDispatchProfile, listDispatchProviders, rememberDispatchSession, recallDispatchSession, forgetDispatchSessions, dropDispatchSession, isDispatchInflight, markDispatchInflight, dispatchGenerationOf, historyIdOrNull } = await import(${JSON.stringify(new URL("server.js", import.meta.url).href)});
+      const { buildAgentEnv, resolveDispatchProfile, listDispatchProviders, rememberDispatchSession, recallDispatchSession, forgetDispatchSessions, dropDispatchSession, isDispatchInflight, markDispatchInflight, dispatchGenerationOf, forgetDispatchSessionsForProfile, historyIdOrNull } = await import(${JSON.stringify(new URL("server.js", import.meta.url).href)});
       const KEY = "CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS";
       const cases = {
         claude: { activeProfileId: "p_claude", profiles: [{ id: "p_claude", provider: "claude" }] },
@@ -317,6 +317,30 @@ test("buildAgentEnv opts into session_state_changed for every provider", { timeo
         blankIsZero: dispatchGenerationOf(null),
       };
 
+      // 比对再删：并发分支写了新会话后，先来的那条失败不能把它删掉
+      rememberDispatchSession("conv-g", "p_d", "sess-old");
+      rememberDispatchSession("conv-g", "p_d", "sess-new");   // 并发分支覆盖
+      dropDispatchSession("conv-g", "p_d", "sess-old");        // 先来的失败了
+      out.cas = { keepsNewer: recallDispatchSession("conv-g", "p_d") ?? null };
+      dropDispatchSession("conv-g", "p_d", "sess-new");        // 值对得上才删
+      out.cas.dropsWhenMatched = recallDispatchSession("conv-g", "p_d") ?? null;
+      rememberDispatchSession("conv-g", "p_d", "sess-x");
+      dropDispatchSession("conv-g", "p_d");                    // 不传期望值＝无条件删
+      out.cas.unconditionalStillWorks = recallDispatchSession("conv-g", "p_d") ?? null;
+
+      // 改账号后，该 profile 在所有对话里的会话都要作废。
+      // 用独立的 profile id，免得被前面几步留下的 p_d 记录干扰计数。
+      rememberDispatchSession("conv-h", "p_wipe", "s1");
+      rememberDispatchSession("conv-i", "p_wipe", "s2");
+      rememberDispatchSession("conv-h", "p_keep", "s3");
+      const wiped = forgetDispatchSessionsForProfile("p_wipe");
+      out.profileWipe = {
+        removed: wiped,
+        convH: recallDispatchSession("conv-h", "p_wipe") ?? null,
+        convI: recallDispatchSession("conv-i", "p_wipe") ?? null,
+        otherProfileKept: recallDispatchSession("conv-h", "p_keep") ?? null,
+      };
+
       process.stdout.write("PROBE:" + JSON.stringify(out) + "\\n", () => process.exit(0));
     `;
     child = spawn(process.execPath, ["--input-type=module", "-e", probe], {
@@ -402,6 +426,17 @@ test("buildAgentEnv opts into session_state_changed for every provider", { timeo
       bumpedOnForget: true,
       blankIsZero: 0,
     }, "清除会话必须推进代际，否则 reset 后迟到的回调会把会话又填回去");
+    assert.deepEqual(result.cas, {
+      keepsNewer: "sess-new",
+      dropsWhenMatched: null,
+      unconditionalStillWorks: null,
+    }, "丢弃会话必须比对再删，否则并发分支刚写的好会话会被先来者的失败连带删掉");
+    assert.deepEqual(result.profileWipe, {
+      removed: 2,
+      convH: null,
+      convI: null,
+      otherProfileKept: "s3",
+    }, "改账号凭据后，该 profile 在所有对话里的会话都要作废，别的 profile 不受影响");
   } finally {
     if (child && !childClosed) {
       await new Promise((resolve, reject) => {

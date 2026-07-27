@@ -2106,9 +2106,17 @@ export function recallDispatchSession(conversationId, profileId) {
   return DISPATCH_SESSIONS.get(dispatchSessionKey(conversationId, profileId)) || null;
 }
 
-export function dropDispatchSession(conversationId, profileId) {
+/**
+ * 丢弃会话记录。expectedSessionId 有值时做「比对再删」——并发派同一家时，
+ * 后来者会新建一条会话写进同一个 key；先来的那条失败后若无条件删除，
+ * 删掉的是别人刚写进去的好会话，而对方不会再写回来（noteSession 见 id 没变
+ * 就不重复上报），那条上下文就永久丢了。
+ */
+export function dropDispatchSession(conversationId, profileId, expectedSessionId = null) {
   if (!conversationId || !profileId) return;
-  DISPATCH_SESSIONS.delete(dispatchSessionKey(conversationId, profileId));
+  const key = dispatchSessionKey(conversationId, profileId);
+  if (expectedSessionId && DISPATCH_SESSIONS.get(key) !== expectedSessionId) return;
+  DISPATCH_SESSIONS.delete(key);
 }
 
 // 同一个 (对话, 厂商) 正在派发中的计数。并发派同一家时，后来者不去续接同一个
@@ -2142,6 +2150,21 @@ export function markDispatchInflight(conversationId, profileId) {
 // reset 之后，那些还在跑的派发迟早会回调 onSession。没有代际保护的话，它们会把
 // 刚清掉的会话又填回去，于是「新对话」接上了旧话题的上下文。
 // 每清一次该对话就 +1，回调时对不上代际就丢弃。
+// 所有正在跑的派发的 AbortController。
+//
+// 不能靠闭包捕获外层 ac：持久 Query 只在首次 start(options) 时建 MCP server，
+// 之后每一轮都复用同一个闭包，拿到的永远是第一轮的 signal；而且 Claude 主模型
+// 的停止走的是 claudeRuntime.interrupt()，压根不会 abort 那个 ac。两条加起来，
+// 自动派发出去的子进程按停止后会一直跑到自然结束。
+// 改成注册表：停止时统一 abort，不依赖谁捕获了什么。
+const ACTIVE_DISPATCH_ABORTS = new Set();
+
+function abortActiveDispatches() {
+  for (const controller of [...ACTIVE_DISPATCH_ABORTS]) {
+    try { controller.abort(); } catch { /* 已经 abort 过就算了 */ }
+  }
+}
+
 const DISPATCH_GENERATION = new Map();
 
 export function dispatchGenerationOf(conversationId) {
@@ -2149,9 +2172,45 @@ export function dispatchGenerationOf(conversationId) {
   return DISPATCH_GENERATION.get(conversationId) || 0;
 }
 
+const DISPATCH_GENERATION_LIMIT = 500;
+
 function bumpDispatchGeneration(conversationId) {
   if (!conversationId) return;
-  DISPATCH_GENERATION.set(conversationId, dispatchGenerationOf(conversationId) + 1);
+  const next = dispatchGenerationOf(conversationId) + 1;
+  // 重新 set 让它排到末尾，下面按插入序淘汰才是真正的 LRU
+  DISPATCH_GENERATION.delete(conversationId);
+  DISPATCH_GENERATION.set(conversationId, next);
+  // 这张表原来只增不减：每 reset 一个新对话就多一项，长跑的服务会一直涨。
+  // 淘汰最老的那些是安全的——代际只用来挡"迟到的回调"，而那些对话早就没有
+  // 在途派发了，代际归零不会让任何东西写回去。
+  while (DISPATCH_GENERATION.size > DISPATCH_GENERATION_LIMIT) {
+    const oldest = DISPATCH_GENERATION.keys().next().value;
+    if (oldest === undefined || oldest === conversationId) break;
+    DISPATCH_GENERATION.delete(oldest);
+  }
+}
+
+/**
+ * 某个账号的凭据或端点变了，它在**所有对话**里的派发会话都要作废。
+ *
+ * 会话 key 是「对话 + profileId」，而编辑账号时 profileId 不变，所以光靠
+ * reset 清当前对话是不够的：别的对话里那条旧 session id 还在，下次派发会拿着
+ * 它去 resume——但用的是新 key、新 baseUrl。轻则一直失败，重则把旧账号的
+ * 上下文带到新账号甚至另一家厂商的端点上。
+ */
+export function forgetDispatchSessionsForProfile(profileId) {
+  if (!profileId) return 0;
+  const suffix = `|${String(profileId).trim()}`;
+  let removed = 0;
+  for (const key of [...DISPATCH_SESSIONS.keys()]) {
+    if (key.endsWith(suffix)) {
+      DISPATCH_SESSIONS.delete(key);
+      removed++;
+      // 该对话的代际一并推进，挡住这次派发迟到的 onSession 回填
+      bumpDispatchGeneration(key.slice(0, key.length - suffix.length));
+    }
+  }
+  return removed;
 }
 
 export function forgetDispatchSessions(conversationId) {
@@ -2358,6 +2417,8 @@ function _buildDispatchMcpServer({ cwd, permissionMode, profileData, sendStep = 
         const dispatchController = new AbortController();
         const onOuterAbort = () => dispatchController.abort();
         outerSignal?.addEventListener("abort", onOuterAbort, { once: true });
+        // 注册进全局表，让停止路径能直接掐掉，不依赖上面那个可能已经陈旧的 signal
+        ACTIVE_DISPATCH_ABORTS.add(dispatchController);
         let result;
         try {
           result = await executeProviderDispatch({
@@ -2382,17 +2443,21 @@ function _buildDispatchMcpServer({ cwd, permissionMode, profileData, sendStep = 
         } catch (error) {
           // 只在「对方压根没认这条会话」时丢弃。接上之后才出错的（限流、超时）
           // thread 是好的，丢掉等于白白扔掉它已经建立的上下文。
+          // 中断同样要排除：停止往往发生在厂商确认事件之前，那时 established
+          // 还是 false，但会话是好的。
           // 代际变了说明这条对话已被重置，那把删除也没意义，交给 reset 处理。
           if (resumeSessionId
+            && error?.name !== "AbortError"
             && error?.dispatchSessionEstablished === false
             && dispatchGenerationOf(convId) === generation) {
-            dropDispatchSession(convId, profileId);
+            dropDispatchSession(convId, profileId, resumeSessionId);
           }
           throw error;
         } finally {
           // 监听器必须摘掉：MCP server 跨多轮复用，外层 signal 活得比这次调用长，
           // 攒着不摘就是内存泄漏
           outerSignal?.removeEventListener("abort", onOuterAbort);
+          ACTIVE_DISPATCH_ABORTS.delete(dispatchController);
           releaseInflight();
         }
         return {
@@ -3088,6 +3153,24 @@ const http = createServer((req, res) => {
         }
 
         const changed = JSON.stringify(current) !== JSON.stringify(next);
+        // 凭据或端点变了的账号，它在所有对话里的派发会话都要作废——否则别的
+        // 对话会拿着旧 session id 去 resume，而用的是新 key / 新 baseUrl
+        const authFingerprint = (p) => JSON.stringify([
+          p?.apiKey ?? "", p?.baseUrl ?? "", p?.provider ?? "",
+          p?.opusModel ?? "", p?.sonnetModel ?? "", p?.haikuModel ?? "",
+        ]);
+        const beforeById = new Map((current.profiles || []).map(p => [p.id, authFingerprint(p)]));
+        for (const p of next.profiles || []) {
+          const before = beforeById.get(p.id);
+          // 新增的账号没有旧会话，不用管；只处理「存在过且指纹变了」的
+          if (before !== undefined && before !== authFingerprint(p)) {
+            forgetDispatchSessionsForProfile(p.id);
+          }
+        }
+        // 账号被删掉时同样作废，免得同名 id 复用时接上前一个账号的上下文
+        for (const id of beforeById.keys()) {
+          if (!(next.profiles || []).some(p => p.id === id)) forgetDispatchSessionsForProfile(id);
+        }
         writeProfiles(next);
         if (changed) clearSession();
 
@@ -3834,6 +3917,9 @@ wss.on("connection", (ws) => {
       clearPendingAskUserQuestion("generation stopped");
       const claudeTurnWasPending = claudeTurnCompletionPending;
       claudeTurnEpoch += 1;
+      // 派出去的子进程一律先掐。放在分支之前：Claude 主模型那条路走的是
+      // claudeRuntime.interrupt()，它只打断主模型，碰不到派发出去的活。
+      abortActiveDispatches();
       if (abortCtrl) {
         const stoppedRequestId = activeForegroundRequestId;
         const activeAbort = abortCtrl;
@@ -4012,6 +4098,7 @@ wss.on("connection", (ws) => {
         : null;
       const releaseDispatchInflight = markDispatchInflight(dispatchConvId, dispatchProfileId);
       const dispatchGeneration = dispatchGenerationOf(dispatchConvId);
+      ACTIVE_DISPATCH_ABORTS.add(ac);
       const dispatchInput = {
         provider: msg.dispatchProvider,
         task: msg.prompt,
@@ -4097,12 +4184,18 @@ wss.on("connection", (ws) => {
           completeClientRequest("complete", requestId);
         } catch (error) {
           // 只在「对方压根没认这条会话」时丢弃：那个 id 已经失效，留着的话之后
-          // 每次都会拿同一个坏 id 去试，一直失败到重启为止。接上之后才出错的
-          // （限流、超时、中断）thread 还好好的，下次接着用。
+          // 每次都会拿同一个坏 id 去试，一直失败到重启为止。
+          //
+          // 中断必须排除：用户按停止时厂商往往还没发出 thread.started / init，
+          // sessionEstablished 仍是 false，但那条 thread 其实好好的——照着
+          // established 判就会把好会话删掉。
+          // 传 resumeSessionId 做比对：并发分支可能已经往同一个 key 写了新会话，
+          // 无条件删会连别人的一起删掉。
           if (resumeSessionId
+            && error?.name !== "AbortError"
             && error?.dispatchSessionEstablished === false
             && dispatchGenerationOf(dispatchConvId) === dispatchGeneration) {
-            dropDispatchSession(dispatchConvId, dispatchProfileId);
+            dropDispatchSession(dispatchConvId, dispatchProfileId, resumeSessionId);
           }
           if (!isCurrentDispatchTurn()) return;
           if (error?.name === "AbortError") {
@@ -4127,6 +4220,7 @@ wss.on("connection", (ws) => {
             completeClientRequest("error", requestId);
           }
         } finally {
+          ACTIVE_DISPATCH_ABORTS.delete(ac);
           releaseDispatchInflight();
           if (abortCtrl === ac) abortCtrl = null;
           scheduleQueuedClientPromptDrain();

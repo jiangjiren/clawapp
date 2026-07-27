@@ -4350,6 +4350,10 @@ class SquadCard {
     this.finishedAt = 0;
     this.mountArmed = false;
     this.block = null;
+    // 这张卡属于哪一轮请求。后台子任务允许跨回合存活（见 resetSquads），
+    // 所以"停止/出错时收尾卡片"必须只收本轮的，否则会把上一轮真在跑的任务
+    // 误标成已停止，之后真实进度到达时又因状态已终结被忽略，UI 永久失真。
+    this.ownerRequestId = typeof activeRequestId !== "undefined" ? activeRequestId : null;
   }
 
   has(id) { return this.state.has(id); }
@@ -4652,16 +4656,44 @@ class SquadCard {
     const label = this.labels.get(id) || id;
     this.settle(id, "failed", "已跳过");
     const left = this.counts.live;
-    // 明确后果：用户最怕不知道自己刚按下去发生了什么
-    updateGenChip(left > 0 ? `已跳过「${label}」，其余 ${left} 项继续` : `已跳过「${label}」`);
+    // "跳过"只改前端显示，服务端那个子任务还在跑——多项并行时这是对的，剩下的
+    // 确实还要继续。但如果这是最后一项，整轮就没有活着的任务了，此时必须真的
+    // 停掉那轮请求：否则服务端一直占着 activeForegroundRequestId，用户之后发的
+    // 消息全被排队，界面上却显示"已跳过"，看不出哪里卡住。
+    if (left === 0 && this.isCurrentTurn) {
+      sendStopRequest();
+      updateGenChip(`已停止「${label}」`);
+      return;
+    }
+    // 说清楚"跳过"的真实含义：这里停不掉单个子进程，服务端没有按子任务
+    // 取消的接口。不写明的话，用户会以为点了就不花钱了。
+    updateGenChip(left > 0
+      ? `已从列表移除「${label}」，它仍在后台跑完；其余 ${left} 项继续`
+      : `已从列表移除「${label}」`);
+  }
+
+  /** 这张卡是不是当前这一轮的。不是的话，停止只能改显示，停不掉服务端 */
+  get isCurrentTurn() {
+    return Boolean(this.ownerRequestId) && this.ownerRequestId === activeRequestId;
   }
 
   stopAll() {
+    // 必须走 sendStopRequest()：服务端认的是 msg.stop，而且要带 userMessageId
+    // 才能匹配上当前请求。以前这里发的是 { type: "stop" }——服务端整条忽略，于是
+    // 卡片显示"已停止"而那轮请求还占着 activeForegroundRequestId，之后发的消息
+    // 全被排队卡住，只能重启应用。
+    //
+    // 但只有本轮的卡才能这么停：sendStopRequest 停的是 activeRequestId，对一张
+    // 上一轮遗留的后台卡按停止，会把当前正在跑的新请求给停了——按错人。
+    if (!this.isCurrentTurn) {
+      updateGenChip("这批子任务属于更早的一轮，停不掉了；它们跑完会自己收尾");
+      return;
+    }
     this.order.forEach((id) => {
       const s = this.state.get(id);
       if (s && s.status !== "done" && s.status !== "failed") this.settle(id, "failed", "已停止");
     });
-    try { ws?.send(JSON.stringify({ type: "stop" })); } catch { }
+    sendStopRequest();
   }
 
   /* 摘要行带上"做了什么"。只报数量的话，这行灰字跟系统日志长得一模一样，
@@ -4713,6 +4745,28 @@ class SquadCard {
 
 /* 按项 id 找到拥有它的那张卡。不能只看 activeSquad —— 回合结束时 resetSquads
    会把它置空，而后台任务的事件正是在那之后才回来的。 */
+/**
+ * 这一轮结束了，把还挂着"进行中"的子任务卡片收掉。
+ *
+ * cleanupRunningTools() 只管普通工具行，碰不到编队卡。停止一轮跨厂商派发时，
+ * 服务端因为回合号已经变了不会再补发 tool_result，卡片就永远停在"进行中"——
+ * 而底下的子进程其实早就被杀干净了。UI 说谎比 UI 难看严重得多。
+ */
+function settleRunningSquadTasks(reason = "已停止", requestId = null) {
+  for (const card of squadCards.values()) {
+    // 只收本轮的卡。跨回合存活的后台任务不归这次停止管——它们还在真跑，
+    // 标成"已停止"之后真实进度到达时会被 settle 的终态判断吞掉，UI 就再也
+    // 追不回来了。owner 为空的是早于本机制创建的卡，保守起见也放过。
+    if (!card.ownerRequestId || (requestId && card.ownerRequestId !== requestId)) continue;
+    for (const id of card.order) {
+      const s = card.state.get(id);
+      if (s && s.status !== "done" && s.status !== "failed") {
+        card.settle(id, "failed", reason);
+      }
+    }
+  }
+}
+
 function squadOwning(itemId) {
   const card = squadCards.get(squadOfTask.get(itemId));
   return card?.has(itemId) ? card : null;
@@ -4735,7 +4789,9 @@ function dispatchStepKeyOf(input) {
 function registerDispatchKey(input, toolUseId) {
   const key = dispatchStepKeyOf(input);
   if (key.trim() === "|") return;
-  const ids = dispatchKeyToTaskId.get(key) || [];
+  // 先把已经不存在的 id 清掉：容量限制只管 key 的数量，同一个 key 下的数组
+  // 只追加不删除的话，反复派同样开头的任务会让它无限长
+  const ids = (dispatchKeyToTaskId.get(key) || []).filter((old) => squadOfTask.has(old));
   if (!ids.includes(toolUseId)) ids.push(toolUseId);
   // 重新 set 让它排到末尾，下面按插入序淘汰才是真正的 LRU
   dispatchKeyToTaskId.delete(key);
@@ -5540,6 +5596,9 @@ function handleEvent(ev) {
   }
 
   if (ev.type === "done" || ev.type === "stopped") {
+    // 停止时服务端不会再补 tool_result（回合号已变），卡片得自己收尾。
+    // done 也一并收：正常结束还挂着"进行中"的，同样是没等到结果的孤儿。
+    if (ev.type === "stopped") settleRunningSquadTasks("已停止", ev.userMessageId ?? activeRequestId);
     finishGenerationAndContinue(ev.userMessageId ?? null);
     return;
   }
@@ -5547,6 +5606,7 @@ function handleEvent(ev) {
   if (ev.type === "error") {
     clearAskUserQuestion();
     cleanupRunningTools();
+    settleRunningSquadTasks("已中断", ev.userMessageId ?? activeRequestId);
     showInlineError(ev.text?.trim() || "发生错误");
     if (!activeRequestId || ev.userMessageId === activeRequestId) {
       finishGenerationAfterError(ev.userMessageId ?? null);
