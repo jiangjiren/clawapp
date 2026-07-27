@@ -804,15 +804,283 @@ function resolvePublicFile(urlPath) {
   return filePath;
 }
 
-function readHistory() {
+function readHistoryFile() {
   try {
     if (existsSync(HISTORY_FILE)) return JSON.parse(readFileSync(HISTORY_FILE, "utf8"));
   } catch { }
   return [];
 }
 
-function writeHistory(arr) {
-  try { writeFileSync(HISTORY_FILE, JSON.stringify(arr), "utf8"); } catch { }
+let historyStore = readHistoryFile();
+let historyFlushTimer = null;
+let historyDirty = false;
+
+function flushHistoryNow() {
+  if (historyFlushTimer) {
+    clearTimeout(historyFlushTimer);
+    historyFlushTimer = null;
+  }
+  if (!historyDirty) return;
+  historyDirty = false;
+  try { writeFileSync(HISTORY_FILE, JSON.stringify(historyStore), "utf8"); } catch { }
+}
+
+function readHistory() {
+  return historyStore;
+}
+
+function writeHistory(arr, { defer = false } = {}) {
+  historyStore = Array.isArray(arr) ? arr : [];
+  historyDirty = true;
+  if (!defer) {
+    flushHistoryNow();
+    return;
+  }
+  if (!historyFlushTimer) historyFlushTimer = setTimeout(flushHistoryNow, 400);
+}
+
+process.on("beforeExit", flushHistoryNow);
+process.on("SIGINT", () => {
+  flushHistoryNow();
+  process.exit(130);
+});
+process.on("SIGTERM", () => {
+  flushHistoryNow();
+  process.exit(143);
+});
+
+function cloneHistoryJson(value) {
+  if (value == null) return value;
+  try { return JSON.parse(JSON.stringify(value)); } catch { return value; }
+}
+
+function normalizeHistoryId(value) {
+  const raw = typeof value === "string" ? value.trim() : "";
+  return raw && /^[A-Za-z0-9_-]{4,128}$/.test(raw)
+    ? raw
+    : `srv_${Date.now().toString(36)}_${crypto.randomBytes(3).toString("hex")}`;
+}
+
+function historyMessagesScore(messages) {
+  if (!Array.isArray(messages)) return { total: 0, assistants: 0, blocks: 0 };
+  return {
+    total: messages.length,
+    assistants: messages.filter(message => message?.role === "assistant").length,
+    blocks: messages.reduce((sum, message) => sum + (Array.isArray(message?.blocks) ? message.blocks.length : 0), 0),
+  };
+}
+
+function shouldAcceptIncomingMessages(currentMessages, incomingMessages) {
+  if (!Array.isArray(incomingMessages)) return false;
+  if (!Array.isArray(currentMessages) || currentMessages.length === 0) return true;
+  // 服务端增量记录带稳定消息 id；旧客户端仍会整段 PUT 且没有 id。不能让
+  // 它用较早的内存快照覆盖正在流式追加的权威记录。
+  if (currentMessages.some(message => message?.id)
+    && !incomingMessages.some(message => message?.id)) return false;
+  const current = historyMessagesScore(currentMessages);
+  const incoming = historyMessagesScore(incomingMessages);
+  if (incoming.assistants !== current.assistants) return incoming.assistants > current.assistants;
+  if (incoming.total !== current.total) return incoming.total > current.total;
+  return incoming.blocks >= current.blocks;
+}
+
+function upsertHistoryConversation(conv, options = {}) {
+  if (!conv || typeof conv !== "object" || !conv.id) return null;
+  const id = normalizeHistoryId(conv.id);
+  const history = readHistory();
+  const index = history.findIndex(item => item.id === id);
+  const current = index >= 0 ? history[index] : null;
+  const next = { ...(current || {}), ...conv, id, date: conv.date || new Date().toISOString() };
+  if (current && "messages" in conv) {
+    next.messages = shouldAcceptIncomingMessages(current.messages, conv.messages)
+      ? conv.messages
+      : current.messages;
+  } else if (current?.messages) {
+    next.messages = current.messages;
+  } else if (!Array.isArray(next.messages)) {
+    next.messages = [];
+  }
+  if (index >= 0) history[index] = next;
+  else {
+    history.unshift(next);
+    if (history.length > MAX_SERVER_HISTORY) history.splice(MAX_SERVER_HISTORY);
+  }
+  writeHistory(history, options);
+  return next;
+}
+
+function ensureHistoryConversation(id, userText = "") {
+  const conversationId = normalizeHistoryId(id);
+  let conv = readHistory().find(item => item.id === conversationId);
+  if (!conv) {
+    conv = {
+      id: conversationId,
+      title: String(userText || "").replace(/[\n\r]+/g, " ").trim().slice(0, 60) || "新对话",
+      date: new Date().toISOString(),
+      sessionId: null,
+      messages: [],
+    };
+    readHistory().unshift(conv);
+    if (readHistory().length > MAX_SERVER_HISTORY) readHistory().splice(MAX_SERVER_HISTORY);
+  }
+  if (!Array.isArray(conv.messages)) conv.messages = [];
+  return conv;
+}
+
+function normalizeAssistantHistoryBlocks(content) {
+  const items = Array.isArray(content) ? content : (content ? [content] : []);
+  return items.filter(Boolean).map(item => {
+    const raw = cloneHistoryJson(item);
+    if (item.type === "thinking") return { type: "thinking", thinking: item.thinking ?? "", signature: item.signature ?? null, raw };
+    if (item.type === "text") return { type: "text", text: item.text ?? "", citations: item.citations ?? null, raw };
+    if (item.type === "tool_use" || item.type === "server_tool_use" || item.type === "mcp_tool_use") {
+      return {
+        type: item.type,
+        id: item.id ?? "",
+        name: item.name ?? "tool",
+        serverName: item.server_name ?? item.serverName ?? null,
+        input: item.input ?? {},
+        raw,
+      };
+    }
+    return raw && typeof raw === "object" && !Array.isArray(raw)
+      ? { ...raw, type: item.type || "unknown", raw }
+      : { type: item.type || "unknown", raw };
+  });
+}
+
+function assistantHistoryBlockKey(block) {
+  const id = block?.id || block?.raw?.id || block?.raw?.call_id || block?.raw?.tool_use_id;
+  return id ? `${block.type || "unknown"}:${id}` : "";
+}
+
+function beginRunHistory(run, msg) {
+  const displayText = typeof msg.displayText === "string" && msg.displayText.trim()
+    ? msg.displayText.trim()
+    : String(msg.prompt || "").trim();
+  const conversationId = normalizeHistoryId(msg.conversationId);
+  const userMessageId = normalizeHistoryId(msg.userMessageId);
+  const conv = ensureHistoryConversation(conversationId, displayText);
+  if (!conv.messages.some(message => message.id === userMessageId)) {
+    conv.messages.push({
+      id: userMessageId,
+      role: "user",
+      text: displayText,
+      cost: null,
+      createdAt: new Date().toISOString(),
+    });
+  }
+  conv.date = new Date().toISOString();
+  run.historyConversationId = conversationId;
+  run.historyAssistantMessage = null;
+  writeHistory(readHistory());
+  return conversationId;
+}
+
+function beginSteeringHistory(run, msg) {
+  finalizeRunHistory(run, "continued");
+  beginRunHistory(run, msg);
+}
+
+function ensureRunAssistantHistory(run) {
+  if (!run?.historyConversationId) return null;
+  const conv = ensureHistoryConversation(run.historyConversationId);
+  if (run.historyAssistantMessage && conv.messages.includes(run.historyAssistantMessage)) {
+    return run.historyAssistantMessage;
+  }
+  const message = {
+    id: `assistant_${crypto.randomUUID()}`,
+    role: "assistant",
+    text: "",
+    blocks: [],
+    raw: [],
+    events: [],
+    cost: null,
+    status: "running",
+    createdAt: new Date().toISOString(),
+  };
+  conv.messages.push(message);
+  run.historyAssistantMessage = message;
+  return message;
+}
+
+function appendRunHistoryBlocks(run, blocks, event = null) {
+  if (!blocks?.length) return;
+  const message = ensureRunAssistantHistory(run);
+  if (!message) return;
+  for (const block of cloneHistoryJson(blocks)) {
+    const key = assistantHistoryBlockKey(block);
+    const existingIndex = key
+      ? message.blocks.findIndex(existing => assistantHistoryBlockKey(existing) === key)
+      : -1;
+    if (existingIndex >= 0) message.blocks[existingIndex] = block;
+    else message.blocks.push(block);
+  }
+  if (event) message.events.push(cloneHistoryJson(event));
+  if (event?.message) message.raw.push(cloneHistoryJson(event.message));
+  message.text = message.blocks
+    .filter(block => (block.type === "text" || block.type === "refusal") && block.text)
+    .map(block => block.text)
+    .join("\n\n");
+  message.updatedAt = new Date().toISOString();
+  const conv = ensureHistoryConversation(run.historyConversationId);
+  conv.date = message.updatedAt;
+  writeHistory(readHistory(), { defer: true });
+}
+
+function finalizeRunHistory(run, status = "complete", cost = null) {
+  const message = run?.historyAssistantMessage;
+  if (!message) return;
+  message.status = status;
+  message.updatedAt = new Date().toISOString();
+  if (cost != null) message.cost = cost;
+  run.lastHistoryAssistantMessage = message;
+  run.historyAssistantMessage = null;
+  writeHistory(readHistory());
+}
+
+function persistRunEvent(run, event) {
+  if (!run?.historyConversationId || !event?.type) return;
+  if (event.type === "session" && event.sessionId) {
+    const conv = ensureHistoryConversation(run.historyConversationId);
+    conv.sessionId = event.sessionId;
+    conv.sessionProvider = event.provider ?? null;
+    writeHistory(readHistory(), { defer: true });
+    return;
+  }
+  if (event.type === "assistant") {
+    appendRunHistoryBlocks(run, normalizeAssistantHistoryBlocks(event.message?.content ?? event.content), event);
+    return;
+  }
+  if (event.type === "server_tool_use" || event.type === "mcp_tool_use" || event.type === "tool_use") {
+    appendRunHistoryBlocks(run, normalizeAssistantHistoryBlocks([event]), event);
+    return;
+  }
+  if (event.type?.includes("tool_result") || event.type === "tool_progress"
+    || (event.type === "system" && CLIENT_VISIBLE_SYSTEM_SUBTYPES.has(event.subtype))) {
+    const taskId = event.task_id ?? event.taskId ?? null;
+    if (taskId) backgroundHistoryRuns.set(String(taskId), run);
+    const reuseFinalizedMessage = !run.historyAssistantMessage && run.lastHistoryAssistantMessage;
+    if (reuseFinalizedMessage) run.historyAssistantMessage = run.lastHistoryAssistantMessage;
+    appendRunHistoryBlocks(run, [{ type: "sdk_event", eventType: event.subtype || event.type, raw: cloneHistoryJson(event) }], event);
+    if (reuseFinalizedMessage) run.historyAssistantMessage = null;
+    const status = String(event.status ?? event.patch?.status ?? "").toLowerCase();
+    if (taskId && (event.subtype === "task_notification"
+      || ["completed", "failed", "killed", "cancelled", "canceled"].includes(status))) {
+      backgroundHistoryRuns.delete(String(taskId));
+    }
+    return;
+  }
+  if (event.type === "result") {
+    finalizeRunHistory(run, event.subtype === "success" || !event.is_error ? "complete" : "error", event.total_cost_usd ?? null);
+  } else if (event.type === "error") {
+    appendRunHistoryBlocks(run, [{ type: "sdk_event", eventType: "error", raw: cloneHistoryJson(event) }], event);
+    finalizeRunHistory(run, "error");
+  } else if (event.type === "done") {
+    finalizeRunHistory(run, "complete");
+  } else if (event.type === "stopped") {
+    finalizeRunHistory(run, "stopped");
+  }
 }
 
 // ── Skills preload ─────────────────────────────────────────
@@ -2390,19 +2658,7 @@ const http = createServer((req, res) => {
       req.on("end", () => {
         try {
           const conv = JSON.parse(body);
-          const history = readHistory();
-          const idx = history.findIndex(h => h.id === conv.id);
-          if (idx >= 0) {
-            // 列表接口只返回摘要（无 messages），重命名等局部更新不应抹掉已存消息
-            if (!("messages" in conv) && history[idx].messages) {
-              conv.messages = history[idx].messages;
-            }
-            history[idx] = conv;
-          } else {
-            history.unshift(conv);
-            if (history.length > MAX_SERVER_HISTORY) history.splice(MAX_SERVER_HISTORY);
-          }
-          writeHistory(history);
+          upsertHistoryConversation(conv);
           res.writeHead(200, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ ok: true }));
         } catch {
@@ -2486,6 +2742,43 @@ function makeAbortError(message) {
 // 输出缓存在 buffer 里，客户端在宽限期内带 runId 重连即可无缝领回
 //（包括断线期间已完成的完整回答）。宽限期内没人认领才真正 abort。
 const orphanRuns = new Map(); // runId -> run
+const backgroundHistoryRuns = new Map(); // taskId -> owning run，后台完成事件仍写回原回答
+const CLIENT_REQUEST_STATE_MAX = 500;
+const clientRequestStates = new Map(); // userMessageId -> { state, runId, updatedAt }
+
+function clientRequestId(msg) {
+  const value = typeof msg?.userMessageId === "string" ? msg.userMessageId.trim() : "";
+  return value ? normalizeHistoryId(value) : null;
+}
+
+function rememberClientRequest(requestId, state, runId = null) {
+  if (!requestId) return;
+  clientRequestStates.set(requestId, { state, runId, updatedAt: Date.now() });
+  if (clientRequestStates.size <= CLIENT_REQUEST_STATE_MAX) return;
+  for (const [id, entry] of clientRequestStates) {
+    if (entry.state === "queued" || entry.state === "running" || entry.state === "steering") continue;
+    clientRequestStates.delete(id);
+    if (clientRequestStates.size <= CLIENT_REQUEST_STATE_MAX) break;
+  }
+}
+
+function buildUserMessage(msg) {
+  const content = [];
+  const images = msg.images ?? (msg.image ? [msg.image] : []);
+  for (const image of images) {
+    content.push({
+      type: "image",
+      source: { type: "base64", media_type: image.mediaType, data: image.data },
+    });
+  }
+  content.push({ type: "text", text: String(msg.prompt ?? "") });
+  return {
+    type: "user",
+    message: { role: "user", content },
+    parent_tool_use_id: null,
+    priority: "next",
+  };
+}
 
 // ── 长驻 Claude 会话 ─────────────────────────────────────────
 // 一条 query 跨多个回合复用，回合边界不再由 query 迭代结束划分，而是由
@@ -2612,15 +2905,24 @@ function interruptClaudeTurn() {
 function createRun(runId, ws, ac) {
   return {
     id: runId,
+    requestId: null,
+    provider: null,
+    steeringRequestIds: new Set(),
     ac,
     ws,
     buffer: [],
     graceTimer: null,
     finished: false,
+    discarded: false,
     pendingAskUserQuestion: null,
     send(obj) {
+      if (this.discarded) return;
       // 所有事件带上 runId：客户端据此丢弃被新请求取代的旧 run 的迟到事件
       const tagged = { ...obj, runId: this.id };
+      if (this.requestId && !tagged.userMessageId) tagged.userMessageId = this.requestId;
+      if (obj.type === "error" && this.requestId) rememberClientRequest(this.requestId, "error", this.id);
+      if (obj.type === "stopped" && this.requestId) rememberClientRequest(this.requestId, "stopped", this.id);
+      persistRunEvent(this, tagged);
       if (this.ws && this.ws.readyState === this.ws.OPEN) this.ws.send(JSON.stringify(tagged));
       else this.buffer.push(tagged);
     },
@@ -2647,7 +2949,19 @@ function createRun(runId, ws, ac) {
       this.graceTimer = null;
       orphanRuns.delete(this.id);
       this.ws = newWs;
-      for (const obj of this.buffer.splice(0)) this.send(obj);
+      // buffer 中已经是带 runId 且已落历史的最终事件；重放只做网络投递，
+      // 不能再走 send()，否则一次重连会把 assistant blocks 重复写一遍。
+      for (const obj of this.buffer.splice(0)) {
+        if (this.ws.readyState === this.ws.OPEN) this.ws.send(JSON.stringify(obj));
+        else this.buffer.push(obj);
+      }
+      if (this.requestId) {
+        this.send({
+          type: "request_ack",
+          userMessageId: this.requestId,
+          state: this.finished ? "complete" : "running",
+        });
+      }
       // 断线期间未回答的澄清问题重新推给新页面
       if (this.pendingAskUserQuestion) {
         const p = this.pendingAskUserQuestion;
@@ -2656,6 +2970,15 @@ function createRun(runId, ws, ac) {
     },
     finish() {
       this.finished = true;
+      if (!this.discarded && this.requestId) {
+        const previous = clientRequestStates.get(this.requestId)?.state;
+        const state = previous === "stopped" || previous === "error" ? previous : "complete";
+        rememberClientRequest(this.requestId, state, this.id);
+      }
+      for (const steeringId of this.discarded ? [] : this.steeringRequestIds) {
+        const previous = clientRequestStates.get(steeringId)?.state;
+        rememberClientRequest(steeringId, previous === "error" ? "error" : "complete", this.id);
+      }
       if (this.ws) {
         clearTimeout(this.graceTimer);
         orphanRuns.delete(this.id);
@@ -2676,7 +2999,13 @@ wss.on("connection", (ws) => {
 
   // 前台轮之外到达的后台任务事件推给这条连接。多标签页时后连接者接管即可：
   // 活动条只是提示，不参与回合控制，丢给谁都不影响正确性。
-  backgroundEventSink = send;
+  const backgroundSink = (event) => {
+    const taskId = event?.task_id ?? event?.taskId ?? null;
+    const owner = taskId ? backgroundHistoryRuns.get(String(taskId)) : null;
+    if (owner) persistRunEvent(owner, event);
+    send(event);
+  };
+  backgroundEventSink = backgroundSink;
 
   const clearPendingAskUserQuestion = (run, reason = "cancelled") => {
     if (!run?.pendingAskUserQuestion) return;
@@ -2802,12 +3131,19 @@ wss.on("connection", (ws) => {
 
     if (msg.reset) {
       clearPendingAskUserQuestion(activeRun, "会话已重置");
+      if (activeRun) {
+        activeRun.discarded = true;
+        finalizeRunHistory(activeRun, "stopped");
+      }
       clearAllSessions();
       // 重置是要丢弃整条会话，长驻 runtime 必须一起关掉，否则下一条消息会
       // 复用旧 session 的上下文。
       resetClaudeRuntime();
+      clientRequestStates.clear();
+      backgroundHistoryRuns.clear();
       if (activeRun && !activeRun.finished) activeRun.ac.abort();
       activeRun = null;
+      send({ type: "reset_complete" });
       return;
     }
 
@@ -2821,11 +3157,81 @@ wss.on("connection", (ws) => {
 
     if (msg.stop) {
       clearPendingAskUserQuestion(activeRun, "用户停止了生成");
+      if (activeRun?.requestId) rememberClientRequest(activeRun.requestId, "stopped", activeRun.id);
       // Claude 走长驻会话：只中断本轮，保留 query 供后续消息复用。
       // Codex 仍是每请求一条流，只能 abort。
       if (interruptClaudeTurn()) { activeRun = null; return; }
       if (activeRun && !activeRun.finished) { activeRun.ac.abort(); activeRun = null; }
       else send({ type: "stopped" });
+      return;
+    }
+
+    const requestId = clientRequestId(msg) ?? `user_${crypto.randomUUID()}`;
+    msg.userMessageId = requestId;
+    const knownRequest = clientRequestStates.get(requestId);
+    if (knownRequest && !(knownRequest.state === "queued" && !activeRun)) {
+      send({
+        type: "request_ack",
+        userMessageId: requestId,
+        state: knownRequest.state,
+        runId: knownRequest.runId,
+      });
+      return;
+    }
+
+    const incomingProfileData = readProfiles();
+    if (msg.profileId && incomingProfileData.profiles.some(profile => profile.id === msg.profileId)) {
+      incomingProfileData.activeProfileId = msg.profileId;
+    }
+    const incomingProvider = getActiveProfile(incomingProfileData)?.provider ?? "claude";
+
+    if (activeRun && !activeRun.finished) {
+      const canSteerClaude = incomingProvider !== "codex"
+        && activeRun.provider !== "codex"
+        && claudeRuntime.started
+        && !!claudeTurn
+        && !activeRun.pendingAskUserQuestion;
+      if (canSteerClaude) {
+        beginSteeringHistory(activeRun, msg);
+        rememberClientRequest(requestId, "steering", activeRun.id);
+        activeRun.steeringRequestIds.add(requestId);
+        activeRun.send({
+          type: "request_ack",
+          userMessageId: requestId,
+          state: "steering",
+        });
+        try {
+          claudeRuntime.send(buildUserMessage(msg));
+          activeRun.send({
+            type: "follow_up_accepted",
+            userMessageId: requestId,
+            mode: "next",
+          });
+        } catch (error) {
+          rememberClientRequest(requestId, "error", activeRun.id);
+          activeRun.send({
+            type: "follow_up_rejected",
+            userMessageId: requestId,
+            text: String(error),
+          });
+        }
+        return;
+      }
+
+      // Codex SDK 的 runStreamed 是单轮流，不能在工具边界注入。让浏览器持有
+      // payload，当前轮 done 后用同一 userMessageId 重发；服务端只登记状态，
+      // 因而断线重试和双击都不会把它执行两次。
+      rememberClientRequest(requestId, "queued");
+      send({
+        type: "request_ack",
+        userMessageId: requestId,
+        state: "queued",
+      });
+      send({
+        type: "request_queued",
+        userMessageId: requestId,
+        reason: incomingProvider === "codex" ? "codex_single_turn" : "busy",
+      });
       return;
     }
 
@@ -2837,26 +3243,14 @@ wss.on("connection", (ws) => {
     const schedulerRequest = hasSchedulerIntent(msg.prompt);
 
     // Build message content — text only, or images + text
-    const content = [];
-    const images = msg.images ?? (msg.image ? [msg.image] : []); // support both formats
-    for (const img of images) {
-      content.push({
-        type: "image",
-        source: { type: "base64", media_type: img.mediaType, data: img.data },
-      });
-    }
-    content.push({ type: "text", text: msg.prompt });
-
-    const userMsg = {
-      type: "user",
-      message: { role: "user", content },
-      parent_tool_use_id: null,
-    };
+    const userMsg = buildUserMessage(msg);
+    const content = userMsg.message.content;
 
     const ac = new AbortController();
     // runId 由客户端生成并随消息带上，断线重连时凭它领回本次生成
     const runId = typeof msg.runId === "string" && msg.runId ? msg.runId.slice(0, 64) : crypto.randomUUID();
     const run = createRun(runId, ws, ac);
+    run.requestId = requestId;
     activeRun = run;
     const permissionMode = PERMISSION_MODES.has(msg.permissionMode)
       ? msg.permissionMode
@@ -2868,22 +3262,27 @@ wss.on("connection", (ws) => {
       profileData.activeProfileId = msg.profileId;
     }
     const activeProfile = getActiveProfile(profileData);
+    run.provider = activeProfile?.provider ?? "claude";
+    msg.conversationId = beginRunHistory(run, msg);
+    rememberClientRequest(requestId, "running", run.id);
+    run.send({ type: "request_ack", userMessageId: requestId, state: "running" });
+    run.send({ type: "request_started", userMessageId: requestId, conversationId: msg.conversationId });
 
     if (activeProfile && activeProfile.provider !== "claude" && activeProfile.provider !== "codex" && !activeProfile.apiKey) {
-      send({ type: "error", text: `${activeProfile.name} 的 API Key 还没有配置，请先在账号设置里保存。` });
-      send({ type: "done" });
+      run.send({ type: "error", text: `${activeProfile.name} 的 API Key 还没有配置，请先在账号设置里保存。` });
+      run.send({ type: "done" });
       run.finish(); activeRun = null;
       return;
     }
     if (activeProfile?.provider === "codex" && !isCodexAuthAvailable()) {
-      send({ type: "error", text: "Codex 还没有登录，请先打开 Codex 客户端或运行 codex login 完成 ChatGPT 账号登录。" });
-      send({ type: "done" });
+      run.send({ type: "error", text: "Codex 还没有登录，请先打开 Codex 客户端或运行 codex login 完成 ChatGPT 账号登录。" });
+      run.send({ type: "done" });
       run.finish(); activeRun = null;
       return;
     }
     if (activeProfile?.provider === "codex" && schedulerRequest) {
-      send({ type: "error", text: "定时任务目前需要 Claude 会员通道的 scheduler 工具。请切换到 Claude 会员后再创建、查看或修改提醒任务。" });
-      send({ type: "done" });
+      run.send({ type: "error", text: "定时任务目前需要 Claude 会员通道的 scheduler 工具。请切换到 Claude 会员后再创建、查看或修改提醒任务。" });
+      run.send({ type: "done" });
       run.finish(); activeRun = null;
       return;
     }
@@ -3317,7 +3716,7 @@ wss.on("connection", (ws) => {
     }
     activeRun = null;
     // 只在自己仍是当前 sink 时摘掉，别把后连上来的那条连接一起解绑
-    if (backgroundEventSink === send) backgroundEventSink = null;
+    if (backgroundEventSink === backgroundSink) backgroundEventSink = null;
   });
 });
 

@@ -755,6 +755,10 @@ export default function NotesExplorer() {
 
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
+      if (
+        event.origin !== window.location.origin
+        || event.source !== claudeFrameRef.current?.contentWindow
+      ) return;
       if (event.data?.type === "open-git-tab") {
         setGitPanelOpen(true);
         return;
@@ -2962,7 +2966,10 @@ export default function NotesExplorer() {
   /** 焦点在 chat iframe 内时按键不冒泡，由 chat 侧把 ⌘J 转发成消息 */
   useEffect(() => {
     const onMessage = (event: MessageEvent) => {
-      if (event.origin !== window.location.origin) return;
+      if (
+        event.origin !== window.location.origin
+        || event.source !== claudeFrameRef.current?.contentWindow
+      ) return;
       if (event.data?.type === "toggle-panel") handleClaudeToggle();
     };
     window.addEventListener("message", onMessage);

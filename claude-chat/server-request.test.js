@@ -241,3 +241,68 @@ test("领回未知的 run 会收到 run_not_found 而不是静默丢弃", { time
     await server.stop();
   }
 });
+
+test("相同 userMessageId 重发只回 ACK，不重复写入或执行", { timeout: 30_000 }, async () => {
+  const server = await startServer();
+  let ws;
+  try {
+    const conn = await connect(server.port);
+    ws = conn.ws;
+    const payload = {
+      prompt: "request-idempotency-probe",
+      displayText: "request-idempotency-probe",
+      conversationId: "conv_idempotency_probe",
+      userMessageId: "user_idempotency_probe",
+      runId: "run_idempotency_probe",
+      profileId: "p_claude",
+      permissionMode: "auto",
+      effort: "low",
+    };
+
+    ws.send(JSON.stringify(payload));
+    const firstAck = await waitForMessage(
+      conn.events,
+      event => event.type === "request_ack" && event.userMessageId === payload.userMessageId,
+    );
+    assert.equal(firstAck.state, "running");
+    assert.equal(firstAck.runId, payload.runId);
+
+    const duplicateStart = conn.events.length;
+    ws.send(JSON.stringify(payload));
+    const duplicateAck = await waitForMessage(
+      conn.events,
+      event => event.type === "request_ack" && event.userMessageId === payload.userMessageId,
+      duplicateStart,
+    );
+    assert.equal(duplicateAck.state, "running");
+    assert.equal(duplicateAck.runId, payload.runId);
+
+    const conversation = await fetch(
+      `http://127.0.0.1:${server.port}/api/history/${payload.conversationId}`,
+    ).then(response => response.json());
+    assert.equal(
+      conversation.messages.filter(message => message.id === payload.userMessageId).length,
+      1,
+    );
+
+    await fetch(`http://127.0.0.1:${server.port}/api/history/${payload.conversationId}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        id: payload.conversationId,
+        title: "客户端旧快照",
+        messages: [{ role: "user", text: "stale snapshot without stable ids" }],
+      }),
+    });
+    const afterStalePut = await fetch(
+      `http://127.0.0.1:${server.port}/api/history/${payload.conversationId}`,
+    ).then(response => response.json());
+    assert.equal(afterStalePut.messages[0].id, payload.userMessageId);
+    assert.equal(afterStalePut.messages[0].text, payload.displayText);
+
+    ws.send(JSON.stringify({ stop: true, userMessageId: payload.userMessageId }));
+  } finally {
+    ws?.close();
+    await server.stop();
+  }
+});
