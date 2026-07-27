@@ -2601,9 +2601,20 @@ async function fetchDispatchProviders() {
  * parseProviderDispatchText 匹配不上，整条消息会被当成普通文本发给当前模型，
  * 用户却以为已经派出去了。这是最难察觉的一种失败：什么都没报错。
  */
-async function ensureDispatchProvidersLoaded() {
-  if (_dispatchProvidersLoaded) return;
-  await fetchDispatchProviders();
+let _dispatchProvidersProbe = null;
+
+/**
+ * 保证厂商清单已就绪。并发调用共享同一次请求，失败后可以再试——
+ * 用一次性布尔标记的话，第一次网络抖动就会让派发功能永久静默失效。
+ */
+function ensureDispatchProvidersLoaded() {
+  if (_dispatchProvidersLoaded) return Promise.resolve();
+  if (!_dispatchProvidersProbe) {
+    _dispatchProvidersProbe = fetchDispatchProviders().finally(() => {
+      _dispatchProvidersProbe = null;   // 失败就放开，下次还能再拉
+    });
+  }
+  return _dispatchProvidersProbe;
 }
 
 /** 形如 ">something 还有内容"，即用户看起来是想派发（厂商名真假在这一步不判断） */
@@ -6178,17 +6189,17 @@ function scheduleFollowUpDrain(delay = 0) {
   }, delay);
 }
 
-let _dispatchProvidersProbed = false;
-
 function submitRequest(textOverride = null, options = {}) {
   const text = String(textOverride ?? promptEl.value).trim();
   if (!text) return false;
   // 厂商清单是异步拉的。刚开页面就发 ">Kimi 任务" 时它可能还空着，那样会被
   // 当成普通消息发给当前模型，用户却以为派出去了——静默失败最难查。
-  // 先补拉一次再重投；探测标记在发起前就置位，拉取失败也不会来回打转。
-  if (!_dispatchProvidersLoaded && !_dispatchProvidersProbed && looksLikeDispatchAttempt(text)) {
-    _dispatchProvidersProbed = true;
-    ensureDispatchProvidersLoaded().then(() => submitRequest(textOverride, options));
+  // 先补拉一次再重投。retriedProviders 保证只重投一次：拉取失败时清单仍是空的，
+  // 没有这个标记就会无限打转。
+  if (!_dispatchProvidersLoaded && !options.retriedProviders && looksLikeDispatchAttempt(text)) {
+    ensureDispatchProvidersLoaded().then(() => {
+      submitRequest(textOverride, { ...options, retriedProviders: true });
+    });
     return true;
   }
   const shouldQueue = isGenerating || resetRequested || pendingRequestDraft || followUpQueue.length > 0;

@@ -2111,21 +2111,47 @@ export function dropDispatchSession(conversationId, profileId) {
   DISPATCH_SESSIONS.delete(dispatchSessionKey(conversationId, profileId));
 }
 
-// 同一个 (对话, 厂商) 正在派发中的集合。并发派同一家时，后来者不去续接同一个
+// 同一个 (对话, 厂商) 正在派发中的计数。并发派同一家时，后来者不去续接同一个
 // 会话——两个进程同时往一条 thread 里写，对方那边的历史会交错成谁也读不懂的样子。
 // 不加锁排队：派发动辄几分钟，排队会让第二个请求看起来像卡死。
-const DISPATCH_INFLIGHT = new Set();
+//
+// 必须计数而不是 Set：三个并发时，第一个跑完就把标记删了，第三个会误以为没人
+// 在跑而去续接一条正被写的 thread。租约也只允许释放一次，重复调用不会把别人的
+// 计数减掉。
+const DISPATCH_INFLIGHT = new Map();
 
 export function isDispatchInflight(conversationId, profileId) {
   if (!conversationId || !profileId) return false;
-  return DISPATCH_INFLIGHT.has(dispatchSessionKey(conversationId, profileId));
+  return (DISPATCH_INFLIGHT.get(dispatchSessionKey(conversationId, profileId)) || 0) > 0;
 }
 
-function markDispatchInflight(conversationId, profileId) {
+export function markDispatchInflight(conversationId, profileId) {
   if (!conversationId || !profileId) return () => {};
   const key = dispatchSessionKey(conversationId, profileId);
-  DISPATCH_INFLIGHT.add(key);
-  return () => DISPATCH_INFLIGHT.delete(key);
+  DISPATCH_INFLIGHT.set(key, (DISPATCH_INFLIGHT.get(key) || 0) + 1);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const next = (DISPATCH_INFLIGHT.get(key) || 1) - 1;
+    if (next > 0) DISPATCH_INFLIGHT.set(key, next);
+    else DISPATCH_INFLIGHT.delete(key);
+  };
+}
+
+// reset 之后，那些还在跑的派发迟早会回调 onSession。没有代际保护的话，它们会把
+// 刚清掉的会话又填回去，于是「新对话」接上了旧话题的上下文。
+// 每清一次该对话就 +1，回调时对不上代际就丢弃。
+const DISPATCH_GENERATION = new Map();
+
+export function dispatchGenerationOf(conversationId) {
+  if (!conversationId) return 0;
+  return DISPATCH_GENERATION.get(conversationId) || 0;
+}
+
+function bumpDispatchGeneration(conversationId) {
+  if (!conversationId) return;
+  DISPATCH_GENERATION.set(conversationId, dispatchGenerationOf(conversationId) + 1);
 }
 
 export function forgetDispatchSessions(conversationId) {
@@ -2134,6 +2160,8 @@ export function forgetDispatchSessions(conversationId) {
   for (const key of [...DISPATCH_SESSIONS.keys()]) {
     if (key.startsWith(prefix)) DISPATCH_SESSIONS.delete(key);
   }
+  // 还在跑的那些派发之后会回调 onSession，代际一变它们就写不回来了
+  bumpDispatchGeneration(String(conversationId).trim());
 }
 
 async function executeProviderDispatch({
@@ -2163,14 +2191,26 @@ async function executeProviderDispatch({
   let output = "";
   // 本轮结束后回传给调用方，让它记住以便下一轮续接
   let sessionId = null;
-  const noteSession = (id) => {
+  // 对方是否在这一轮真的把会话接上了。用来区分两种失败：resume 的 id 已经失效
+  // （对方压根没认这条会话，该丢掉），还是接上之后跑到一半才出错（thread 是好的，
+  // 丢掉就白白浪费了它已经建立的上下文）。
+  let sessionEstablished = false;
+  const noteSession = (id, { fromVendor = false } = {}) => {
+    if (fromVendor) sessionEstablished = true;
     if (!id || id === sessionId) return;
     sessionId = id;
     if (onSession) {
       try { onSession(id); } catch { /* 记录失败不该影响派发本身 */ }
     }
   };
+  const tagError = (error) => {
+    if (error && typeof error === "object") {
+      try { error.dispatchSessionEstablished = sessionEstablished; } catch { /* 冻结对象就算了 */ }
+    }
+    return error;
+  };
 
+  try {
   if (targetProfile.provider === "codex") {
     const codex = new Codex();
     const threadOptions = {
@@ -2185,11 +2225,16 @@ async function executeProviderDispatch({
     const thread = resumeSessionId
       ? codex.resumeThread(resumeSessionId, threadOptions)
       : codex.startThread(threadOptions);
-    // thread.id 在跑之前就有了，先记下来——中断也不会丢
-    noteSession(thread.id || resumeSessionId || null);
+    // 续接时 id 是我们自己传进去的，立刻就有；新建线程则要等 thread.started
+    // 事件才拿得到——SDK 里 thread.id 的注释写明「Populated after the first
+    // turn starts」，在这儿读永远是 null
+    noteSession(resumeSessionId || thread.id || null);
     const { events } = await thread.runStreamed(task, { signal: controller.signal });
     const answerParts = [];
     for await (const event of events) {
+      // 新建线程唯一能拿到 id 的时机，错过它中断就白跑一趟。
+      // 收到这个事件也说明对方认了这条会话（续接时同理）
+      if (event.type === "thread.started") noteSession(event.thread_id, { fromVendor: true });
       // 工具动作实时抛给前端，否则卡片只能一直显示"等待子任务的第一个动作"
       if (onStep && event.type === "item.started" && event.item && event.item.type !== "agent_message") {
         try { onStep(codexToolName(event.item) || event.item.type, codexToolInput(event.item)); } catch { /* 步骤上报失败不该影响主流程 */ }
@@ -2238,10 +2283,11 @@ async function executeProviderDispatch({
         if (text) answerParts.push(text);
       } else if (event.type === "system" && event.subtype === "init") {
         // 续接时 SDK 仍会发 init，带的是同一个 session_id。这是最早能拿到 id
-        // 的时机，立刻上报，后面中断也不影响已经记下的这一份
-        noteSession(event.session_id);
+        // 的时机，立刻上报，后面中断也不影响已经记下的这一份。
+        // 能走到这儿说明会话确实建起来了
+        noteSession(event.session_id, { fromVendor: true });
       } else if (event.type === "result") {
-        noteSession(event.session_id);
+        noteSession(event.session_id, { fromVendor: true });
         if (event.subtype !== "success" || event.is_error) {
           throw new Error(event.result || `${targetProfile.name} 请求失败`);
         }
@@ -2250,8 +2296,12 @@ async function executeProviderDispatch({
     }
     if (!output) output = answerParts.join("\n\n").trim();
   }
+  } catch (error) {
+    throw tagError(error);
+  }
 
   if (!output) throw new Error(`${targetProfile.name} 没有返回可用的文本结果。`);
+
   return {
     provider: targetProfile.provider,
     providerName: targetProfile.name,
@@ -2293,6 +2343,7 @@ function _buildDispatchMcpServer({ cwd, permissionMode, profileData, sendStep = 
         const canResume = Boolean(convId && profileId) && !isDispatchInflight(convId, profileId);
         const resumeSessionId = canResume ? recallDispatchSession(convId, profileId) : null;
         const releaseInflight = markDispatchInflight(convId, profileId);
+        const generation = dispatchGenerationOf(convId);
         let result;
         try {
           result = await executeProviderDispatch({
@@ -2302,8 +2353,11 @@ function _buildDispatchMcpServer({ cwd, permissionMode, profileData, sendStep = 
             permissionMode,
             profileData: profiles,
             resumeSessionId,
-            // 拿到 id 立刻记，中断也不丢
-            onSession: (id) => rememberDispatchSession(convId, profileId, id),
+            // 拿到 id 立刻记，中断也不丢。对话已被重置过就别写回去了
+            onSession: (id) => {
+              if (dispatchGenerationOf(convId) !== generation) return;
+              rememberDispatchSession(convId, profileId, id);
+            },
             // MCP 工具内部拿不到自己的 tool_use_id，改用 provider+task 前缀做关联键，
             // 前端从 tool_use 的 input 能算出同样的键，据此把步骤挂回对应卡片
             onStep: sendStep
@@ -2311,9 +2365,14 @@ function _buildDispatchMcpServer({ cwd, permissionMode, profileData, sendStep = 
               : null,
           });
         } catch (error) {
-          // 续接失败大概率是那个 id 已经失效（对方清了会话存储）。留着它的话，
-          // 之后每一次都会拿同一个坏 id 去试，一直失败到重启为止
-          if (resumeSessionId) dropDispatchSession(convId, profileId);
+          // 只在「对方压根没认这条会话」时丢弃。接上之后才出错的（限流、超时）
+          // thread 是好的，丢掉等于白白扔掉它已经建立的上下文。
+          // 代际变了说明这条对话已被重置，那把删除也没意义，交给 reset 处理。
+          if (resumeSessionId
+            && error?.dispatchSessionEstablished === false
+            && dispatchGenerationOf(convId) === generation) {
+            dropDispatchSession(convId, profileId);
+          }
           throw error;
         } finally {
           releaseInflight();
@@ -3933,6 +3992,7 @@ wss.on("connection", (ws) => {
         ? recallDispatchSession(dispatchConvId, dispatchProfileId)
         : null;
       const releaseDispatchInflight = markDispatchInflight(dispatchConvId, dispatchProfileId);
+      const dispatchGeneration = dispatchGenerationOf(dispatchConvId);
       const dispatchInput = {
         provider: msg.dispatchProvider,
         task: msg.prompt,
@@ -3968,8 +4028,12 @@ wss.on("connection", (ws) => {
             abortController: ac,
             resumeSessionId,
             // 拿到 id 立刻记，不等本轮成功。用户中断时对方已经建立了上下文，
-            // 这个 id 仍然有效——等 await 返回才记的话，中断抛异常就全丢了
-            onSession: (id) => rememberDispatchSession(dispatchConvId, dispatchProfileId, id),
+            // 这个 id 仍然有效——等 await 返回才记的话，中断抛异常就全丢了。
+            // 但对话已被重置过就别写回去，否则「新对话」会接上旧话题
+            onSession: (id) => {
+              if (dispatchGenerationOf(dispatchConvId) !== dispatchGeneration) return;
+              rememberDispatchSession(dispatchConvId, dispatchProfileId, id);
+            },
             // 这条路径手里就有 tool_use_id，前端直接按 id 归位，不必再算 key
             onStep: (name, input) => {
               if (!isCurrentDispatchTurn()) return;
@@ -4013,10 +4077,12 @@ wss.on("connection", (ws) => {
           send({ type: "done" });
           completeClientRequest("complete", requestId);
         } catch (error) {
-          // 续接失败大概率是那个 id 已经失效（对方清了会话存储）。留着它，之后
-          // 每一次都会拿同一个坏 id 去试，一直失败到重启为止。中断不算失效，
-          // 那条 thread 还好好的，下次接着用。
-          if (resumeSessionId && error?.name !== "AbortError") {
+          // 只在「对方压根没认这条会话」时丢弃：那个 id 已经失效，留着的话之后
+          // 每次都会拿同一个坏 id 去试，一直失败到重启为止。接上之后才出错的
+          // （限流、超时、中断）thread 还好好的，下次接着用。
+          if (resumeSessionId
+            && error?.dispatchSessionEstablished === false
+            && dispatchGenerationOf(dispatchConvId) === dispatchGeneration) {
             dropDispatchSession(dispatchConvId, dispatchProfileId);
           }
           if (!isCurrentDispatchTurn()) return;

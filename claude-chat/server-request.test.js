@@ -226,7 +226,7 @@ test("buildAgentEnv opts into session_state_changed for every provider", { timeo
 
   try {
     const probe = `
-      const { buildAgentEnv, resolveDispatchProfile, listDispatchProviders, rememberDispatchSession, recallDispatchSession, forgetDispatchSessions, dropDispatchSession, isDispatchInflight, historyIdOrNull } = await import(${JSON.stringify(new URL("server.js", import.meta.url).href)});
+      const { buildAgentEnv, resolveDispatchProfile, listDispatchProviders, rememberDispatchSession, recallDispatchSession, forgetDispatchSessions, dropDispatchSession, isDispatchInflight, markDispatchInflight, dispatchGenerationOf, historyIdOrNull } = await import(${JSON.stringify(new URL("server.js", import.meta.url).href)});
       const KEY = "CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS";
       const cases = {
         claude: { activeProfileId: "p_claude", profiles: [{ id: "p_claude", provider: "claude" }] },
@@ -292,10 +292,29 @@ test("buildAgentEnv opts into session_state_changed for every provider", { timeo
         illegal: historyIdOrNull("has space"),
       };
 
-      // 在途守卫：并发派同一家时后来者不该去续接同一条 thread
+      // 在途守卫：并发派同一家时后来者不该去续接同一条 thread。
+      // 必须计数——三个并发时第一个跑完就清标记的话，第三个会误以为没人在跑
       out.inflight = {
         idleIsFalse: isDispatchInflight("conv-e", "p_d"),
         blankIsFalse: isDispatchInflight(null, "p_d"),
+      };
+      const relA = markDispatchInflight("conv-e", "p_d");
+      const relB = markDispatchInflight("conv-e", "p_d");
+      out.inflight.bothHeld = isDispatchInflight("conv-e", "p_d");
+      relA();
+      out.inflight.stillHeldAfterFirstRelease = isDispatchInflight("conv-e", "p_d");
+      relA();  // 租约重复释放不能把别人的计数减掉
+      out.inflight.doubleReleaseIsNoop = isDispatchInflight("conv-e", "p_d");
+      relB();
+      out.inflight.freeAfterAllReleased = isDispatchInflight("conv-e", "p_d");
+
+      // 代际保护：reset 之后迟到的 onSession 不能把刚清掉的会话又填回去
+      const genBefore = dispatchGenerationOf("conv-f");
+      rememberDispatchSession("conv-f", "p_d", "sess-f");
+      forgetDispatchSessions("conv-f");
+      out.generation = {
+        bumpedOnForget: dispatchGenerationOf("conv-f") > genBefore,
+        blankIsZero: dispatchGenerationOf(null),
       };
 
       process.stdout.write("PROBE:" + JSON.stringify(out) + "\\n", () => process.exit(0));
@@ -374,7 +393,15 @@ test("buildAgentEnv opts into session_state_changed for every provider", { timeo
     assert.deepEqual(result.inflight, {
       idleIsFalse: false,
       blankIsFalse: false,
-    }, "没有派发在跑时不该报在途");
+      bothHeld: true,
+      stillHeldAfterFirstRelease: true,
+      doubleReleaseIsNoop: true,
+      freeAfterAllReleased: false,
+    }, "在途守卫必须计数：先完成的那个不能把还在跑的标记清掉，租约重复释放也不能");
+    assert.deepEqual(result.generation, {
+      bumpedOnForget: true,
+      blankIsZero: 0,
+    }, "清除会话必须推进代际，否则 reset 后迟到的回调会把会话又填回去");
   } finally {
     if (child && !childClosed) {
       await new Promise((resolve, reject) => {
