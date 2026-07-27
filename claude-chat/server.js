@@ -13,7 +13,7 @@ import { query, tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk"
 import { Codex } from "@openai/codex-sdk";
 import * as scheduler from "./scheduler.js";
 import { buildModelCandidates, runWithModelFallback } from "./model-fallback.js";
-import { PersistentQueryRuntime } from "./agent-session.js";
+import { BackgroundTaskTurnGate, PersistentQueryRuntime } from "./agent-session.js";
 import { z } from "zod";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -2792,9 +2792,9 @@ function buildUserMessage(msg) {
 let claudeTurn = null;          // { epoch, onEvent, finish, fail }
 let claudeTurnEpoch = 0;
 let claudeRuntimeSignature = null;
+const claudeTurnGate = new BackgroundTaskTurnGate();
 
-// 需要透传到前端的 system 事件：后台任务生命周期 + 子代理。其余 system 事件
-// （尤其 session_state_changed）是服务端的回合控制信号，不该泄给 UI。
+// 需要透传到前端的 system 事件：后台任务生命周期 + 子代理。
 const CLIENT_VISIBLE_SYSTEM_SUBTYPES = new Set([
   "task_started",
   "task_progress",
@@ -2865,9 +2865,15 @@ const claudeRuntime = new PersistentQueryRuntime({
       return;
     }
     turn.onEvent(ev);
-    if (ev.type === "system" && ev.subtype === "session_state_changed" && ev.state === "idle") {
+    const finishCurrentTurn = () => {
       clearTimeout(turnIdleWatchdog);
-      turn.finish();
+      if (claudeTurn?.epoch === turn.epoch) turn.finish();
+    };
+    if (claudeTurnGate.handle(ev, {
+      taskCount: claudeRuntime.taskIds.size,
+      finish: finishCurrentTurn,
+    })) {
+      finishCurrentTurn();
       return;
     }
     // origin 非空 = 后台任务的自动续写，不是用户轮的收尾，不进看门狗避免误报
@@ -2883,6 +2889,7 @@ const claudeRuntime = new PersistentQueryRuntime({
 function resetClaudeRuntime() {
   claudeTurnEpoch += 1;
   claudeTurn = null;
+  claudeTurnGate.reset();
   clearTimeout(turnIdleWatchdog);
   claudeRuntimeSignature = null;
   claudeRuntimeAbort = null;
@@ -3201,6 +3208,7 @@ wss.on("connection", (ws) => {
           state: "steering",
         });
         try {
+          claudeTurnGate.markForegroundStart();
           claudeRuntime.send(buildUserMessage(msg));
           activeRun.send({
             type: "follow_up_accepted",
@@ -3440,10 +3448,11 @@ wss.on("connection", (ws) => {
       let isHardAbort = false;
       let waitingForUserInput = false;
       let toolRunning = false; // 工具执行期间 SDK 无事件是正常的，可能持续数小时
+      let backgroundOnlyWaiting = false;
       // Stall watchdog: resets on each SDK event. Catches truly frozen streams.
       const resetStall = () => {
         clearTimeout(stallTimer);
-        if (waitingForUserInput || toolRunning) return;
+        if (waitingForUserInput || toolRunning || backgroundOnlyWaiting) return;
         // 长驻会话下只中断本轮；abort 会连整条 query 一起杀掉
         stallTimer = setTimeout(() => {
           isStallAbort = true;
@@ -3452,7 +3461,7 @@ wss.on("connection", (ws) => {
       };
       const resetHardTimer = () => {
         clearTimeout(hardTimer);
-        if (waitingForUserInput || toolRunning) return;
+        if (waitingForUserInput || toolRunning || backgroundOnlyWaiting) return;
         hardTimer = setTimeout(() => {
           isHardAbort = true;
           if (!interruptClaudeTurn()) ac.abort();
@@ -3588,7 +3597,10 @@ wss.on("connection", (ws) => {
         const settle = (fn, arg) => {
           if (settled) return;
           settled = true;
-          if (claudeTurn?.epoch === epoch) claudeTurn = null;
+          if (claudeTurn?.epoch === epoch) {
+            claudeTurn = null;
+            claudeTurnGate.reset();
+          }
           fn(arg);
         };
 
@@ -3600,6 +3612,7 @@ wss.on("connection", (ws) => {
         };
 
         try {
+          claudeTurnGate.markForegroundStart();
           claudeRuntime.send(promptMsg);
         } catch (err) {
           settle(reject, err);
@@ -3609,6 +3622,16 @@ wss.on("connection", (ws) => {
       // 单条事件的处理：从原来的 for-await 循环体搬过来，语义不变，
       // 只是循环里的 continue 变成了 return。
       const handleClaudeEvent = (ev) => {
+        if (ev.type === "system" && ev.subtype === "session_state_changed") {
+          if (ev.state === "idle" && claudeRuntime.taskIds.size > 0) {
+            backgroundOnlyWaiting = true;
+            clearTimeout(stallTimer);
+            clearTimeout(hardTimer);
+          } else if (ev.state !== "idle") {
+            backgroundOnlyWaiting = false;
+            resetHardTimer();
+          }
+        }
         updateToolState(ev);
         // api_retry means the SDK is in a backoff loop — don't reset the stall
         // timer here or it will keep resetting indefinitely while the WebSocket
@@ -3630,13 +3653,16 @@ wss.on("connection", (ws) => {
           });
           return;
         }
+        if (ev.type === "system" && ev.subtype === "session_state_changed") {
+          send(ev);
+          return;
+        }
         // Forward retry/status events so the frontend can show progress instead of silently spinning
         if (ev.type === "system" && (ev.subtype === "api_retry" || ev.subtype === "status")) {
           send(ev);
           return;
         }
-        // 后台任务与子代理生命周期事件要透传给前端（squad cards 依赖），
-        // 其余 system 事件（含 session_state_changed）留在服务端做回合控制。
+        // 后台任务与子代理生命周期事件要透传给前端（squad cards 依赖）。
         if (ev.type === "system" && CLIENT_VISIBLE_SYSTEM_SUBTYPES.has(ev.subtype)) {
           send(ev);
           return;

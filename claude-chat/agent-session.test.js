@@ -3,7 +3,12 @@ import { EventEmitter } from "node:events";
 import { PassThrough, Writable } from "node:stream";
 import test from "node:test";
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import { AsyncMessageQueue, PersistentQueryRuntime, updateTaskRegistry } from "./agent-session.js";
+import {
+  AsyncMessageQueue,
+  BackgroundTaskTurnGate,
+  PersistentQueryRuntime,
+  updateTaskRegistry,
+} from "./agent-session.js";
 
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const waitFor = async (predicate, timeoutMs = 2000) => {
@@ -62,6 +67,75 @@ test("task registry stays busy until a terminal lifecycle event", () => {
   assert.equal(tasks.size, 1);
   updateTaskRegistry(tasks, { type: "system", subtype: "task_notification", task_id: "task-2", status: "completed" });
   assert.equal(tasks.size, 0);
+});
+
+test("background task turn stays open until the parent Agent sends its summary", () => {
+  const scheduled = [];
+  const cancelled = new Set();
+  const gate = new BackgroundTaskTurnGate({
+    schedule: callback => {
+      scheduled.push(callback);
+      return scheduled.length;
+    },
+    cancel: timer => cancelled.add(timer),
+  });
+  let finished = false;
+  const finish = () => { finished = true; };
+
+  assert.equal(gate.handle(
+    { type: "system", subtype: "session_state_changed", state: "idle" },
+    { taskCount: 3, finish },
+  ), false, "the first idle state must not close a turn with three live child Agents");
+
+  gate.handle(
+    { type: "system", subtype: "task_notification", task_id: "task-1", status: "completed" },
+    { taskCount: 2, finish },
+  );
+  gate.handle(
+    { type: "system", subtype: "task_notification", task_id: "task-2", status: "completed" },
+    { taskCount: 1, finish },
+  );
+  gate.handle(
+    { type: "system", subtype: "task_notification", task_id: "task-3", status: "completed" },
+    { taskCount: 0, finish },
+  );
+  assert.equal(gate.handle(
+    { type: "system", subtype: "session_state_changed", state: "idle" },
+    { taskCount: 0, finish },
+  ), false, "the final task notification gets an auto-wake grace window");
+
+  gate.handle(
+    { type: "system", subtype: "session_state_changed", state: "running" },
+    { taskCount: 0, finish },
+  );
+  gate.handle(
+    { type: "assistant", message: { content: [{ type: "text", text: "三个任务的汇总" }] } },
+    { taskCount: 0, finish },
+  );
+  assert.equal(gate.handle(
+    { type: "system", subtype: "session_state_changed", state: "idle" },
+    { taskCount: 0, finish },
+  ), true, "the idle state after the parent summary closes the turn");
+  assert.equal(finished, false, "the server owns the immediate finish after a true decision");
+  assert.ok(cancelled.has(1), "starting the parent summary cancels the grace fallback");
+});
+
+test("background task turn closes after grace when the SDK does not auto-wake", () => {
+  let scheduled;
+  let finished = false;
+  const gate = new BackgroundTaskTurnGate({
+    schedule: callback => {
+      scheduled = callback;
+      return 1;
+    },
+    cancel: () => {},
+  });
+  gate.handle(
+    { type: "system", subtype: "task_notification", task_id: "task-1", status: "completed" },
+    { taskCount: 0, finish: () => { finished = true; } },
+  );
+  scheduled();
+  assert.equal(finished, true);
 });
 
 test("persistent runtime reuses one query across turns and preserves background tasks", async () => {
@@ -132,6 +206,22 @@ test("interrupt stops the foreground turn without closing the reusable query", a
   runtime.send({ type: "user", message: { role: "user", content: "second" } });
   await flush();
   assert.equal(fake.received.length, 2);
+  runtime.close();
+});
+
+test("interrupt can stop background tasks after the foreground state becomes idle", async () => {
+  let fake;
+  const runtime = new PersistentQueryRuntime({
+    queryFactory: ({ prompt }) => (fake = new FakeQuery(prompt)),
+  });
+  runtime.start({});
+  runtime.send({ type: "user", message: { role: "user", content: "first" } });
+  fake.events.push({ type: "system", subtype: "task_started", task_id: "bg-1" });
+  fake.events.push({ type: "system", subtype: "session_state_changed", state: "idle" });
+  await flush();
+  assert.equal(runtime.foregroundRunning, false);
+  assert.equal(await runtime.interrupt(), true);
+  assert.equal(fake.interruptCalls, 1);
   runtime.close();
 });
 

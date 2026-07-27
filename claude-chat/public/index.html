@@ -5053,6 +5053,16 @@ function handleEvent(ev) {
     return;
   }
 
+  if (ev.type === "system" && ev.subtype === "session_state_changed") {
+    if (ev.state === "running" || ev.state === "requires_action") {
+      setGenerating(true);
+      if (!assistantEl && !document.getElementById("typing")) addTyping();
+    } else if (ev.state === "idle") {
+      updateTypingStatus("");
+    }
+    return;
+  }
+
   // 后台任务生命周期 → 编队卡（原先会落到末尾的 captureAssistantEvent，
   // 被渲染成一条无结构的 sdk_event 折叠块）
   if (ev.type === "system" && TASK_EVENT_TYPES.has(ev.subtype)) {

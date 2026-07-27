@@ -52,17 +52,89 @@ export function isTaskLifecycleEvent(event) {
   ].includes(event.subtype);
 }
 
+export function isTerminalTaskLifecycleEvent(event) {
+  if (!isTaskLifecycleEvent(event)) return false;
+  if (event.subtype === "task_notification") return true;
+  const status = String(event.patch?.status ?? event.status ?? "").toLowerCase();
+  return event.subtype === "task_updated"
+    && ["completed", "failed", "killed", "cancelled", "canceled"].includes(status);
+}
+
 export function updateTaskRegistry(taskIds, event) {
   if (!isTaskLifecycleEvent(event) || !event.task_id) return false;
   const before = taskIds.has(event.task_id);
-  const terminalUpdate = event.subtype === "task_updated"
-    && ["completed", "failed", "killed"].includes(event.patch?.status);
-  if (event.subtype === "task_notification" || terminalUpdate) {
+  if (isTerminalTaskLifecycleEvent(event)) {
     taskIds.delete(event.task_id);
   } else {
     taskIds.add(event.task_id);
   }
   return before !== taskIds.has(event.task_id);
+}
+
+// A foreground result can become idle while background Tasks are still running.
+// The Claude SDK later wakes the parent Agent automatically so it can summarize
+// those Tasks. Keep the foreground transport open across both idle states.
+export class BackgroundTaskTurnGate {
+  constructor({
+    wakeGraceMs = 5_000,
+    schedule = (callback, delay) => setTimeout(callback, delay),
+    cancel = timer => clearTimeout(timer),
+  } = {}) {
+    this.wakeGraceMs = wakeGraceMs;
+    this.schedule = schedule;
+    this.cancel = cancel;
+    this.wakePending = false;
+    this.timer = null;
+    this.finish = null;
+  }
+
+  clearWakePending() {
+    if (this.timer !== null) this.cancel(this.timer);
+    this.timer = null;
+    this.wakePending = false;
+    this.finish = null;
+  }
+
+  markForegroundStart() {
+    this.clearWakePending();
+  }
+
+  reset() {
+    this.clearWakePending();
+  }
+
+  handle(event, { taskCount = 0, finish } = {}) {
+    const sessionState = event?.type === "system"
+      && event.subtype === "session_state_changed"
+      ? event.state
+      : null;
+
+    if (isTerminalTaskLifecycleEvent(event) && taskCount === 0) {
+      this.clearWakePending();
+      this.wakePending = true;
+      this.finish = finish;
+      this.timer = this.schedule(() => {
+        this.timer = null;
+        if (!this.wakePending) return;
+        const finishTurn = this.finish;
+        this.wakePending = false;
+        this.finish = null;
+        finishTurn?.();
+      }, this.wakeGraceMs);
+      this.timer?.unref?.();
+    }
+
+    // session_state_changed/running is the canonical auto-wake signal. The
+    // parent-only event fallback also covers SDK versions that omit that frame.
+    const parentOutputStarted = !event?.parent_tool_use_id
+      && ["user", "assistant", "stream_event"].includes(event?.type);
+    if (this.wakePending && ((sessionState && sessionState !== "idle") || parentOutputStarted)) {
+      this.clearWakePending();
+    }
+
+    if (sessionState !== "idle") return false;
+    return taskCount === 0 && !this.wakePending;
+  }
 }
 
 export class PersistentQueryRuntime {
@@ -105,7 +177,7 @@ export class PersistentQueryRuntime {
   }
 
   async interrupt() {
-    if (!this.query || !this.foregroundRunning) return false;
+    if (!this.query || (!this.foregroundRunning && this.taskIds.size === 0)) return false;
     await this.query.interrupt();
     return true;
   }
