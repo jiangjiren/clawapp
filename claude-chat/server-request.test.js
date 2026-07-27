@@ -226,7 +226,7 @@ test("buildAgentEnv opts into session_state_changed for every provider", { timeo
 
   try {
     const probe = `
-      const { buildAgentEnv, resolveDispatchProfile, listDispatchProviders } = await import(${JSON.stringify(new URL("server.js", import.meta.url).href)});
+      const { buildAgentEnv, resolveDispatchProfile, listDispatchProviders, rememberDispatchSession, recallDispatchSession, forgetDispatchSessions } = await import(${JSON.stringify(new URL("server.js", import.meta.url).href)});
       const KEY = "CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS";
       const cases = {
         claude: { activeProfileId: "p_claude", profiles: [{ id: "p_claude", provider: "claude" }] },
@@ -257,6 +257,24 @@ test("buildAgentEnv opts into session_state_changed for every provider", { timeo
         byName: resolveDispatchProfile(mixed, "Deep Reasoner")?.id,
         listedModel: listDispatchProviders(mixed).find(profile => profile.id === "p_d")?.model,
       };
+
+      // 派发会话续接：作用域是「对话 + 厂商」，重置一条对话不能波及另一条
+      rememberDispatchSession("conv-a", "p_d", "sess-1");
+      rememberDispatchSession("conv-b", "p_d", "sess-3");
+      out.sessions = {
+        recalled: recallDispatchSession("conv-a", "p_d") ?? null,
+        otherProvider: recallDispatchSession("conv-a", "p_codex") ?? null,
+        otherConversation: recallDispatchSession("conv-zzz", "p_d") ?? null,
+      };
+      rememberDispatchSession("conv-a", "p_d", "sess-2");
+      out.sessions.afterOverwrite = recallDispatchSession("conv-a", "p_d") ?? null;
+      forgetDispatchSessions("conv-a");
+      out.sessions.afterForget = recallDispatchSession("conv-a", "p_d") ?? null;
+      out.sessions.siblingSurvivesForget = recallDispatchSession("conv-b", "p_d") ?? null;
+      // 空 sessionId 不该被记住，否则下一轮会拿着假 id 去续接
+      rememberDispatchSession("conv-c", "p_d", null);
+      out.sessions.ignoresBlankSessionId = recallDispatchSession("conv-c", "p_d") ?? null;
+
       process.stdout.write("PROBE:" + JSON.stringify(out) + "\\n", () => process.exit(0));
     `;
     child = spawn(process.execPath, ["--input-type=module", "-e", probe], {
@@ -312,6 +330,15 @@ test("buildAgentEnv opts into session_state_changed for every provider", { timeo
       byName: "p_d",
       listedModel: "deepseek-override",
     });
+    assert.deepEqual(result.sessions, {
+      recalled: "sess-1",
+      otherProvider: null,
+      otherConversation: null,
+      afterOverwrite: "sess-2",
+      afterForget: null,
+      siblingSurvivesForget: "sess-3",
+      ignoresBlankSessionId: null,
+    }, "派发会话必须按「对话 + 厂商」隔离，并在重置该对话时清掉");
   } finally {
     if (child && !childClosed) {
       await new Promise((resolve, reject) => {

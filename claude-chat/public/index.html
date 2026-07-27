@@ -4200,8 +4200,11 @@ function formatElapsed(ms) {
 function dispatchCardLabel(input) {
   const i = input || {};
   const reason = String(i.reason || "").trim();
-  if (reason && !reason.startsWith("用户通过")) return reason;
-  return i.task || reason || `交给 ${i.provider || "其他厂商"}`;
+  const body = (reason && !reason.startsWith("用户通过"))
+    ? reason
+    : (i.task || reason || `交给 ${i.provider || "其他厂商"}`);
+  // 续接时标出来：用户得知道对方是否记得上一轮，否则无从判断该写多少背景
+  return i.resumed ? `接着上一轮 · ${body}` : body;
 }
 
 function subagentToolLabel(name, input) {

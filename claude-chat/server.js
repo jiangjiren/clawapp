@@ -2064,6 +2064,46 @@ function dispatchStepKey(provider, task) {
   return `${String(provider || "").trim()}|${String(task || "").trim().slice(0, 100)}`;
 }
 
+// ── 派发会话续接 ───────────────────────────────────────────────────────────
+// 同一条对话里再次派给同一个厂商时接着上一轮说，对方记得刚才做过什么。
+// 边界取「对话 + 厂商账号」：换对话是新话题，换厂商本来就是另一个模型的会话。
+//
+// 只放内存，进程重启即失效。这是有意的——sessionId 的另一半在对方 CLI 的
+// 会话存储里，我们无法保证它还在；宁可开一个新会话，也不要拿着可能失效的 id
+// 让用户以为对方记得。
+const DISPATCH_SESSIONS = new Map();
+const DISPATCH_SESSION_LIMIT = 200;
+
+function dispatchSessionKey(conversationId, profileId) {
+  return `${String(conversationId || "").trim()}|${String(profileId || "").trim()}`;
+}
+
+export function rememberDispatchSession(conversationId, profileId, sessionId) {
+  if (!conversationId || !profileId || !sessionId) return;
+  const key = dispatchSessionKey(conversationId, profileId);
+  // 重新 set 一次让它排到 Map 末尾，下面按插入序淘汰时才是真正的 LRU
+  DISPATCH_SESSIONS.delete(key);
+  DISPATCH_SESSIONS.set(key, sessionId);
+  while (DISPATCH_SESSIONS.size > DISPATCH_SESSION_LIMIT) {
+    const oldest = DISPATCH_SESSIONS.keys().next().value;
+    if (oldest === undefined) break;
+    DISPATCH_SESSIONS.delete(oldest);
+  }
+}
+
+export function recallDispatchSession(conversationId, profileId) {
+  if (!conversationId || !profileId) return null;
+  return DISPATCH_SESSIONS.get(dispatchSessionKey(conversationId, profileId)) || null;
+}
+
+export function forgetDispatchSessions(conversationId) {
+  if (!conversationId) return;
+  const prefix = `${String(conversationId).trim()}|`;
+  for (const key of [...DISPATCH_SESSIONS.keys()]) {
+    if (key.startsWith(prefix)) DISPATCH_SESSIONS.delete(key);
+  }
+}
+
 async function executeProviderDispatch({
   provider,
   task,
@@ -2072,6 +2112,7 @@ async function executeProviderDispatch({
   profileData = readProfiles(),
   abortController = null,
   onStep = null,   // (name, input) => void：子 agent 每次调工具时回调，供前端画步骤流
+  resumeSessionId = null,  // 有值就接着这个会话往下说，对方记得上一轮
 }) {
   const targetProfile = resolveDispatchProfile(profileData, provider);
   if (!targetProfile) throw new Error(unavailableProviderMessage(profileData, provider));
@@ -2085,16 +2126,23 @@ async function executeProviderDispatch({
   const model = dispatchModelForProfile(targetProfile);
   const controller = abortController || new AbortController();
   let output = "";
+  // 本轮结束后回传给调用方，让它记住以便下一轮续接
+  let sessionId = null;
 
   if (targetProfile.provider === "codex") {
     const codex = new Codex();
-    const thread = codex.startThread({
+    const threadOptions = {
       workingDirectory: cwd,
       approvalPolicy: "never",
       sandboxMode: codexSandboxMode(permissionMode),
       modelReasoningEffort: "medium",
       ...(model ? { model } : {}),
-    });
+    };
+    // resumeThread 拿到的是同一条 thread，历史还在；id 失效时 SDK 会抛错，
+    // 这里不兜底重开——静默换成新会话会让用户以为对方记得，其实已经忘了
+    const thread = resumeSessionId
+      ? codex.resumeThread(resumeSessionId, threadOptions)
+      : codex.startThread(threadOptions);
     const { events } = await thread.runStreamed(task, { signal: controller.signal });
     const answerParts = [];
     for await (const event of events) {
@@ -2112,6 +2160,7 @@ async function executeProviderDispatch({
       }
     }
     output = answerParts.join("\n\n").trim();
+    sessionId = thread.id || resumeSessionId || null;
   } else {
     const env = buildAgentEnv(profileData, "medium", null, targetProfile);
     env.PWD = cwd;
@@ -2122,6 +2171,7 @@ async function executeProviderDispatch({
       allowDangerouslySkipPermissions: permissionMode === "bypassPermissions",
       abortController: controller,
       includePartialMessages: false,
+      ...(resumeSessionId ? { resume: resumeSessionId } : {}),
       ...(targetProfile.provider === "claude" && model ? { model } : {}),
     };
     const answerParts = [];
@@ -2142,7 +2192,11 @@ async function executeProviderDispatch({
           .join("")
           .trim();
         if (text) answerParts.push(text);
+      } else if (event.type === "system" && event.subtype === "init") {
+        // 续接时 SDK 仍会发 init，带的是同一个 session_id
+        if (event.session_id) sessionId = event.session_id;
       } else if (event.type === "result") {
+        if (event.session_id) sessionId = event.session_id;
         if (event.subtype !== "success" || event.is_error) {
           throw new Error(event.result || `${targetProfile.name} 请求失败`);
         }
@@ -2159,6 +2213,8 @@ async function executeProviderDispatch({
     profileId: targetProfile.id,
     model,
     output,
+    sessionId,
+    resumed: Boolean(resumeSessionId),
   };
 }
 
@@ -2179,18 +2235,25 @@ function _buildDispatchMcpServer({ cwd, permissionMode, profileData, sendStep = 
     },
     async ({ provider, task, reason }) => {
       try {
+        const profiles = currentProfiles();
+        // 跟 ">厂商" 手动路径保持同样的续接行为，否则同一个厂商在两条路径下
+        // 记不记得上一轮会不一致，用户无从预期
+        const convId = activeHistoryConversationId;
+        const targetProfile = resolveDispatchProfile(profiles, provider);
         const result = await executeProviderDispatch({
           provider,
           task,
           cwd,
           permissionMode,
-          profileData: currentProfiles(),
+          profileData: profiles,
+          resumeSessionId: targetProfile ? recallDispatchSession(convId, targetProfile.id) : null,
           // MCP 工具内部拿不到自己的 tool_use_id，改用 provider+task 前缀做关联键，
           // 前端从 tool_use 的 input 能算出同样的键，据此把步骤挂回对应卡片
           onStep: sendStep
             ? (name, input) => sendStep({ key: dispatchStepKey(provider, task), name, input })
             : null,
         });
+        rememberDispatchSession(convId, result.profileId, result.sessionId);
         return {
           content: [{
             type: "text",
@@ -3556,6 +3619,9 @@ wss.on("connection", (ws) => {
       claudeTurnEpoch += 1;
       clearPendingAskUserQuestion("session reset");
       finalizeActiveAssistantHistory("stopped");
+      // 派发会话一并作废——重置后是新话题，再接着上一轮就成了串台。
+      // 必须赶在 clearActiveHistoryConversation() 把 id 置空之前取。
+      forgetDispatchSessions(normalizeHistoryId(msg.conversationId) || activeHistoryConversationId);
       clearActiveHistoryConversation();
       clearSession();
       clearCodexThread();
@@ -3777,10 +3843,17 @@ wss.on("connection", (ws) => {
       const dispatchReason = typeof msg.dispatchReason === "string" && msg.dispatchReason.trim()
         ? msg.dispatchReason.trim()
         : "用户通过 > 明确指定厂商";
+      // 同一条对话里再派给同一个厂商，就接着上一轮说
+      const dispatchConvId = normalizeHistoryId(msg.conversationId);
+      const dispatchProfile = resolveDispatchProfile(profileData, msg.dispatchProvider);
+      const resumeSessionId = dispatchProfile
+        ? recallDispatchSession(dispatchConvId, dispatchProfile.id)
+        : null;
       const dispatchInput = {
         provider: msg.dispatchProvider,
         task: msg.prompt,
         reason: dispatchReason,
+        ...(resumeSessionId ? { resumed: true } : {}),
       };
       abortCtrl = ac;
       const isCurrentDispatchTurn = () => (
@@ -3809,6 +3882,7 @@ wss.on("connection", (ws) => {
             permissionMode,
             profileData,
             abortController: ac,
+            resumeSessionId,
             // 这条路径手里就有 tool_use_id，前端直接按 id 归位，不必再算 key
             onStep: (name, input) => {
               if (!isCurrentDispatchTurn()) return;
@@ -3817,6 +3891,9 @@ wss.on("connection", (ws) => {
               } catch { /* 连接已断则忽略 */ }
             },
           });
+          // 无论这一轮是否还是当前轮，会话 id 都要记下来：用户中断后再问同一家，
+          // 接着上一轮仍然是对的，丢掉反而白费了对方已经建立的上下文
+          rememberDispatchSession(dispatchConvId, dispatchResult.profileId, dispatchResult.sessionId);
           if (!isCurrentDispatchTurn()) return;
           const resultText = JSON.stringify({ ok: true, reason: dispatchReason, ...dispatchResult });
           send({
