@@ -2317,7 +2317,11 @@ async function executeProviderDispatch({
 // activeHistoryConversationId：同一个 builder 也被微信链路和可跨回合存活的
 // 后台任务用着，那个全局变量指的是 Web UI 当前正在看的对话，跟它们无关，
 // 读到就会把会话记到别人头上。拿不到就传 null——不续接总好过串台。
-function _buildDispatchMcpServer({ cwd, permissionMode, profileData, sendStep = null, conversationId = null }) {
+// getAbortSignal 让派发跟着外层一起取消。executeProviderDispatch 拿不到信号时
+// 会自建一个 AbortController，那样外面按停止根本传不进去——子进程会一直跑到
+// 自然结束，用户以为停了，其实还在烧钱。传函数而不是信号本身：MCP server 会
+// 跨多轮复用，每次调用要拿的是当前这一轮的信号。
+function _buildDispatchMcpServer({ cwd, permissionMode, profileData, sendStep = null, conversationId = null, getAbortSignal = null }) {
   // 持久 Query 会跨多轮复用 MCP server；每次调用都重新读取配置，避免用户在
   // 会话中编辑了非当前账号后，派发仍拿着旧 key / 模型 / goodAt。
   const currentProfiles = () => {
@@ -2344,6 +2348,16 @@ function _buildDispatchMcpServer({ cwd, permissionMode, profileData, sendStep = 
         const resumeSessionId = canResume ? recallDispatchSession(convId, profileId) : null;
         const releaseInflight = markDispatchInflight(convId, profileId);
         const generation = dispatchGenerationOf(convId);
+        // 把外层的取消挂到这次派发上。外层已经停了就不必再发起——直接抛，
+        // 免得白开一个几分钟的子进程
+        const outerSignal = getAbortSignal ? getAbortSignal() : null;
+        if (outerSignal?.aborted) {
+          releaseInflight();
+          throw Object.assign(new Error("已取消"), { name: "AbortError" });
+        }
+        const dispatchController = new AbortController();
+        const onOuterAbort = () => dispatchController.abort();
+        outerSignal?.addEventListener("abort", onOuterAbort, { once: true });
         let result;
         try {
           result = await executeProviderDispatch({
@@ -2353,6 +2367,7 @@ function _buildDispatchMcpServer({ cwd, permissionMode, profileData, sendStep = 
             permissionMode,
             profileData: profiles,
             resumeSessionId,
+            abortController: dispatchController,
             // 拿到 id 立刻记，中断也不丢。对话已被重置过就别写回去了
             onSession: (id) => {
               if (dispatchGenerationOf(convId) !== generation) return;
@@ -2375,6 +2390,9 @@ function _buildDispatchMcpServer({ cwd, permissionMode, profileData, sendStep = 
           }
           throw error;
         } finally {
+          // 监听器必须摘掉：MCP server 跨多轮复用，外层 signal 活得比这次调用长，
+          // 攒着不摘就是内存泄漏
+          outerSignal?.removeEventListener("abort", onOuterAbort);
           releaseInflight();
         }
         return {
@@ -2564,6 +2582,7 @@ async function processWechatQuery(baseUrl, token, sender, prompt, contextToken, 
               profileData,
               // 微信链路按发信人隔离会话，跟 Web 那边的对话 id 是两套命名空间
               conversationId: sender ? `wechat_${String(sender).replace(/[^A-Za-z0-9_-]/g, "")}` : null,
+              getAbortSignal: () => queryAbortController.signal,
             }),
           } : {}),
           ...(hasScheduler
@@ -4133,6 +4152,8 @@ wss.on("connection", (ws) => {
             permissionMode,
             profileData,
             conversationId: historyIdOrNull(msg.conversationId) || activeHistoryConversationId,
+            // 用户按停止时，派出去的子进程也要跟着停
+            getAbortSignal: () => ac.signal,
             sendStep: (payload) => { try { send({ type: "dispatch_step", ...payload }); } catch { /* 连接已断则忽略 */ } },
           }),
         } : {}),

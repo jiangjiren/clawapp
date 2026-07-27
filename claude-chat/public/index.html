@@ -4720,7 +4720,13 @@ function squadOwning(itemId) {
 
 // 跨厂商派发的步骤归位：MCP 工具内部没有自己的 tool_use_id，只能靠
 // provider+task 前缀反查。与 server.js 的 dispatchStepKey 必须保持一致。
+//
+// key 只取任务前 100 字，同一厂商派两个开头相同的长任务就会撞——后登记的会把
+// 先前那条覆盖掉，于是前一张卡片从此收不到步骤。所以按 key 存一个队列，新的
+// 排在后面，取的时候优先给还没结束的那张卡。
+// 同时限制总量：一个长会话里派几百次，这张表会一直涨。
 const dispatchKeyToTaskId = new Map();
+const DISPATCH_KEY_LIMIT = 64;
 
 function dispatchStepKeyOf(input) {
   return `${String(input?.provider || "").trim()}|${String(input?.task || "").trim().slice(0, 100)}`;
@@ -4728,7 +4734,29 @@ function dispatchStepKeyOf(input) {
 
 function registerDispatchKey(input, toolUseId) {
   const key = dispatchStepKeyOf(input);
-  if (key.trim() !== "|") dispatchKeyToTaskId.set(key, toolUseId);
+  if (key.trim() === "|") return;
+  const ids = dispatchKeyToTaskId.get(key) || [];
+  if (!ids.includes(toolUseId)) ids.push(toolUseId);
+  // 重新 set 让它排到末尾，下面按插入序淘汰才是真正的 LRU
+  dispatchKeyToTaskId.delete(key);
+  dispatchKeyToTaskId.set(key, ids);
+  while (dispatchKeyToTaskId.size > DISPATCH_KEY_LIMIT) {
+    const oldest = dispatchKeyToTaskId.keys().next().value;
+    if (oldest === undefined) break;
+    dispatchKeyToTaskId.delete(oldest);
+  }
+}
+
+/** 按 key 找该收这条步骤的卡片：优先还在跑的那张，都结束了就给最后一张 */
+function taskIdForDispatchKey(key) {
+  const ids = dispatchKeyToTaskId.get(key || "");
+  if (!ids?.length) return null;
+  for (const id of ids) {
+    const card = squadOfTask.has(id) ? squadCards.get(squadOfTask.get(id)) : null;
+    const status = card?.state.get(id)?.status;
+    if (status && status !== "done" && status !== "failed") return id;
+  }
+  return ids[ids.length - 1];
 }
 
 function currentSquad(create) {
@@ -5072,7 +5100,7 @@ function handleEvent(ev) {
   // 跨厂商子 agent 的工具动作：它跑在独立进程里，事件不会带 parent_tool_use_id
   // 冒泡上来，只能由服务端单独转发，这里补进对应卡片的步骤流。
   if (ev.type === "dispatch_step") {
-    const taskId = ev.toolUseId || dispatchKeyToTaskId.get(ev.key || "");
+    const taskId = ev.toolUseId || taskIdForDispatchKey(ev.key);
     if (taskId) {
       const card = squadOwning(taskId);
       if (card) card.step(taskId, subagentToolLabel(ev.name, ev.input));
@@ -6201,6 +6229,17 @@ function submitRequest(textOverride = null, options = {}) {
       submitRequest(textOverride, { ...options, retriedProviders: true });
     });
     return true;
+  }
+  // 清单已就绪，但厂商名对不上（拼错、或那个账号被删了）。默认行为是退化成
+  // 普通消息发给当前模型——用户却以为派出去了，而且回复看着像模像样，很难察觉。
+  // 宁可拦下来说清楚。
+  if (looksLikeDispatchAttempt(text) && !parseProviderDispatchText(text)) {
+    const wanted = text.slice(1).split(/\s/)[0];
+    const known = _dispatchProviders.map((p) => `>${dispatchTokenFor(p)}`).join("　");
+    showInlineError(known
+      ? `没有厂商叫「${wanted}」。可用：${known}`
+      : `没有厂商叫「${wanted}」，也没读到任何已配置的厂商，去设置里看看。`);
+    return false;
   }
   const shouldQueue = isGenerating || resetRequested || pendingRequestDraft || followUpQueue.length > 0;
   if (!shouldQueue && (!ws || ws.readyState !== WebSocket.OPEN)) return false;
