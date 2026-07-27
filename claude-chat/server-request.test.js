@@ -226,7 +226,7 @@ test("buildAgentEnv opts into session_state_changed for every provider", { timeo
 
   try {
     const probe = `
-      const { buildAgentEnv, resolveDispatchProfile, listDispatchProviders, rememberDispatchSession, recallDispatchSession, forgetDispatchSessions } = await import(${JSON.stringify(new URL("server.js", import.meta.url).href)});
+      const { buildAgentEnv, resolveDispatchProfile, listDispatchProviders, rememberDispatchSession, recallDispatchSession, forgetDispatchSessions, dropDispatchSession, isDispatchInflight, historyIdOrNull } = await import(${JSON.stringify(new URL("server.js", import.meta.url).href)});
       const KEY = "CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS";
       const cases = {
         claude: { activeProfileId: "p_claude", profiles: [{ id: "p_claude", provider: "claude" }] },
@@ -274,6 +274,29 @@ test("buildAgentEnv opts into session_state_changed for every provider", { timeo
       // 空 sessionId 不该被记住，否则下一轮会拿着假 id 去续接
       rememberDispatchSession("conv-c", "p_d", null);
       out.sessions.ignoresBlankSessionId = recallDispatchSession("conv-c", "p_d") ?? null;
+
+      // 坏 id 必须能单独丢弃：续接失败后留着它，之后每次都会拿同一个坏 id 去试
+      rememberDispatchSession("conv-d", "p_d", "sess-bad");
+      rememberDispatchSession("conv-d", "p_codex", "sess-keep");
+      dropDispatchSession("conv-d", "p_d");
+      out.sessions.afterDrop = recallDispatchSession("conv-d", "p_d") ?? null;
+      out.sessions.dropSparesSibling = recallDispatchSession("conv-d", "p_codex") ?? null;
+
+      // historyIdOrNull 在拿不到合法值时必须返回 null，不能像 normalizeHistoryId
+      // 那样凭空造一个——那会让「按 id 清除」静默清了个寂寞
+      out.historyId = {
+        valid: historyIdOrNull("conv-abc"),
+        empty: historyIdOrNull(""),
+        nullish: historyIdOrNull(null),
+        tooShort: historyIdOrNull("ab"),
+        illegal: historyIdOrNull("has space"),
+      };
+
+      // 在途守卫：并发派同一家时后来者不该去续接同一条 thread
+      out.inflight = {
+        idleIsFalse: isDispatchInflight("conv-e", "p_d"),
+        blankIsFalse: isDispatchInflight(null, "p_d"),
+      };
 
       process.stdout.write("PROBE:" + JSON.stringify(out) + "\\n", () => process.exit(0));
     `;
@@ -338,7 +361,20 @@ test("buildAgentEnv opts into session_state_changed for every provider", { timeo
       afterForget: null,
       siblingSurvivesForget: "sess-3",
       ignoresBlankSessionId: null,
-    }, "派发会话必须按「对话 + 厂商」隔离，并在重置该对话时清掉");
+      afterDrop: null,
+      dropSparesSibling: "sess-keep",
+    }, "派发会话必须按「对话 + 厂商」隔离，重置时整条清掉，续接失败时能单独丢弃坏 id");
+    assert.deepEqual(result.historyId, {
+      valid: "conv-abc",
+      empty: null,
+      nullish: null,
+      tooShort: null,
+      illegal: null,
+    }, "historyIdOrNull 必须在拿不到合法 id 时返回 null，否则按 id 清除会清了个寂寞");
+    assert.deepEqual(result.inflight, {
+      idleIsFalse: false,
+      blankIsFalse: false,
+    }, "没有派发在跑时不该报在途");
   } finally {
     if (child && !childClosed) {
       await new Promise((resolve, reject) => {

@@ -2582,12 +2582,33 @@ let _dispatchProviders = [];
 let _claudeAuthStatus = null; // null=checking, true=ok, false=not logged in
 let _codexAuthStatus  = null;
 
+let _dispatchProvidersLoaded = false;
+
 async function fetchDispatchProviders() {
   try {
     const res = await fetch("api/providers", { cache: "no-store" });
     const data = await res.json().catch(() => ({}));
-    if (res.ok && Array.isArray(data.providers)) _dispatchProviders = data.providers;
+    if (res.ok && Array.isArray(data.providers)) {
+      _dispatchProviders = data.providers;
+      _dispatchProvidersLoaded = true;
+    }
   } catch { }
+}
+
+/**
+ * 保证厂商清单已就绪再判断 ">厂商"。
+ * 清单是异步拉的，页面刚打开就发 ">Kimi 任务" 时它可能还是空的——那样
+ * parseProviderDispatchText 匹配不上，整条消息会被当成普通文本发给当前模型，
+ * 用户却以为已经派出去了。这是最难察觉的一种失败：什么都没报错。
+ */
+async function ensureDispatchProvidersLoaded() {
+  if (_dispatchProvidersLoaded) return;
+  await fetchDispatchProviders();
+}
+
+/** 形如 ">something 还有内容"，即用户看起来是想派发（厂商名真假在这一步不判断） */
+function looksLikeDispatchAttempt(value) {
+  return /^>[^\s]+\s+\S/.test(String(value || "").trim());
 }
 
 async function checkClaudeAuth() {
@@ -4272,6 +4293,9 @@ function parseDispatchResult(content) {
       providerName: parsed.providerName || parsed.provider || "",
       model: parsed.model || "",
       output: typeof parsed.output === "string" ? parsed.output : "",
+      // 自动派发时前端事先不知道会不会续接（tool_use 的 input 由模型给出，
+      // 不含这个字段），只能从结果里读，读到再补标到卡片上
+      resumed: parsed.resumed === true,
     };
   } catch {
     return null;
@@ -4374,6 +4398,14 @@ class SquadCard {
     s.status = status;
     s.result = result;
     if (origin) s.origin = origin;
+    // 自动派发时是否续接只能从结果里得知，这时才把标记补到标题上。
+    // 标签存在 this.labels 而不是状态对象里，改完要 paintRow 才会显示。
+    if (origin?.resumed) {
+      const label = this.labels.get(id);
+      if (label && !label.startsWith("接着上一轮")) {
+        this.labels.set(id, `接着上一轮 · ${label}`);
+      }
+    }
     s.endAt = Date.now();
     this.paintRow(id);
     this.refresh();
@@ -6146,9 +6178,19 @@ function scheduleFollowUpDrain(delay = 0) {
   }, delay);
 }
 
+let _dispatchProvidersProbed = false;
+
 function submitRequest(textOverride = null, options = {}) {
   const text = String(textOverride ?? promptEl.value).trim();
   if (!text) return false;
+  // 厂商清单是异步拉的。刚开页面就发 ">Kimi 任务" 时它可能还空着，那样会被
+  // 当成普通消息发给当前模型，用户却以为派出去了——静默失败最难查。
+  // 先补拉一次再重投；探测标记在发起前就置位，拉取失败也不会来回打转。
+  if (!_dispatchProvidersLoaded && !_dispatchProvidersProbed && looksLikeDispatchAttempt(text)) {
+    _dispatchProvidersProbed = true;
+    ensureDispatchProvidersLoaded().then(() => submitRequest(textOverride, options));
+    return true;
+  }
   const shouldQueue = isGenerating || resetRequested || pendingRequestDraft || followUpQueue.length > 0;
   if (!shouldQueue && (!ws || ws.readyState !== WebSocket.OPEN)) return false;
   const draft = takeRequestDraft(textOverride, options);
