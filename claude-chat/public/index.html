@@ -2572,6 +2572,40 @@ let currentConvId = null;  // current conversation id
 let currentSessionId = null; // current Claude session / Codex thread id
 let currentSessionProvider = null; // "claude" | "codex"
 
+// ── 游标同步状态 ──────────────────────────────────────────
+// 断线/刷新后靠 {conversationId, lastSeq} 向服务端要差量，不再依赖内存里的 runId。
+// 存 sessionStorage 是关键：它能活过刷新，刷新后才接得回正在跑的轮次。
+// 隐私模式下 storage 访问会抛异常，全部 try/catch 包住，失败就退化成纯内存游标。
+const CURSOR_STORAGE_KEY = "chat.cursor";
+let syncCursor = { conversationId: null, lastSeq: 0 };
+
+function loadCursor() {
+  try {
+    const raw = sessionStorage.getItem(CURSOR_STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object") return;
+    syncCursor = {
+      conversationId: typeof parsed.conversationId === "string" && parsed.conversationId ? parsed.conversationId : null,
+      lastSeq: Number.isFinite(parsed.lastSeq) && parsed.lastSeq > 0 ? parsed.lastSeq : 0,
+    };
+  } catch { }
+}
+
+function saveCursor() {
+  try {
+    sessionStorage.setItem(CURSOR_STORAGE_KEY, JSON.stringify(syncCursor));
+  } catch { }
+}
+
+// 会话切换时调用：游标必须跟着会话走，否则新会话的 seq 会被旧会话的 lastSeq 压住
+function resetCursor(conversationId = null) {
+  syncCursor = { conversationId: conversationId || null, lastSeq: 0 };
+  saveCursor();
+}
+
+loadCursor();
+
 function genId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 }
@@ -3508,12 +3542,17 @@ async function saveCurrentConversation() {
     sessionProvider: currentSessionProvider,
     profileId: _profileData.activeProfileId,
     messages: messageLog.map(m => ({
+      id: m.id ?? undefined,
       role: m.role,
       text: m.text,
+      images: m.images ?? undefined,
       blocks: m.blocks ?? null,
       raw: m.raw ?? null,
       events: m.events ?? null,
       cost: m.cost ?? null,
+      status: m.status ?? undefined,
+      createdAt: m.createdAt ?? undefined,
+      updatedAt: m.updatedAt ?? undefined,
     })),
   };
   try {
@@ -3937,17 +3976,50 @@ let reconnectTimer = null;
 
 function scheduleReconnect(delayMs = 3000) {
   clearTimeout(reconnectTimer);
-  reconnectTimer = setTimeout(connect, delayMs);
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    connect();
+  }, delayMs);
+}
+
+// 上一次 hello 是从 seq 0 要起的 —— 回来的 sync 是整份内容，得先清屏再铺，否则会叠一遍
+let helloExpectsFullRebuild = false;
+
+// 报游标。连上就发，不管是不是生成中——刷新后 isGenerating 必然是 false，
+// 但服务端可能还有轮次在跑，真实状态由随后的 sync 决定。
+function sendHello() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  // 本页面实例还没渲染过任何消息（冷启动 / 刷新）时从 0 要起：游标只记得"是哪个会话"，
+  // 记不住屏幕上有什么，按 lastSeq 只补差量会让刷新后的页面只剩下半截回答。
+  const hasRendered = messageLog.length > 0 || messagesEl.childElementCount > 0;
+  const conversationId = currentConvId ?? syncCursor.conversationId ?? null;
+  const lastSeq = hasRendered && conversationId === syncCursor.conversationId
+    ? (syncCursor.lastSeq ?? 0)
+    : 0;
+  helloExpectsFullRebuild = lastSeq === 0;
+  try {
+    ws.send(JSON.stringify({
+      type: "hello",
+      conversationId,
+      lastSeq,
+    }));
+  } catch { }
 }
 
 function connect() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+  clearTimeout(reconnectTimer);
+  reconnectTimer = null;
+  if (ws) {
+    // 旧 socket 可能还卡在 CLOSING，稍后才触发 onclose。不摘掉回调的话，它会把
+    // sendBtn 禁掉、把生成态清掉，污染这条新连接。
+    ws.onopen = null; ws.onclose = null; ws.onmessage = null; ws.onerror = null;
+  }
   ws = new WebSocket(wsUrl);
   ws.onopen = () => {
     sendBtn.disabled = false;
-    if (isGenerating && currentRunId) {
-      // 生成中断线重连：向服务端领回挂起的 run，断线期间的输出会补发过来
-      ws.send(JSON.stringify({ resumeRun: currentRunId }));
+    sendHello();
+    if (isGenerating) {
       updateTypingStatus("已重连，正在恢复回答…");
       updateGenChip("已重连，正在恢复回答…");
     } else {
@@ -3963,8 +4035,8 @@ function connect() {
   };
   ws.onclose = () => {
     sendBtn.disabled = true;
-    if (isGenerating && currentRunId) {
-      // 服务端会把生成挂起 90 秒等我们回来，别清状态，提示重连中
+    if (isGenerating) {
+      // 服务端会把这一轮挂着等我们回来，别清状态，提示重连中
       updateTypingStatus("连接断开，正在重连…");
       updateGenChip("连接断开，正在重连…");
     } else {
@@ -3978,29 +4050,29 @@ function connect() {
 }
 connect();
 
-// 应用层心跳：探测"半死连接"（readyState 还是 OPEN 但链路已被 NAT/基站掐断）。
-// 距上次收到服务端消息超过 30s 就发一个 ping，10s 内等不到 pong 则强制断开，
-// 走 onclose → 重连 → resumeRun 的恢复流程。长工具执行期间服务端没有事件是
-// 正常的，ping/pong 保证这期间连接活性也能被确认，不会误报断线。
-const CLIENT_PING_IDLE_MS = 30_000;
-const CLIENT_PONG_TIMEOUT_MS = 10_000;
-let pingSentAt = 0; // >0 表示已发 ping 正在等 pong
-function heartbeatTick() {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  const now = Date.now();
-  if (pingSentAt > 0) {
-    if (now - pingSentAt > CLIENT_PONG_TIMEOUT_MS) {
-      pingSentAt = 0;
-      try { ws.close(); } catch { }
-    }
-    return;
-  }
-  if (now - lastWsEventAt > CLIENT_PING_IDLE_MS) {
-    pingSentAt = now;
-    try { ws.send(JSON.stringify({ type: "ping" })); } catch { }
+// 重连兜底：客户端自己 close() 后，移动网络的死链路会让 socket 长时间卡在 CLOSING，
+// onclose 迟迟不来就再也没人重连了。这个定时器不依赖 onclose，只看 readyState。
+function ensureConnected() {
+  if (reconnectTimer) return; // 已排期，别抢
+  if (!ws || ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED) {
+    connect();
   }
 }
-setInterval(heartbeatTick, 10_000);
+setInterval(ensureConnected, 5_000);
+
+// 死连接探测：readyState 还是 OPEN，但链路已被 NAT/基站掐断，onclose 永远不来。
+// 不再做 ping/pong 往返（误判率高），改成宽松的静默检测：生成中且两分钟没收到
+// 任何一条服务端消息，就强制断开，交给重连 + hello/sync 把这一轮接回来。
+// 强制断开是安全的：服务端不会因为客户端掉线而 abort，事件都在日志里。
+const CLIENT_STALL_MS = 120_000;
+function checkClientStall() {
+  if (isGenerating && !pendingAskUserQuestion && lastWsEventAt > 0
+      && Date.now() - lastWsEventAt > CLIENT_STALL_MS) {
+    lastWsEventAt = 0;
+    try { ws.close(); } catch { }
+  }
+}
+setInterval(checkClientStall, 15_000);
 // Mobile: JS timers pause when tab is backgrounded. visibilitychange fires
 // immediately when the user returns — reconnect at once if the socket died.
 document.addEventListener("visibilitychange", () => {
@@ -4008,7 +4080,7 @@ document.addEventListener("visibilitychange", () => {
   if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
     scheduleReconnect(100);
   } else {
-    heartbeatTick();
+    checkClientStall();
   }
 });
 
@@ -4925,12 +4997,136 @@ function subagentIngest(ev) {
   return false;
 }
 
+// ── 游标同步（hello → sync）────────────────────────────────
+// 服务端按我们报的游标补齐差量，或在落后太多时直接给整份快照。
+// 无论哪种，ev.turn 都是"这一轮到底还在不在跑"的权威答案。
+function handleSyncEvent(ev) {
+  const convId = typeof ev.conversationId === "string" && ev.conversationId ? ev.conversationId : null;
+  // 同步在途时用户切走了会话，这份 sync 已经过期，丢掉
+  if (convId && currentConvId && convId !== currentConvId) return;
+  const fullRebuild = helloExpectsFullRebuild;
+  helloExpectsFullRebuild = false;
+
+  // 补齐期间不做 runId 过滤：日志里的事件可能带着上一次的 runId，
+  // 拿内存里那个（刷新后为 null / 断线后可能已过期）去筛会把整轮答案筛没。
+  currentRunId = null;
+
+  if (ev.reset === true) {
+    applySyncSnapshot(ev.snapshot, convId);
+  } else {
+    // 从 0 要回来的是整份内容；即使会话为空也要清掉旧 DOM。增量重连则
+    // 必须保留 assistantEl/blockMap，断线后的 delta 才会接在原气泡上。
+    if (fullRebuild) {
+      resetAssistantState();
+      messagesEl.innerHTML = "";
+      messageLog = [];
+      currentConvId = convId || currentConvId;
+      syncCursor = { conversationId: convId, lastSeq: 0 };
+    }
+    for (const entry of Array.isArray(ev.events) ? ev.events : []) {
+      const payload = entry?.payload;
+      if (!payload || typeof payload !== "object") continue;
+      if (entry.kind === "user") {
+        appendSyncedUserMessage(payload);
+        continue;
+      }
+      if (entry.kind === "turn") continue; // 轮次状态统一由 ev.turn 决定
+      if (typeof payload.type !== "string") continue;
+      try {
+        handleEvent({
+          ...payload,
+          conversationId: convId,
+          seq: entry.seq,
+        });
+      } catch { }
+    }
+    if (Array.isArray(ev.events) && ev.events.length > 0) scrollBottom();
+  }
+
+  if (!currentConvId && convId) currentConvId = convId;
+  if (convId && Number.isFinite(ev.lastSeq)) {
+    syncCursor = { conversationId: convId, lastSeq: ev.lastSeq };
+    saveCursor();
+  }
+
+  applySyncTurn(ev.turn);
+}
+
+// reset:true —— 用服务端快照整份重画，走和 loadConversation 一样的渲染路径
+function applySyncSnapshot(snapshot, convId) {
+  if (!snapshot || !Array.isArray(snapshot.messages)) return;
+  clearAskUserQuestion();
+  resetAssistantState();
+  renderConversationMessages(snapshot);
+  currentConvId = snapshot.id || convId || currentConvId;
+  if (snapshot.sessionId) currentSessionId = snapshot.sessionId;
+  if (snapshot.sessionProvider === "codex" || snapshot.sessionProvider === "claude") {
+    currentSessionProvider = snapshot.sessionProvider;
+  }
+  scrollBottom();
+}
+
+// 日志里的 user 事件（payload = {id, text, images?}）不是 WS 事件形状，
+// handleEvent 认不出来，按和 send() 一致的方式补进时间线
+function appendSyncedUserMessage(payload) {
+  const text = typeof payload.text === "string" ? payload.text : "";
+  if (!text) return;
+  if (payload.id && messageLog.some(message => message.id === payload.id)) return;
+  const images = Array.isArray(payload.images) ? cloneJson(payload.images) : [];
+  const imageUrls = images.map(image => {
+    if (typeof image === "string") return image;
+    if (typeof image?.previewUrl === "string") return image.previewUrl;
+    return image?.data && image?.mediaType ? `data:${image.mediaType};base64,${image.data}` : null;
+  }).filter(Boolean);
+  addMessage("user", text, imageUrls);
+  messageLog.push({
+    id: payload.id ?? undefined,
+    role: "user",
+    text,
+    images: images.length ? images : undefined,
+    cost: null,
+    createdAt: payload.createdAt ?? undefined,
+  });
+}
+
+// 服务端的 turn 快照是权威：它说还在跑就恢复生成态，说结束就收干净
+function applySyncTurn(turn) {
+  if (turn && turn.status === "running") {
+    setGenerating(true);
+    addTyping();
+    return;
+  }
+  clearAskUserQuestion();
+  setGenerating(false);
+  removeTyping();
+  activeRequestId = null;
+  scheduleQueuedFollowUpDrain();
+}
+
 // ── Event handling ────────────────────────────────────────
 function handleEvent(ev) {
   lastWsEventAt = Date.now();
-  pingSentAt = 0; // 收到任何消息都说明连接活着
 
-  if (ev.type === "pong") return;
+  if (ev.type === "pong" || ev.type === "ping") return;
+
+  if (ev.type === "sync") {
+    handleSyncEvent(ev);
+    return;
+  }
+
+  // 切走会话后旧 run 的迟到包不能污染新页面，更不能把游标偷偷切回旧会话。
+  if (ev.conversationId && currentConvId && ev.conversationId !== currentConvId) return;
+
+  // 带 runId 的事件来自某次生成；若已被新请求取代（runId 不匹配），
+  // 丢弃这些迟到事件，避免旧 run 的 stopped/流式输出污染新请求的状态。
+  if (ev.runId && currentRunId && ev.runId !== currentRunId) return;
+
+  // seq 是幂等键：buffer、日志补发和实时推送即使发生交错，同一事件也只渲染一次。
+  if (ev.conversationId && Number.isFinite(ev.seq)) {
+    if (ev.conversationId === syncCursor.conversationId && ev.seq <= syncCursor.lastSeq) return;
+    syncCursor = { conversationId: ev.conversationId, lastSeq: ev.seq };
+    saveCursor();
+  }
 
   if (ev.type === "reset_complete") {
     clearAllUnackedRequests();
@@ -4988,22 +5184,11 @@ function handleEvent(ev) {
     return;
   }
 
-  // 带 runId 的事件来自某次生成；若已被新请求取代（runId 不匹配），
-  // 丢弃这些迟到事件，避免旧 run 的 stopped/流式输出污染新请求的状态
-  if (ev.runId && currentRunId && ev.runId !== currentRunId) return;
-
   if (ev.type === "run_not_found") {
-    // 断线超过服务端宽限期（或服务端重启），本次生成已丢失
-    if (isGenerating) {
-      clearAskUserQuestion();
-      resetAssistantState();
-      showInlineError("连接中断时间过长，本次回答已丢失，请重新发送消息。");
-      setGenerating(false);
-      removeTyping();
-    }
+    // 兼容期的老路径。runId 找不到不再等于"回答丢了"——事件都在日志里，
+    // 重新报一次游标让服务端补齐，UI 状态交给随后的 sync 决定。
     currentRunId = null;
-    activeRequestId = null;
-    scheduleQueuedFollowUpDrain();
+    sendHello();
     return;
   }
 
@@ -5301,7 +5486,16 @@ function handleEvent(ev) {
     }
     resetAssistantState();
     if (savedText || savedBlocks?.length) {
-      messageLog.push({ role: "assistant", text: savedText, blocks: savedBlocks, raw: savedRawMessages, events: savedEvents, cost: resultCost });
+      messageLog.push({
+        id: ev.turnId ?? undefined,
+        role: "assistant",
+        text: savedText,
+        blocks: savedBlocks,
+        raw: savedRawMessages,
+        events: savedEvents,
+        cost: resultCost,
+        status: ev.subtype === "success" || !ev.is_error ? "complete" : "error",
+      });
       saveCurrentConversation();
     }
     return;
@@ -5700,6 +5894,7 @@ function selectItem(i) {
     clearAskUserQuestion();
     messagesEl.innerHTML = "";
     messageLog = []; currentConvId = null; currentSessionId = null; currentSessionProvider = null;
+    resetCursor();
     promptEl.value = "";
     promptEl.style.height = "36px";
     clearMentionFiles();
@@ -5827,6 +6022,7 @@ function send() {
     clearAskUserQuestion();
     messagesEl.innerHTML = "";
     messageLog = []; currentConvId = null; currentSessionId = null; currentSessionProvider = null;
+    resetCursor();
     promptEl.value = "";
     promptEl.style.height = "36px";
     clearMentionFiles();
@@ -5838,7 +6034,10 @@ function send() {
   const isFollowUp = isGenerating;
   hidePopup();
   const mentionedFiles = [...selectedMentionFiles.values()];
-  if (!currentConvId) currentConvId = genId();
+  if (!currentConvId) {
+    currentConvId = genId();
+    resetCursor(currentConvId);
+  }
   const imagePreviewUrls = pendingImages.map(img => img.previewUrl);
   if (!isFollowUp) {
     clearAskUserQuestion();
@@ -5853,8 +6052,16 @@ function send() {
   const displayText = mentionedFiles.length > 0
     ? `${text}\n\n引用文件：${mentionedFiles.map((file) => `@${file.title}`).join(" · ")}`
     : text;
+  const userMessageId = `user_${crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`}`;
+  const historyImages = pendingImages.map(img => ({ data: img.data, mediaType: img.mediaType }));
   addMessage("user", displayText, imagePreviewUrls);
-  messageLog.push({ role: "user", text: displayText, cost: null });
+  messageLog.push({
+    id: userMessageId,
+    role: "user",
+    text: displayText,
+    images: historyImages.length ? historyImages : undefined,
+    cost: null,
+  });
   promptEl.value = "";
   promptEl.style.height = "36px";
   syncSendButtonMode();
@@ -5889,7 +6096,6 @@ function send() {
     quoteChip.classList.remove("visible");
   }
   parts.push(text);
-  const userMessageId = `user_${crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`}`;
   if (!isFollowUp) {
     currentRunId = crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     activeRequestId = userMessageId;
@@ -6245,12 +6451,44 @@ const historyBackdrop = document.getElementById("history-backdrop");
 
 async function deleteConversation(id) {
   try { await fetch(`api/history/${id}`, { method: "DELETE" }); } catch { }
-  if (currentConvId === id) currentConvId = null;
+  if (currentConvId === id) { currentConvId = null; resetCursor(); }
+  if (syncCursor.conversationId === id) resetCursor();
   if (_historyCache !== null) {
     _historyCache = _historyCache.filter(h => h.id !== id);
     renderHistoryFromData(_historyCache); // 立即从缓存刷新，不等网络
   } else {
     renderHistoryList();
+  }
+}
+
+// 把一个 conversation 对象铺进消息区。loadConversation 和 sync 快照共用同一条渲染路径。
+function renderConversationMessages(conv) {
+  const messages = Array.isArray(conv?.messages) ? conv.messages : [];
+  messagesEl.innerHTML = "";
+  messageLog = messages.map(m => ({
+    id: m.id ?? undefined,
+    role: m.role,
+    text: m.text,
+    images: m.images ?? undefined,
+    blocks: m.blocks ?? null,
+    raw: m.raw ?? null,
+    events: m.events ?? null,
+    cost: m.cost ?? null,
+    status: m.status ?? undefined,
+    createdAt: m.createdAt ?? undefined,
+    updatedAt: m.updatedAt ?? undefined,
+  }));
+  for (const msg of messages) {
+    const hasAssistantBlocks = msg.role === "assistant" && Array.isArray(msg.blocks) && msg.blocks.length > 0;
+    const imageUrls = Array.isArray(msg.images) ? msg.images.map(image => {
+      if (typeof image === "string") return image;
+      if (typeof image?.previewUrl === "string") return image.previewUrl;
+      return image?.data && image?.mediaType ? `data:${image.mediaType};base64,${image.data}` : null;
+    }).filter(Boolean) : undefined;
+    const el = addMessage(msg.role, hasAssistantBlocks ? "" : msg.text, imageUrls);
+    if (hasAssistantBlocks) {
+      renderAssistantBlocks(el.querySelector(".msg-body"), msg.blocks);
+    }
   }
 }
 
@@ -6265,23 +6503,10 @@ async function loadConversation(conv) {
       if (res.ok) conv = await res.json();
     } catch { }
   }
-  messagesEl.innerHTML = "";
-  messageLog = conv.messages.map(m => ({
-    role: m.role,
-    text: m.text,
-    blocks: m.blocks ?? null,
-    raw: m.raw ?? null,
-    events: m.events ?? null,
-    cost: m.cost ?? null,
-  }));
-  for (const msg of conv.messages) {
-    const hasAssistantBlocks = msg.role === "assistant" && Array.isArray(msg.blocks) && msg.blocks.length > 0;
-    const el = addMessage(msg.role, hasAssistantBlocks ? "" : msg.text);
-    if (hasAssistantBlocks) {
-      renderAssistantBlocks(el.querySelector(".msg-body"), msg.blocks);
-    }
-  }
+  renderConversationMessages(conv);
   currentConvId = conv.id;
+  // 换会话就得换游标：不重置的话旧会话的 lastSeq 会挡住新会话的事件
+  resetCursor(conv.id);
   currentSessionId = conv.sessionId;
   const savedProfile = _profileData.profiles.find(p => p.id === conv.profileId);
   currentSessionProvider = conv.sessionProvider === "codex"
@@ -6303,6 +6528,7 @@ async function loadConversation(conv) {
   } else if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ reset: true }));
   }
+  sendHello();
   closeHistoryPanel();
   scrollBottom();
 }
@@ -6316,6 +6542,7 @@ async function startNewConversation() {
   currentConvId = null;
   currentSessionId = null;
   currentSessionProvider = null;
+  resetCursor();
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ reset: true }));
   }

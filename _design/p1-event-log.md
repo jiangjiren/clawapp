@@ -36,7 +36,8 @@ data/
     <convId>/
       events.ndjson     append-only，一行一个事件
       meta.json         小文件，会话元信息 + lastSeq
-  history-<PORT>.json   迁移后保留为只读备份，不再写入
+  history-<PORT>.json   迁移后保留为只读回滚源，不再写入
+  history-<PORT>.json.pre-p1.bak  完整遍历迁移后复制出的原始备份
 ```
 
 `convId` 复用现有 `normalizeHistoryId()` 的结果，正则 `^[A-Za-z0-9_-]{4,128}$`，
@@ -223,10 +224,11 @@ node scripts/migrate-history.mjs --port 8082 [--dry-run] [--verify]
      若 `events[]` 缺失，用 `blocks[]` 合成一条 `kind:"sdk"` 的 assistant 事件兜底
    - 每条 assistant 消息末尾补一条 `kind:"turn"`，status 取原 `message.status`
 4. 写 `meta.json`
-5. **原 history-<PORT>.json 不删不改**，改名为 `history-<PORT>.json.pre-p1.bak` 留档
+5. **原 history-<PORT>.json 不删不改**（可直接回滚旧版本），完整遍历后另复制
+   `history-<PORT>.json.pre-p1.bak` 留档；已有备份不覆盖
 6. `--verify`：对每个会话跑 `project()`，与原 conversation 逐条比对
    `role / text / blocks.length / cost / status`，输出差异报告，有差异则退出码非 0
-7. `--dry-run`：只跑 3-6 的比对，不写任何文件
+7. `--dry-run`：在系统临时目录构造事件库并真实跑 `project()` 比对，不写源数据目录
 
 **幂等**：重复执行不得产生重复事件（目标目录已存在且 meta.lastSeq > 0 时跳过，除非 `--force`）。
 

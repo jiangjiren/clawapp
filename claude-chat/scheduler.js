@@ -464,19 +464,14 @@ async function _runCodexCandidate(candidate, fullPrompt, cwd, signal) {
 
 function _injectChatHistory(job, result) {
   try {
-    const history = ctx.readHistory();
-    const entry = {
+    ctx.appendChatHistoryEntry({
       id: `cron-${job.id.slice(0, 8)}-${Date.now()}`,
       title: `[定时任务] ${job.description}`,
       messages: [
-        { role: "user", content: `[定时任务自动触发] ${job.description}` },
-        { role: "assistant", content: result },
+        { role: "user", text: `[定时任务自动触发] ${job.description}` },
+        { role: "assistant", text: result },
       ],
-      createdAt: new Date().toISOString(),
-    };
-    history.unshift(entry);
-    if (history.length > 100) history.splice(100);
-    ctx.writeHistory(history);
+    });
     console.log(`[Scheduler] Injected result into chat history`);
   } catch (err) {
     console.error(`[Scheduler] Failed to inject chat history:`, err.message);
