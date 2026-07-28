@@ -3028,6 +3028,7 @@ function percentColorClass(pct) {
 }
 
 function renderLimitWindow(label, win, resetFormat = "hm") {
+  if (!win || win.usedPercent == null) return "";
   const pct = win?.remainingPercent;
   const remaining = pct == null ? "--" : `${pct}%`;
   const resetIn = formatResetCountdown(win?.resetAt, resetFormat);
@@ -3055,12 +3056,20 @@ function renderProviderLimitSummary(provider) {
     const title = limit.message || (limit.authenticated === false ? "未登录或无法读取会员额度" : "当前账号未返回会员额度");
     return `<span class="auth-limit-badge muted" title="${escapeAttr(title)}">额度暂不可用</span>`;
   }
-  const tooltipParts = [
-    renderLimitTooltipWindow("5小时", limit.fiveHour),
-    renderLimitTooltipWindow("本周", limit.week),
-  ].filter(Boolean);
+  const windows = [
+    { label: "5h", tooltipLabel: "5小时", value: limit.fiveHour, resetFormat: "hm" },
+    { label: "周", tooltipLabel: "本周", value: limit.week, resetFormat: "dh" },
+  ].filter(item => item.value?.usedPercent != null);
+  if (!windows.length) {
+    return `<span class="auth-limit-badge muted" title="当前账号未返回可用的额度窗口">额度暂不可用</span>`;
+  }
+  const tooltipParts = windows
+    .map(item => renderLimitTooltipWindow(item.tooltipLabel, item.value))
+    .filter(Boolean);
   const title = tooltipParts.length ? tooltipParts.join("；") : "会员实时额度";
-  const html = `${renderLimitWindow("5h", limit.fiveHour, "hm")} · ${renderLimitWindow("周", limit.week, "dh")}`;
+  const html = windows
+    .map(item => renderLimitWindow(item.label, item.value, item.resetFormat))
+    .join(" · ");
   return `<span class="auth-limit-badge" title="${escapeAttr(title)}"><span class="auth-limit-text">${html}</span></span>`;
 }
 

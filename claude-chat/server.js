@@ -633,16 +633,57 @@ function clampPercent(value) {
   return Math.max(0, Math.min(100, Math.round(value)));
 }
 
+function normalizeUsageResetAt(value) {
+  if (value == null || value === "") return null;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const millis = value < 10_000_000_000 ? value * 1000 : value;
+    return new Date(millis).toISOString();
+  }
+  const numeric = Number(value);
+  if (Number.isFinite(numeric) && String(value).trim() !== "") {
+    const millis = numeric < 10_000_000_000 ? numeric * 1000 : numeric;
+    return new Date(millis).toISOString();
+  }
+  return value;
+}
+
 function normalizeUsageWindow(raw) {
   if (!raw || typeof raw !== "object") return null;
   const utilizationRaw = raw.utilization ?? raw.percent ?? raw.used_percent;
   const utilizationNum = typeof utilizationRaw === "number" ? utilizationRaw : Number(utilizationRaw);
   const usedPercent = clampPercent(utilizationNum <= 1 ? utilizationNum * 100 : utilizationNum);
+  const windowSecondsRaw = raw.limit_window_seconds ?? raw.window_seconds ?? raw.windowSeconds;
+  const windowSecondsNum = typeof windowSecondsRaw === "number" ? windowSecondsRaw : Number(windowSecondsRaw);
   return {
     usedPercent,
     remainingPercent: usedPercent == null ? null : clampPercent(100 - usedPercent),
-    resetAt: raw.resets_at ?? raw.resetsAt ?? raw.reset_at ?? null,
+    resetAt: normalizeUsageResetAt(raw.resets_at ?? raw.resetsAt ?? raw.reset_at ?? null),
+    windowSeconds: Number.isFinite(windowSecondsNum) && windowSecondsNum > 0
+      ? Math.round(windowSecondsNum)
+      : null,
   };
+}
+
+export function normalizeCodexUsageWindows(rateLimit) {
+  const primary = normalizeUsageWindow(rateLimit?.primary_window);
+  const secondary = normalizeUsageWindow(rateLimit?.secondary_window);
+  const windows = [primary, secondary].filter(Boolean);
+  const hasDurationMetadata = windows.some(win => win.windowSeconds != null);
+
+  // 旧接口没有窗口时长，只能维持原来的位置映射；新接口一旦给出时长，
+  // 就按语义识别，避免“只有周额度”时把 primary_window 错标成 5 小时。
+  if (!hasDurationMetadata) return { fiveHour: primary, week: secondary };
+
+  const fiveHour = windows.find(win => (
+    win.windowSeconds != null && win.windowSeconds <= 8 * 60 * 60
+  )) ?? (primary?.windowSeconds == null ? primary : null);
+  const week = windows.find(win => (
+    win.windowSeconds != null
+    && win.windowSeconds >= 5 * 24 * 60 * 60
+    && win.windowSeconds <= 9 * 24 * 60 * 60
+  )) ?? (secondary?.windowSeconds == null ? secondary : null);
+
+  return { fiveHour, week };
 }
 
 async function getClaudeSubscriptionLimits() {
@@ -759,14 +800,15 @@ async function queryCodexSubscriptionLimits() {
 
     const body = await resp.json();
     const rateLimit = body?.rate_limit ?? null;
+    const windows = normalizeCodexUsageWindows(rateLimit);
     return {
       provider: "codex",
       status: rateLimit ? "ok" : "unavailable",
       authenticated: true,
       available: !!rateLimit,
       planType: body?.plan_type ?? null,
-      fiveHour: normalizeUsageWindow(rateLimit?.primary_window),
-      week: normalizeUsageWindow(rateLimit?.secondary_window),
+      fiveHour: windows.fiveHour,
+      week: windows.week,
       updatedAt: new Date().toISOString(),
     };
   } catch (err) {

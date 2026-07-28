@@ -196,6 +196,38 @@ test("buildAgentEnv 清掉继承来的 Claude 兼容环境变量，避免串档"
   assert.equal(env.model, null);
 });
 
+test("Codex 只有周窗口时不会再误标成 5 小时额度", { timeout: 40_000 }, async () => {
+  const windows = await evalInServer(`m => ({
+    weeklyOnly: m.normalizeCodexUsageWindows({
+      primary_window: {
+        utilization: 0.42,
+        limit_window_seconds: 604800,
+        resets_at: 1785600000,
+      },
+    }),
+    swapped: m.normalizeCodexUsageWindows({
+      primary_window: { utilization: 0.2, limit_window_seconds: 604800 },
+      secondary_window: { utilization: 0.3, limit_window_seconds: 18000 },
+    }),
+    legacy: m.normalizeCodexUsageWindows({
+      primary_window: { utilization: 0.1 },
+      secondary_window: { utilization: 0.4 },
+    }),
+  })`);
+
+  assert.equal(windows.weeklyOnly.fiveHour, null);
+  assert.equal(windows.weeklyOnly.week.usedPercent, 42);
+  assert.equal(windows.weeklyOnly.week.windowSeconds, 604800);
+  assert.match(windows.weeklyOnly.week.resetAt, /^2026-/);
+
+  assert.equal(windows.swapped.fiveHour.windowSeconds, 18000);
+  assert.equal(windows.swapped.week.windowSeconds, 604800);
+
+  // 老接口没有 window_seconds 时保持原来的 primary/secondary 兼容映射。
+  assert.equal(windows.legacy.fiveHour.usedPercent, 10);
+  assert.equal(windows.legacy.week.usedPercent, 40);
+});
+
 test("连接建立后立即下发 skill init", { timeout: 30_000 }, async () => {
   const server = await startServer();
   let ws;

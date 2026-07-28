@@ -25,3 +25,13 @@ test("Codex 没有可用的历史选择时默认回落到均衡档", async () =>
   const frontendSource = await readFile(new URL("public/index.html", HERE), "utf8");
   assert.match(frontendSource, /activeProfile\?\.sonnetModel \|\| options\[0\]\.model/);
 });
+
+test("额度展示只渲染接口实际返回的窗口", async () => {
+  const frontendSource = await readFile(new URL("public/index.html", HERE), "utf8");
+  assert.match(frontendSource, /\.filter\(item => item\.value\?\.usedPercent != null\)/);
+  assert.match(frontendSource, /\.map\(item => renderLimitWindow\(item\.label, item\.value, item\.resetFormat\)\)/);
+  assert.doesNotMatch(
+    frontendSource,
+    /const html = `\$\{renderLimitWindow\("5h"[\s\S]*renderLimitWindow\("周"/,
+  );
+});
