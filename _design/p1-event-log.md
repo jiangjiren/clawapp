@@ -33,9 +33,10 @@
 ```
 data/
   conversations/
-    <convId>/
-      events.ndjson     append-only，一行一个事件
-      meta.json         小文件，会话元信息 + lastSeq
+    <PORT>/             同一部署目录的多实例隔离边界
+      <convId>/
+        events.ndjson   append-only，一行一个事件
+        meta.json       小文件，会话元信息 + lastSeq
   history-<PORT>.json   迁移后保留为只读回滚源，不再写入
   history-<PORT>.json.pre-p1.bak  完整遍历迁移后复制出的原始备份
 ```
@@ -217,7 +218,7 @@ node scripts/migrate-history.mjs --port 8082 [--dry-run] [--verify]
 ```
 
 1. 读 `data/history-<PORT>.json`
-2. 每个 conversation 建 `data/conversations/<id>/`
+2. 每个 conversation 建 `data/conversations/<PORT>/<id>/`
 3. 把 `messages[]` 反向拆成事件序列写入 `events.ndjson`：
    - `role:"user"` → 一条 `kind:"user"`
    - `role:"assistant"` → 其 `events[]`（原始 SDK 事件）逐条 `kind:"sdk"`；
@@ -241,5 +242,5 @@ node scripts/migrate-history.mjs --port 8082 [--dry-run] [--verify]
 3. 手机锁屏 10 分钟回来，回答继续、内容完整，无红字
 4. 生成过程中刷新页面，回答能接回来
 5. 关掉浏览器，重开打开该会话，能看到完整内容
-6. `data/conversations/<id>/events.ndjson` 单次追加写入 < 5ms（对比现在 ~125ms 全量重写）
+6. `data/conversations/<PORT>/<id>/events.ndjson` 单次追加写入 < 5ms（对比现在 ~125ms 全量重写）
 7. 进程常驻内存不随历史总量增长

@@ -811,7 +811,7 @@ function resolvePublicFile(urlPath) {
   return filePath;
 }
 
-eventLog.configure({ dataDir: DATA_DIR });
+eventLog.configure({ dataDir: DATA_DIR, port: PORT });
 
 // 首次启动时把老的 history-<PORT>.json 导进事件日志。迁移脚本
 // （scripts/migrate-history.mjs）是同一件事的手动版本，这里做兜底：

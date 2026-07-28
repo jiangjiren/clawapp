@@ -35,10 +35,18 @@ const projectionCache = new Map();           // convId -> { lastSeq, conversatio
 
 // ── 基础设施 ───────────────────────────────────────────────
 
-export function configure({ dataDir } = {}) {
+export function configure({ dataDir, port } = {}) {
   const next = dataDir || process.env.CLAUDE_CHAT_DATA_DIR || null;
   if (!next) throw new Error("event-log 未配置 dataDir");
-  rootDir = join(next, "conversations");
+  const instance = port == null ? "" : String(port).trim();
+  if (instance && !/^\d{2,6}$/.test(instance)) {
+    throw new Error(`event-log 收到非法实例端口: ${JSON.stringify(port)}`);
+  }
+  // 同一部署目录会同时运行 8082 / 8083。旧 history 文件靠端口后缀隔离，
+  // 事件目录也必须保留这层边界，否则两个账号会读到彼此的会话。
+  rootDir = instance
+    ? join(next, "conversations", instance)
+    : join(next, "conversations");
   mkdirSync(rootDir, { recursive: true });
   metaCache.clear();
   projectionCache.clear();

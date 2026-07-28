@@ -350,6 +350,25 @@ test("deleteConversation 删干净且再读为 null", () => {
   } finally { store.cleanup(); }
 });
 
+test("同一 dataDir 下不同端口的会话完全隔离", () => {
+  const dir = mkdtempSync(join(tmpdir(), "event-log-port-test-"));
+  const id = "sharedconv0001";
+  try {
+    log.configure({ dataDir: dir, port: 8082 });
+    log.appendEvent(id, "user", { id: "u1", text: "8082 私有" });
+
+    log.configure({ dataDir: dir, port: 8083 });
+    assert.equal(log.project(id), null);
+    log.appendEvent(id, "user", { id: "u2", text: "8083 私有" });
+    assert.equal(log.project(id).messages[0].text, "8083 私有");
+
+    log.configure({ dataDir: dir, port: 8082 });
+    assert.equal(log.project(id).messages[0].text, "8082 私有");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("非法 conversationId 被拒绝（防目录穿越）", () => {
   const store = freshStore();
   try {

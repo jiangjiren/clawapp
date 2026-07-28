@@ -514,6 +514,8 @@ test("真实迁移重复执行会跳过已有日志，并保留可回滚的源�
     writeFileSync(source, original, "utf8");
 
     assert.equal(await main(["--file", source, "--verify"]), 0);
+    // --file 没有实例端口，保留通用 conversations/<id> 布局；
+    // 正式多实例迁移使用 --port，才进入 conversations/<PORT>/。
     const logFile = join(dir, "conversations", "convcliidempotent01", "events.ndjson");
     const firstLog = readFileSync(logFile, "utf8");
     assert.equal(readFileSync(source, "utf8"), original);

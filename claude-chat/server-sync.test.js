@@ -260,7 +260,7 @@ test("客户端把未改动的完整会话 PUT 回来时不重写事件日志或
     const id = "convsync0005";
     await seedConversation(server.port, id, SEED_MESSAGES);
     const detail = await fetch(`http://127.0.0.1:${server.port}/api/history/${id}`).then(res => res.json());
-    const logFile = join(server.scratch, "conversations", id, "events.ndjson");
+    const logFile = join(server.scratch, "conversations", String(server.port), id, "events.ndjson");
     const before = await readFile(logFile, "utf8");
 
     const put = await fetch(`http://127.0.0.1:${server.port}/api/history/${id}`, {
