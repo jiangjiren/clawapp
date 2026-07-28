@@ -14,6 +14,7 @@ import { Codex } from "@openai/codex-sdk";
 import * as scheduler from "./scheduler.js";
 import { buildModelCandidates, runWithModelFallback } from "./model-fallback.js";
 import { BackgroundTaskTurnGate, PersistentQueryRuntime } from "./agent-session.js";
+import * as eventLog from "./core/event-log.js";
 import { z } from "zod";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -35,8 +36,11 @@ const STREAM_STALL_MS = 180_000; // 3 min with no events → abort
 const MAX_AGENT_RUN_MS = 8 * 60_000; // 单个 API 阶段（不含工具执行）的硬上限，兜底无限 api_retry
 const ASK_USER_QUESTION_TOOL = "AskUserQuestion";
 const USAGE_LIMIT_QUERY_TIMEOUT_MS = 12_000;
-// 客户端断线后，生成中的 run 保留这么久等待重连领回，超时才真正 abort。
-const RUN_GRACE_MS = 90_000;
+// 客户端断线后，生成中的 run 保留这么久等待重连领回。
+// 到期只丢弃内存里的补发 buffer，**不再中止生成**：这一轮照常跑完并落进事件日志，
+// 客户端下次连上来靠游标同步补齐（见 _design/p1-event-log.md）。
+// 手机锁屏、切后台、隧道静默死亡都可能远超一分钟，用传输层的状态决定计算的生死是错的。
+const RUN_GRACE_MS = 30 * 60_000;
 const WS_HEARTBEAT_MS = 30_000;
 
 const htmlPath   = join(__dirname, "public/index.html");
@@ -781,7 +785,6 @@ async function queryCodexSubscriptionLimits() {
 
 // ── Server-side history ────────────────────────────────────
 const HISTORY_FILE = process.env.CLAUDE_CHAT_HISTORY_FILE || join(DATA_DIR, `history-${PORT}.json`);
-const MAX_SERVER_HISTORY = 100;
 
 export function resolveAllowedCwd(requestedCwd) {
   const cwd = typeof requestedCwd === "string" && requestedCwd.trim()
@@ -808,50 +811,58 @@ function resolvePublicFile(urlPath) {
   return filePath;
 }
 
-function readHistoryFile() {
-  try {
-    if (existsSync(HISTORY_FILE)) return JSON.parse(readFileSync(HISTORY_FILE, "utf8"));
-  } catch { }
-  return [];
-}
+eventLog.configure({ dataDir: DATA_DIR });
 
-let historyStore = readHistoryFile();
-let historyFlushTimer = null;
-let historyDirty = false;
-
-function flushHistoryNow() {
-  if (historyFlushTimer) {
-    clearTimeout(historyFlushTimer);
-    historyFlushTimer = null;
+// 首次启动时把老的 history-<PORT>.json 导进事件日志。迁移脚本
+// （scripts/migrate-history.mjs）是同一件事的手动版本，这里做兜底：
+// 用户直接 pm2 restart 也不会看到历史凭空消失。
+function importLegacyHistoryOnce() {
+  if (!existsSync(HISTORY_FILE)) return;
+  const backupFile = `${HISTORY_FILE}.pre-p1.bak`;
+  // 备份是在完整遍历后才创建的完成标记。若事件目录被清空用于回滚，
+  // 即使备份还在也允许从保留的源文件重新导入。
+  if (existsSync(backupFile) && eventLog.listConversations().length > 0) return;
+  let legacy;
+  try { legacy = JSON.parse(readFileSync(HISTORY_FILE, "utf8")); } catch { return; }
+  if (!Array.isArray(legacy) || legacy.length === 0) return;
+  let ok = 0;
+  let skipped = 0;
+  let failed = 0;
+  for (const conv of legacy) {
+    const id = eventLog.normalizeConvId(conv?.id);
+    if (!id) { failed += 1; continue; }
+    if (Number(eventLog.getMeta(id)?.lastSeq) > 0) { skipped += 1; continue; }
+    try { eventLog.replaceFromConversation({ ...conv, id }); ok += 1; } catch { failed += 1; }
   }
-  if (!historyDirty) return;
-  historyDirty = false;
-  try { writeFileSync(HISTORY_FILE, JSON.stringify(historyStore), "utf8"); } catch { }
-}
-
-function readHistory() {
-  return historyStore;
-}
-
-function writeHistory(arr, { defer = false } = {}) {
-  historyStore = Array.isArray(arr) ? arr : [];
-  historyDirty = true;
-  if (!defer) {
-    flushHistoryNow();
-    return;
+  if (failed === 0) {
+    try {
+      if (!existsSync(backupFile)) writeFileSync(backupFile, readFileSync(HISTORY_FILE));
+    } catch { }
   }
-  if (!historyFlushTimer) historyFlushTimer = setTimeout(flushHistoryNow, 400);
+  console.log(`[History] 旧历史导入：新增 ${ok} / 已有 ${skipped} / 失败 ${failed}（共 ${legacy.length}）。`);
 }
 
-process.on("beforeExit", flushHistoryNow);
-process.on("SIGINT", () => {
-  flushHistoryNow();
-  process.exit(130);
-});
-process.on("SIGTERM", () => {
-  flushHistoryNow();
-  process.exit(143);
-});
+// 定时任务把结果塞进对话历史时用。它手上是一段完整结果而不是事件流，
+// 所以直接建一个只有两条消息的会话——和用户在网页里聊出来的那种会话同构。
+function appendChatHistoryEntry({ id, title, messages }) {
+  const convId = normalizeHistoryId(id);
+  const now = new Date().toISOString();
+  eventLog.replaceFromConversation({
+    id: convId,
+    title: title || "新对话",
+    date: now,
+    messages: (messages ?? []).map((message, index) => ({
+      id: `${convId}_m${index}`,
+      role: message.role === "assistant" ? "assistant" : "user",
+      // 定时任务那边历史上用的是 content 字段，这里统一成 text
+      text: message.text ?? message.content ?? "",
+      cost: null,
+      status: message.role === "assistant" ? "complete" : undefined,
+      createdAt: now,
+    })),
+  });
+  return convId;
+}
 
 function cloneHistoryJson(value) {
   if (value == null) return value;
@@ -879,8 +890,8 @@ function shouldAcceptIncomingMessages(currentMessages, incomingMessages) {
   if (!Array.isArray(currentMessages) || currentMessages.length === 0) return true;
   // 服务端增量记录带稳定消息 id；旧客户端仍会整段 PUT 且没有 id。不能让
   // 它用较早的内存快照覆盖正在流式追加的权威记录。
-  if (currentMessages.some(message => message?.id)
-    && !incomingMessages.some(message => message?.id)) return false;
+  if (currentMessages.some((message, index) => message?.id
+    && incomingMessages[index]?.id !== message.id)) return false;
   const current = historyMessagesScore(currentMessages);
   const incoming = historyMessagesScore(incomingMessages);
   if (incoming.assistants !== current.assistants) return incoming.assistants > current.assistants;
@@ -888,75 +899,59 @@ function shouldAcceptIncomingMessages(currentMessages, incomingMessages) {
   return incoming.blocks >= current.blocks;
 }
 
-function upsertHistoryConversation(conv, options = {}) {
+function historyMessagesEquivalent(left, right) {
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+  const comparable = (message) => ({
+    id: message?.id ?? null,
+    role: message?.role ?? null,
+    text: message?.text ?? "",
+    images: message?.images ?? null,
+    blocks: message?.blocks ?? null,
+    raw: message?.raw ?? null,
+    events: message?.events ?? null,
+    cost: message?.cost ?? null,
+    status: message?.status ?? null,
+  });
+  return left.every((message, index) =>
+    JSON.stringify(comparable(message)) === JSON.stringify(comparable(right[index])));
+}
+
+function updateHistoryConversationMeta(id, current, conv) {
+  const patch = {};
+  for (const key of ["title", "date", "sessionId", "sessionProvider", "profileId"]) {
+    if (Object.hasOwn(conv, key) && conv[key] !== undefined) patch[key] = conv[key];
+  }
+  eventLog.updateMeta(id, patch);
+  return { ...current, ...patch, id, messages: current.messages };
+}
+
+// 整段覆盖：客户端 PUT /api/history/:id 走这里。仍然保留"别让旧快照盖掉
+// 服务端权威记录"的判断——事件日志虽然是权威，但老客户端还会整段 PUT。
+function upsertHistoryConversation(conv) {
   if (!conv || typeof conv !== "object" || !conv.id) return null;
   const id = normalizeHistoryId(conv.id);
-  const history = readHistory();
-  const index = history.findIndex(item => item.id === id);
-  const current = index >= 0 ? history[index] : null;
+  const current = eventLog.project(id);
+  if (current && (!Object.hasOwn(conv, "messages")
+    || historyMessagesEquivalent(current.messages, conv.messages)
+    || !shouldAcceptIncomingMessages(current.messages, conv.messages))) {
+    // 新客户端仍会在 result 时调用旧的 saveCurrentConversation()。内容没有
+    // 变多时只更新 meta，不能 replaceFromConversation() 把 append-only 日志
+    // 重写成 seq 从 1 开始；否则每轮结束都会让所有已连接客户端游标超前。
+    return updateHistoryConversationMeta(id, current, conv);
+  }
   const next = { ...(current || {}), ...conv, id, date: conv.date || new Date().toISOString() };
-  if (current && "messages" in conv) {
-    next.messages = shouldAcceptIncomingMessages(current.messages, conv.messages)
-      ? conv.messages
-      : current.messages;
-  } else if (current?.messages) {
-    next.messages = current.messages;
-  } else if (!Array.isArray(next.messages)) {
-    next.messages = [];
-  }
-  if (index >= 0) history[index] = next;
-  else {
-    history.unshift(next);
-    if (history.length > MAX_SERVER_HISTORY) history.splice(MAX_SERVER_HISTORY);
-  }
-  writeHistory(history, options);
+  if (!Array.isArray(next.messages)) next.messages = [];
+  eventLog.replaceFromConversation(next);
   return next;
 }
 
-function ensureHistoryConversation(id, userText = "") {
-  const conversationId = normalizeHistoryId(id);
-  let conv = readHistory().find(item => item.id === conversationId);
-  if (!conv) {
-    conv = {
-      id: conversationId,
-      title: String(userText || "").replace(/[\n\r]+/g, " ").trim().slice(0, 60) || "新对话",
-      date: new Date().toISOString(),
-      sessionId: null,
-      messages: [],
-    };
-    readHistory().unshift(conv);
-    if (readHistory().length > MAX_SERVER_HISTORY) readHistory().splice(MAX_SERVER_HISTORY);
-  }
-  if (!Array.isArray(conv.messages)) conv.messages = [];
-  return conv;
-}
+// 投影相关的 normalizeAssistantHistoryBlocks / assistantHistoryBlockKey
+// 已经搬进 core/event-log.js —— 那边以事件日志为输入重放，实时路径和
+// 重连补齐必须共用同一套规则，放两份迟早会漂移。
 
-function normalizeAssistantHistoryBlocks(content) {
-  const items = Array.isArray(content) ? content : (content ? [content] : []);
-  return items.filter(Boolean).map(item => {
-    const raw = cloneHistoryJson(item);
-    if (item.type === "thinking") return { type: "thinking", thinking: item.thinking ?? "", signature: item.signature ?? null, raw };
-    if (item.type === "text") return { type: "text", text: item.text ?? "", citations: item.citations ?? null, raw };
-    if (item.type === "tool_use" || item.type === "server_tool_use" || item.type === "mcp_tool_use") {
-      return {
-        type: item.type,
-        id: item.id ?? "",
-        name: item.name ?? "tool",
-        serverName: item.server_name ?? item.serverName ?? null,
-        input: item.input ?? {},
-        raw,
-      };
-    }
-    return raw && typeof raw === "object" && !Array.isArray(raw)
-      ? { ...raw, type: item.type || "unknown", raw }
-      : { type: item.type || "unknown", raw };
-  });
-}
-
-function assistantHistoryBlockKey(block) {
-  const id = block?.id || block?.raw?.id || block?.raw?.call_id || block?.raw?.tool_use_id;
-  return id ? `${block.type || "unknown"}:${id}` : "";
-}
+// ── 轮次记录：只管往事件日志追加，投影交给 core/event-log.js ──
+// 以前这里维护着一份"当前 assistant 消息"的内存对象，断线就跟着 run 一起没了。
+// 现在写的是日志，谁来读、什么时候读，都跟这条连接无关。
 
 function beginRunHistory(run, msg) {
   const displayText = typeof msg.displayText === "string" && msg.displayText.trim()
@@ -964,20 +959,23 @@ function beginRunHistory(run, msg) {
     : String(msg.prompt || "").trim();
   const conversationId = normalizeHistoryId(msg.conversationId);
   const userMessageId = normalizeHistoryId(msg.userMessageId);
-  const conv = ensureHistoryConversation(conversationId, displayText);
-  if (!conv.messages.some(message => message.id === userMessageId)) {
-    conv.messages.push({
-      id: userMessageId,
-      role: "user",
-      text: displayText,
-      cost: null,
-      createdAt: new Date().toISOString(),
-    });
-  }
-  conv.date = new Date().toISOString();
+  eventLog.ensureConversation(conversationId, { title: displayText });
   run.historyConversationId = conversationId;
-  run.historyAssistantMessage = null;
-  writeHistory(readHistory());
+  run.turnId = crypto.randomUUID();
+  run.turnFinalized = false;
+  liveRunsByConversation.set(conversationId, run);
+  eventLog.appendEvents(conversationId, [
+    {
+      kind: "user",
+      payload: {
+        id: userMessageId,
+        text: displayText,
+        createdAt: new Date().toISOString(),
+        ...(Array.isArray(msg.images) && msg.images.length ? { images: msg.images } : {}),
+      },
+    },
+    { kind: "turn", payload: { turnId: run.turnId, status: "running", requestId: run.requestId ?? null } },
+  ]);
   return conversationId;
 }
 
@@ -986,105 +984,68 @@ function beginSteeringHistory(run, msg) {
   beginRunHistory(run, msg);
 }
 
-function ensureRunAssistantHistory(run) {
-  if (!run?.historyConversationId) return null;
-  const conv = ensureHistoryConversation(run.historyConversationId);
-  if (run.historyAssistantMessage && conv.messages.includes(run.historyAssistantMessage)) {
-    return run.historyAssistantMessage;
-  }
-  const message = {
-    id: `assistant_${crypto.randomUUID()}`,
-    role: "assistant",
-    text: "",
-    blocks: [],
-    raw: [],
-    events: [],
-    cost: null,
-    status: "running",
-    createdAt: new Date().toISOString(),
-  };
-  conv.messages.push(message);
-  run.historyAssistantMessage = message;
-  return message;
-}
-
-function appendRunHistoryBlocks(run, blocks, event = null) {
-  if (!blocks?.length) return;
-  const message = ensureRunAssistantHistory(run);
-  if (!message) return;
-  for (const block of cloneHistoryJson(blocks)) {
-    const key = assistantHistoryBlockKey(block);
-    const existingIndex = key
-      ? message.blocks.findIndex(existing => assistantHistoryBlockKey(existing) === key)
-      : -1;
-    if (existingIndex >= 0) message.blocks[existingIndex] = block;
-    else message.blocks.push(block);
-  }
-  if (event) message.events.push(cloneHistoryJson(event));
-  if (event?.message) message.raw.push(cloneHistoryJson(event.message));
-  message.text = message.blocks
-    .filter(block => (block.type === "text" || block.type === "refusal") && block.text)
-    .map(block => block.text)
-    .join("\n\n");
-  message.updatedAt = new Date().toISOString();
-  const conv = ensureHistoryConversation(run.historyConversationId);
-  conv.date = message.updatedAt;
-  writeHistory(readHistory(), { defer: true });
-}
-
 function finalizeRunHistory(run, status = "complete", cost = null) {
-  const message = run?.historyAssistantMessage;
-  if (!message) return;
-  message.status = status;
-  message.updatedAt = new Date().toISOString();
-  if (cost != null) message.cost = cost;
-  run.lastHistoryAssistantMessage = message;
-  run.historyAssistantMessage = null;
-  writeHistory(readHistory());
+  const convId = run?.historyConversationId;
+  if (!convId || run.turnFinalized) return;
+  run.turnFinalized = true;
+  eventLog.appendEvent(convId, "turn", {
+    turnId: run.turnId ?? null,
+    status,
+    requestId: run.requestId ?? null,
+    cost,
+  });
+  eventLog.refreshMessageCount(convId);
 }
 
+// 返回落盘后的 seq（没落盘则 null）。run.send 据此给事件打游标标记——
+// 客户端只对带 seq 的事件推进游标，控制帧（ack/queued/pong）不入日志也不占 seq。
 function persistRunEvent(run, event) {
-  if (!run?.historyConversationId || !event?.type) return;
-  if (event.type === "session" && event.sessionId) {
-    const conv = ensureHistoryConversation(run.historyConversationId);
-    conv.sessionId = event.sessionId;
-    conv.sessionProvider = event.provider ?? null;
-    writeHistory(readHistory(), { defer: true });
-    return;
-  }
-  if (event.type === "assistant") {
-    appendRunHistoryBlocks(run, normalizeAssistantHistoryBlocks(event.message?.content ?? event.content), event);
-    return;
-  }
-  if (event.type === "server_tool_use" || event.type === "mcp_tool_use" || event.type === "tool_use") {
-    appendRunHistoryBlocks(run, normalizeAssistantHistoryBlocks([event]), event);
-    return;
-  }
+  const convId = run?.historyConversationId;
+  if (!convId || !event?.type) return null;
+
+  // 后台任务的事件可能跨轮次回来，靠这张表找回它原来那条 run
   if (event.type?.includes("tool_result") || event.type === "tool_progress"
     || (event.type === "system" && CLIENT_VISIBLE_SYSTEM_SUBTYPES.has(event.subtype))) {
     const taskId = event.task_id ?? event.taskId ?? null;
-    if (taskId) backgroundHistoryRuns.set(String(taskId), run);
-    const reuseFinalizedMessage = !run.historyAssistantMessage && run.lastHistoryAssistantMessage;
-    if (reuseFinalizedMessage) run.historyAssistantMessage = run.lastHistoryAssistantMessage;
-    appendRunHistoryBlocks(run, [{ type: "sdk_event", eventType: event.subtype || event.type, raw: cloneHistoryJson(event) }], event);
-    if (reuseFinalizedMessage) run.historyAssistantMessage = null;
-    const status = String(event.status ?? event.patch?.status ?? "").toLowerCase();
-    if (taskId && (event.subtype === "task_notification"
-      || ["completed", "failed", "killed", "cancelled", "canceled"].includes(status))) {
-      backgroundHistoryRuns.delete(String(taskId));
+    if (taskId) {
+      backgroundHistoryRuns.set(String(taskId), run);
+      const status = String(event.status ?? event.patch?.status ?? "").toLowerCase();
+      if (event.subtype === "task_notification"
+        || ["completed", "failed", "killed", "cancelled", "canceled"].includes(status)) {
+        backgroundHistoryRuns.delete(String(taskId));
+      }
     }
-    return;
   }
+
+  if (!PERSISTED_EVENT_TYPES(event)) return null;
+  const { seq } = eventLog.appendEvent(convId, "sdk", event);
+  // result/done/stopped/error 同时也是轮次终点，补一条 turn 事件，
+  // 让重连的客户端只看 meta.turn 就知道"还在不在跑"。
   if (event.type === "result") {
-    finalizeRunHistory(run, event.subtype === "success" || !event.is_error ? "complete" : "error", event.total_cost_usd ?? null);
-  } else if (event.type === "error") {
-    appendRunHistoryBlocks(run, [{ type: "sdk_event", eventType: "error", raw: cloneHistoryJson(event) }], event);
-    finalizeRunHistory(run, "error");
-  } else if (event.type === "done") {
-    finalizeRunHistory(run, "complete");
-  } else if (event.type === "stopped") {
-    finalizeRunHistory(run, "stopped");
+    run.turnFinalized = false;
+    finalizeRunHistory(run, event.subtype === "success" || !event.is_error ? "complete" : "error",
+      event.total_cost_usd ?? null);
   }
+  return seq;
+}
+
+// 哪些事件属于"对话内容"，要进日志并占一个 seq
+function PERSISTED_EVENT_TYPES(event) {
+  const type = event?.type;
+  if (!type) return false;
+  if (type === "stream_event") return true;
+  if (type === "session") return true;
+  if (type === "assistant") return true;
+  if (type === "user") {
+    const content = event.message?.content ?? event.content ?? [];
+    const items = Array.isArray(content) ? content : [content];
+    return items.some(item => item?.type?.includes("tool_result"));
+  }
+  if (type === "server_tool_use" || type === "mcp_tool_use" || type === "tool_use") return true;
+  if (type.includes("tool_result") || type === "tool_progress") return true;
+  if (type === "system" && CLIENT_VISIBLE_SYSTEM_SUBTYPES.has(event.subtype)) return true;
+  if (type === "result" || type === "error" || type === "done" || type === "stopped") return true;
+  return false;
 }
 
 // ── Skills preload ─────────────────────────────────────────
@@ -2279,8 +2240,7 @@ scheduler.init({
   buildAgentEnv,
   getActiveProfile,
   readProfiles,
-  readHistory,
-  writeHistory,
+  appendChatHistoryEntry,
   resolveAllowedCwd,
 });
 
@@ -2471,13 +2431,9 @@ const http = createServer((req, res) => {
 
   // ── REST API: history ─────────────────────────────────────
   if (url === "/api/history" && method === "GET") {
-    const history = readHistory();
-    // 列表只返回摘要，不带消息内容，避免传输几MB JSON
-    const summaries = history.map(({ id, title, date, messages }) => ({
-      id, title, date, messageCount: messages ? messages.length : 0,
-    }));
+    // 列表只读每个会话的 meta.json（几 KB），不做投影、不碰事件日志
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(summaries));
+    res.end(JSON.stringify(eventLog.listConversations()));
     return;
   }
 
@@ -2646,7 +2602,7 @@ const http = createServer((req, res) => {
   if (historyItemRe) {
     const id = historyItemRe[1];
     if (method === "GET") {
-      const conv = readHistory().find(h => h.id === id);
+      const conv = eventLog.project(id);
       if (conv) {
         res.writeHead(200, { "Content-Type": "application/json" });
         res.end(JSON.stringify(conv));
@@ -2673,8 +2629,7 @@ const http = createServer((req, res) => {
       return;
     }
     if (method === "DELETE") {
-      const history = readHistory().filter(h => h.id !== id);
-      writeHistory(history);
+      eventLog.deleteConversation(id);
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
       return;
@@ -2705,12 +2660,25 @@ const wss = new WebSocketServer({ server: http });
 // terminate 会触发 close → run 进入宽限期而不是直接丢失。
 const wsHeartbeat = setInterval(() => {
   for (const client of wss.clients) {
-    if (client.isAlive === false) { client.terminate(); continue; }
-    client.isAlive = false;
-    client.ping();
+    // 单个 socket 出问题不能带崩整轮心跳，否则后面的连接就再也探测不到了。
+    try {
+      if (client.isAlive === false) { client.terminate(); continue; }
+      client.isAlive = false;
+      client.ping();
+      // 协议层 ping 帧由浏览器自动回 pong，JS 侧完全看不见。客户端的静默检测
+      // 只认得到 JSON 消息，所以再推一条应用层 ping——否则一次长工具执行
+      // （几分钟没有任何事件）会被前端误判成断线，白白重连一次。
+      if (client.readyState === client.OPEN) client.send(JSON.stringify({ type: "ping" }));
+    } catch (err) {
+      console.warn(`[Web Agent] 心跳探测失败，丢弃该连接：${err?.message || err}`);
+      try { client.terminate(); } catch { }
+    }
   }
 }, WS_HEARTBEAT_MS);
 wss.on("close", () => clearInterval(wsHeartbeat));
+wss.on("error", (err) => {
+  console.warn(`[Web Agent] WebSocketServer error: ${err?.message || err}`);
+});
 
 function normalizeAskUserQuestions(input) {
   const rawQuestions = Array.isArray(input?.questions) ? input.questions : [];
@@ -2744,9 +2712,23 @@ function makeAbortError(message) {
 // ── 断线宽限期 ─────────────────────────────────────────────
 // 锁屏/切网/网络抖动导致 WS 断开时，不立即中止生成：把 run 挂为孤儿，
 // 输出缓存在 buffer 里，客户端在宽限期内带 runId 重连即可无缝领回
-//（包括断线期间已完成的完整回答）。宽限期内没人认领才真正 abort。
+//（包括断线期间已完成的完整回答）。宽限期后只清 buffer，计算继续写日志。
 const orphanRuns = new Map(); // runId -> run
 const backgroundHistoryRuns = new Map(); // taskId -> owning run，后台完成事件仍写回原回答
+const liveRunsByConversation = new Map(); // convId -> run，只放还没结束的轮次
+
+// 重连时回答"这个会话还在跑吗"。
+// meta.turn 是磁盘上的记录，进程重启后可能停留在 running——那是一轮被中断的生成，
+// 内存里已经没有对应的 run 了。这种情况必须如实降级成 interrupted，
+// 否则客户端会挂着一个永远转不完的圈。
+function currentTurnSnapshot(convId, meta = eventLog.getMeta(convId)) {
+  const turn = meta?.turn ?? null;
+  if (!turn) return null;
+  if (turn.status !== "running") return turn;
+  const live = liveRunsByConversation.get(convId);
+  if (live && !live.finished) return turn;
+  return { ...turn, status: "interrupted" };
+}
 const CLIENT_REQUEST_STATE_MAX = 500;
 const clientRequestStates = new Map(); // userMessageId -> { state, runId, updatedAt }
 
@@ -2931,9 +2913,16 @@ function createRun(runId, ws, ac) {
       // 所有事件带上 runId：客户端据此丢弃被新请求取代的旧 run 的迟到事件
       const tagged = { ...obj, runId: this.id };
       if (this.requestId && !tagged.userMessageId) tagged.userMessageId = this.requestId;
+      if (this.turnId && !tagged.turnId) tagged.turnId = this.turnId;
       if (obj.type === "error" && this.requestId) rememberClientRequest(this.requestId, "error", this.id);
       if (obj.type === "stopped" && this.requestId) rememberClientRequest(this.requestId, "stopped", this.id);
-      persistRunEvent(this, tagged);
+      // 先落盘拿 seq 再发：保证客户端见过的 seq 一定已经持久化，
+      // 否则断线重连时游标会指向一条服务端并不存在的事件。
+      const seq = persistRunEvent(this, tagged);
+      if (seq != null) {
+        tagged.conversationId = this.historyConversationId;
+        tagged.seq = seq;
+      }
       if (this.ws && this.ws.readyState === this.ws.OPEN) this.ws.send(JSON.stringify(tagged));
       else this.buffer.push(tagged);
     },
@@ -2943,6 +2932,9 @@ function createRun(runId, ws, ac) {
       clearTimeout(this.graceTimer);
       this.graceTimer = setTimeout(() => {
         orphanRuns.delete(this.id);
+        // buffer 只是"没连上时的加速通道"；事件本身已经落进事件日志，
+        // 丢掉它不会丢内容，客户端靠 hello/sync 的游标补齐。
+        this.buffer.length = 0;
         if (this.pendingAskUserQuestion) {
           const pending = this.pendingAskUserQuestion;
           this.pendingAskUserQuestion = null;
@@ -2950,16 +2942,19 @@ function createRun(runId, ws, ac) {
           pending.reject(makeAbortError("连接已断开"));
         }
         if (!this.finished) {
-          console.warn(`[Web Agent] Run ${this.id} 断线超过 ${RUN_GRACE_MS / 1000}s 未重连，中止生成。`);
-          this.ac.abort();
+          console.log(`[Web Agent] Run ${this.id} 断线超过 ${RUN_GRACE_MS / 60_000} 分钟，`
+            + `停止缓存事件；生成继续，结果落事件日志。`);
         }
       }, RUN_GRACE_MS);
     },
-    attach(newWs) {
+    // replayBuffer=false 用于 hello 路径：那边已经拿事件日志把客户端补到
+    // meta.lastSeq 了，再重放一遍 buffer 就是同样的事件发两次。
+    attach(newWs, { replayBuffer = true } = {}) {
       clearTimeout(this.graceTimer);
       this.graceTimer = null;
       orphanRuns.delete(this.id);
       this.ws = newWs;
+      if (!replayBuffer) this.buffer.length = 0;
       // buffer 中已经是带 runId 且已落历史的最终事件；重放只做网络投递，
       // 不能再走 send()，否则一次重连会把 assistant blocks 重复写一遍。
       for (const obj of this.buffer.splice(0)) {
@@ -2981,6 +2976,14 @@ function createRun(runId, ws, ac) {
     },
     finish() {
       this.finished = true;
+      if (this.historyConversationId && liveRunsByConversation.get(this.historyConversationId) === this) {
+        liveRunsByConversation.delete(this.historyConversationId);
+      }
+      // 轮次没有正常收到 result 就结束了（abort/异常），也要在日志里留下终点，
+      // 否则 meta.turn 会永远停在 running。
+      if (!this.turnFinalized && this.historyConversationId) {
+        finalizeRunHistory(this, clientRequestStates.get(this.requestId)?.state === "stopped" ? "stopped" : "error");
+      }
       if (!this.discarded && this.requestId) {
         const previous = clientRequestStates.get(this.requestId)?.state;
         const state = previous === "stopped" || previous === "error" ? previous : "complete";
@@ -3002,6 +3005,11 @@ function createRun(runId, ws, ac) {
 wss.on("connection", (ws) => {
   ws.isAlive = true;
   ws.on("pong", () => { ws.isAlive = true; });
+  // EventEmitter 的 'error' 没有监听器就会抛成未捕获异常，整个进程连带所有 run 一起没。
+  // socket 层的 ECONNRESET 在移动网络下是常态，必须吃掉。
+  ws.on("error", (err) => {
+    console.warn(`[Web Agent] WebSocket error: ${err?.message || err}`);
+  });
   let activeRun = null;
 
   const send = (obj) => {
@@ -3013,8 +3021,16 @@ wss.on("connection", (ws) => {
   const backgroundSink = (event) => {
     const taskId = event?.task_id ?? event?.taskId ?? null;
     const owner = taskId ? backgroundHistoryRuns.get(String(taskId)) : null;
-    if (owner) persistRunEvent(owner, event);
-    send(event);
+    if (!owner) {
+      send(event);
+      return;
+    }
+    const seq = persistRunEvent(owner, event);
+    send(seq == null ? event : {
+      ...event,
+      conversationId: owner.historyConversationId,
+      seq,
+    });
   };
   backgroundEventSink = backgroundSink;
 
@@ -3095,6 +3111,10 @@ wss.on("connection", (ws) => {
     let msg;
     try { msg = JSON.parse(raw); } catch { return; }
 
+    // run 可能已被另一条重连 socket 接管。旧 socket 的闭包里仍留着指针，
+    // 但它不再有权 stop/reset/回答澄清问题；收到任何后续消息先撤销陈旧绑定。
+    if (activeRun && activeRun.ws !== ws) activeRun = null;
+
     // 应用层心跳：浏览器无法主动发 WS ping 帧，用消息模拟，
     // 让客户端能主动探测出"半死连接"（readyState 仍是 OPEN 但实际已断）。
     if (msg.type === "ping") {
@@ -3102,11 +3122,62 @@ wss.on("connection", (ws) => {
       return;
     }
 
+    // ── 游标同步：P1 的核心恢复路径 ──
+    // 客户端只报 {conversationId, lastSeq}，服务端补差量。刷新、锁屏、换设备、
+    // 隔几天回来全是这一条路径——没有宽限期、没有 runId 记忆、没有"领回失败"。
+    if (msg.type === "hello") {
+      const convId = eventLog.normalizeConvId(msg.conversationId);
+      if (!convId) {
+        send({ type: "sync", conversationId: msg.conversationId ?? null, lastSeq: 0, turn: null, events: [] });
+        return;
+      }
+      const live = liveRunsByConversation.get(convId);
+      if (activeRun && activeRun !== live && activeRun.ws === ws) {
+        // hello 是切换传输目标，不是停止计算。把原 run 从这条 socket 摘下，
+        // 让它继续写日志；绝不能因为用户刷新/切会话就 abort。
+        activeRun.detach();
+        activeRun = null;
+      }
+      const meta = eventLog.getMeta(convId);
+      if (!meta) {
+        send({ type: "sync", conversationId: convId, lastSeq: 0, turn: null, events: [] });
+        return;
+      }
+      const since = Number.isFinite(msg.lastSeq) && msg.lastSeq > 0 ? msg.lastSeq : 0;
+      const turn = currentTurnSnapshot(convId, meta);
+
+      // 补齐历史只解决"断线期间发生了什么"。这一轮还在跑的话，还得把这条新
+      // socket 接回 run，否则之后的实时事件全进 buffer 再也发不出来——
+      // 用户会看到历史补上了、然后画面就不动了。
+      // 全同步执行，attach 与下面读日志之间不会有新事件插进来。
+      if (live && !live.finished) {
+        activeRun = live;
+        live.attach(ws, { replayBuffer: false });
+      }
+
+      // 客户端游标超前（服务端数据被删过/重建过）或落后太多：给完整快照，
+      // 一条明确的降级路径，好过让两边悄悄地不一致。
+      if (since > meta.lastSeq) {
+        send({ type: "sync", conversationId: convId, lastSeq: meta.lastSeq, turn,
+          reset: true, snapshot: eventLog.project(convId) });
+        return;
+      }
+      const { events, truncated } = eventLog.readEventsSince(convId, since);
+      if (truncated) {
+        send({ type: "sync", conversationId: convId, lastSeq: meta.lastSeq, turn,
+          reset: true, snapshot: eventLog.project(convId) });
+        return;
+      }
+      send({ type: "sync", conversationId: convId, lastSeq: meta.lastSeq, turn, events });
+      return;
+    }
+
     // 断线重连后领回生成中的 run：补发断线期间缓存的全部事件
+    // （P1 兼容期保留，给浏览器里缓存着旧 index.html 的页面用；新客户端走 hello）
     if (msg.resumeRun != null) {
       const run = orphanRuns.get(String(msg.resumeRun));
       if (run) {
-        if (activeRun && activeRun !== run && !activeRun.finished) activeRun.ac.abort();
+        if (activeRun && activeRun !== run && activeRun.ws === ws) activeRun.detach();
         activeRun = run;
         run.attach(ws);
         console.log(`[Web Agent] Run ${run.id} 已被重连客户端领回（补发 ${run.finished ? "已完成" : "进行中"}）。`);
@@ -3740,7 +3811,7 @@ wss.on("connection", (ws) => {
   });
 
   ws.on("close", () => {
-    if (activeRun && !activeRun.finished) {
+    if (activeRun && !activeRun.finished && activeRun.ws === ws) {
       // 断线不立即中止生成：进入宽限期，等客户端带 runId 重连领回
       activeRun.detach();
     }
@@ -3749,6 +3820,8 @@ wss.on("connection", (ws) => {
     if (backgroundEventSink === backgroundSink) backgroundEventSink = null;
   });
 });
+
+importLegacyHistoryOnce();
 
 http.listen(PORT, HOST, () => {
   console.log(`claude-chat listening on ${HOST}:${PORT}`);
