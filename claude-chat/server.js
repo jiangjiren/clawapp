@@ -171,7 +171,11 @@ const WECHAT_MIME_BY_EXT = {
   ".zip": "application/zip",
 };
 
-const CODEX_DEFAULT_MODELS = { opusModel: "gpt-5.5", sonnetModel: "gpt-5.4", haikuModel: "gpt-5.4-mini" };
+const CODEX_DEFAULT_MODELS = {
+  opusModel: "gpt-5.6-sol",
+  sonnetModel: "gpt-5.6-terra",
+  haikuModel: "gpt-5.6-luna",
+};
 
 const PROVIDER_PRESETS = {
   anthropic:  { baseUrl: "",                                    opusModel: "claude-opus-5",                   sonnetModel: "claude-sonnet-5",                  haikuModel: "claude-haiku-4-5-20251001" },

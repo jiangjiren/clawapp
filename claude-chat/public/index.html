@@ -2674,10 +2674,9 @@ function renderModelOptions(activeProfile) {
       modelTiers[m].push(tier);
     }
     const GPT_DESCS = {
-      "gpt-5.5": "旗舰最强",
-      "gpt-5.4": "专业推理",
-      "gpt-5.4-mini": "极速轻量",
-      "gpt-5.3-codex-spark": "实时预览",
+      "gpt-5.6-sol": "旗舰最强",
+      "gpt-5.6-terra": "均衡通用",
+      "gpt-5.6-luna": "快速经济",
     };
     options = Object.entries(modelTiers).map(([model, tiers]) => {
       const shortName = model.split("/").pop() || model;
@@ -2690,7 +2689,10 @@ function renderModelOptions(activeProfile) {
   const rawSaved = localStorage.getItem(key);
   // 只迁移 Claude 会员档位；第三方 profile 的模型名由用户自己填，不能替换
   const saved = provider === "claude" ? (MODEL_MIGRATIONS[rawSaved] ?? rawSaved) : rawSaved;
-  selectedModel = options.some(o => o.model === saved) ? saved : options[0].model;
+  const defaultModel = provider === "claude"
+    ? options[0].model
+    : (activeProfile?.sonnetModel || options[0].model);
+  selectedModel = options.some(o => o.model === saved) ? saved : defaultModel;
   if (saved !== rawSaved && selectedModel === saved) localStorage.setItem(key, saved);
   const modelView = modelDropdown.querySelector(".model-view");
   // Rebuild only the model buttons, then re-append the divider + effort-nav row
