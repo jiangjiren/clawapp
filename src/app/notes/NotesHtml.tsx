@@ -137,17 +137,66 @@ const injectHeightScript = (html: string): string => {
     });
 
     document.addEventListener("click",function(e){
-    var t=e.target&&e.target.nodeType===1?e.target:e.target&&e.target.parentElement;
-    var a=t&&t.closest?t.closest('a[href^="obsidian://"]'):null;
-    if(!a)return;e.preventDefault();` +
-    // 不能用 URLSearchParams：这些 obsidian 链接的 file 值是原始 UTF-8 且含字面 '+'，
-    // URLSearchParams 会把 '+' 当空格解码，导致带 '+' 的文件名跳转失败。手动取 file= 后的原始串。
-    `try{var q=(a.getAttribute("href")||"").split("?")[1]||"";var file="";` +
-    `var parts=q.split("&");for(var i=0;i<parts.length;i++){if(parts[i].indexOf("file=")===0){file=parts[i].slice(5);break;}}` +
-    `if(/%[0-9A-Fa-f]{2}/.test(file)){try{file=decodeURIComponent(file);}catch(e2){}}` +
-    `if(file){window.parent.postMessage({type:"note-navigate",path:file},"*");}}catch(err){}` +
-    `},true);` +
-    `})()</script>`;
+      if(e.defaultPrevented||e.button!==0||e.metaKey||e.ctrlKey||e.shiftKey||e.altKey)return;
+      var t=e.target&&e.target.nodeType===1?e.target:e.target&&e.target.parentElement;
+      var a=t&&t.closest?t.closest("a"):null;
+      if(!a)return;
+      var href=a.getAttribute("href")||"";
+
+      // about:srcdoc resolves "#section" against the embedding share URL.
+      // Bridge local anchors to the outer page instead of recursively loading
+      // the share page inside this iframe.
+      if(href.charAt(0)==="#"){
+        var rawId=href.slice(1);
+        var id=rawId;
+        try{id=decodeURIComponent(rawId);}catch(hashError){}
+        var target=id?document.getElementById(id):document.body;
+        if(!target&&id){
+          var namedTargets=document.getElementsByName(id);
+          target=namedTargets.length?namedTargets[0]:null;
+        }
+        if(!target)return;
+        e.preventDefault();
+        var root=document.documentElement;
+        var scrollTop=window.scrollY||root.scrollTop||(document.body&&document.body.scrollTop)||0;
+        var targetTop=id?target.getBoundingClientRect().top+scrollTop:0;
+        var rootStyle=window.getComputedStyle(root);
+        var offset=parseFloat(rootStyle.scrollPaddingTop)||0;
+        var behavior=rootStyle.scrollBehavior==="smooth"?"smooth":"auto";
+        try{
+          window.parent.postMessage({
+            type:"iframe-anchor",
+            top:targetTop,
+            offset:offset,
+            behavior:behavior
+          },"*");
+        }catch(anchorError){}
+        return;
+      }
+
+      if(href.indexOf("obsidian://")!==0)return;
+      e.preventDefault();
+      // These links may contain a literal "+" in the raw file value.
+      // URLSearchParams would decode it as a space, so parse file= manually.
+      try{
+        var q=href.split("?")[1]||"";
+        var file="";
+        var parts=q.split("&");
+        for(var i=0;i<parts.length;i++){
+          if(parts[i].indexOf("file=")===0){
+            file=parts[i].slice(5);
+            break;
+          }
+        }
+        if(/%[0-9A-Fa-f]{2}/.test(file)){
+          try{file=decodeURIComponent(file);}catch(decodeError){}
+        }
+        if(file){
+          window.parent.postMessage({type:"note-navigate",path:file},"*");
+        }
+      }catch(navigateError){}
+    },true);
+    })()</script>`;
 
   const bodyClose = html.lastIndexOf("</body>");
   if (bodyClose !== -1) return html.slice(0, bodyClose) + script + html.slice(bodyClose);
@@ -162,6 +211,10 @@ type NotesHtmlProps = {
   html: string;
   /** Open an Obsidian-style link (obsidian://...&file=xxx.md) inside inkfellow. */
   onNavigate?: (path: string) => void;
+};
+
+const requestHeightMeasurement = (iframe: HTMLIFrameElement | null) => {
+  iframe?.contentWindow?.postMessage({ type: "iframeMeasure" }, "*");
 };
 
 export default function NotesHtml({ html, onNavigate }: NotesHtmlProps) {
@@ -185,11 +238,34 @@ export default function NotesHtml({ html, onNavigate }: NotesHtmlProps) {
         setHeight((currentHeight) =>
           currentHeight === nextHeight ? currentHeight : nextHeight,
         );
+      } else if (
+        ev.data?.type === "iframe-anchor" &&
+        typeof ev.data.top === "number" &&
+        Number.isFinite(ev.data.top)
+      ) {
+        const iframe = iframeRef.current;
+        if (!iframe) return;
+
+        const offset =
+          typeof ev.data.offset === "number" && Number.isFinite(ev.data.offset)
+            ? Math.min(500, Math.max(0, ev.data.offset))
+            : 0;
+        const iframeTop = iframe.getBoundingClientRect().top + window.scrollY;
+        const targetTop = Math.max(0, iframeTop + ev.data.top - offset);
+        const behavior = ev.data.behavior === "smooth" ? "smooth" : "auto";
+        window.scrollTo({ top: targetTop, behavior });
       } else if (ev.data?.type === "note-navigate" && typeof ev.data.path === "string") {
         onNavigateRef.current?.(ev.data.path);
       }
     };
     window.addEventListener("message", handle);
+
+    // Close the initial-load race in both directions:
+    // - if srcDoc loaded before this effect, its first height report was lost,
+    //   but its message listener is ready for this request;
+    // - if srcDoc is still loading, onLoad below requests another measurement.
+    requestHeightMeasurement(iframeRef.current);
+
     return () => window.removeEventListener("message", handle);
   }, []);
 
@@ -216,6 +292,7 @@ export default function NotesHtml({ html, onNavigate }: NotesHtmlProps) {
       srcDoc={injectHeightScript(html)}
       sandbox="allow-scripts allow-same-origin"
       allow="clipboard-write"
+      onLoad={(event) => requestHeightMeasurement(event.currentTarget)}
       width="100%"
       style={{ height, width: "100%" }}
       title="HTML 文件内容"
