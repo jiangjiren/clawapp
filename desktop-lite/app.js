@@ -377,6 +377,28 @@ function updateEditButton() {
   btn.classList.toggle("editBtnActive", state.editMode);
 }
 
+function updateOutlineButton() {
+  const btn = qs("btn-outline");
+  const title = state.outlineOpen ? "关闭大纲" : "显示大纲";
+  btn.title = title;
+  btn.setAttribute("aria-label", title);
+  btn.setAttribute("aria-expanded", state.outlineOpen ? "true" : "false");
+  btn.setAttribute("aria-pressed", state.outlineOpen ? "true" : "false");
+  btn.classList.toggle("editBtnActive", state.outlineOpen);
+}
+
+function updateReaderDocumentActions() {
+  const visible = Boolean(
+    !state.gitWorkspaceOpen
+    && state.activeNote
+    && /^(md|html?)$/i.test(state.activeNote.extension || ""),
+  );
+  qs("btn-outline").hidden = !visible;
+  qs("btn-toggle-mode").hidden = !visible;
+  if (!visible && state.outlineOpen) closeOutline(false);
+  else updateOutlineButton();
+}
+
 /* 把光标放到当前可视区域顶部附近，避免输入时视图跳走 */
 /* 空文档给一行提示；未命名的新笔记顺带把「首行=标题」这条规则说出来 */
 function syncEditorPlaceholder() {
@@ -438,12 +460,12 @@ function placeCaretAtEditTarget(target) {
 async function setEditMode(on, target = null) {
   if (!(await flushPendingSave())) return;
   const docArea = qs("doc-area");
-  const scrollTop = docArea.scrollTop;
+  const scrollTop = currentReadingScrollTop();
   state.editMode = on;
   updateEditButton();
   localStorage.setItem(EDIT_MODE_KEY, on ? "1" : "0");
-  renderDocArea({ silent: !on });
-  docArea.scrollTop = scrollTop;
+  renderDocArea({ silent: !on, scrollTop });
+  if (on || !isHtmlNote()) docArea.scrollTop = scrollTop;
   if (on) {
     requestAnimationFrame(() => {
       if (target != null && state.editor) {
@@ -1011,6 +1033,46 @@ function extractToc(markdown) {
   return entries;
 }
 
+function isHtmlNote(note = state.activeNote) {
+  return /^html?$/i.test(note?.extension || "");
+}
+
+function htmlFrame() {
+  return qs("html-frame");
+}
+
+function extractHtmlToc(frame = htmlFrame()) {
+  const doc = frame?.contentDocument;
+  if (!doc) return [];
+  const seen = new Map();
+  const entries = [];
+  doc.querySelectorAll("h1,h2,h3,h4,h5,h6").forEach((heading, index) => {
+    const text = heading.textContent?.trim();
+    if (!text) return;
+    let fragment = heading.id;
+    if (!fragment) {
+      const base = slugifyHeading(text, seen);
+      fragment = base;
+      let suffix = 1;
+      while (doc.getElementById(fragment)) {
+        fragment = `${base}-${suffix++}`;
+      }
+      heading.id = fragment;
+    }
+    const key = `html-heading-${index}`;
+    heading.dataset.inkfellowHeadingKey = key;
+    entries.push({
+      level: Number(heading.tagName.slice(1)),
+      text,
+      slug: key,
+      fragment,
+      heading,
+      html: true,
+    });
+  });
+  return entries;
+}
+
 function renderToc() {
   const list = qs("toc-list");
   const empty = qs("toc-empty");
@@ -1024,10 +1086,12 @@ function renderToc() {
     return;
   }
 
-  const content = state.editMode && state.editor
-    ? state.editor.getValue()
-    : state.activeNote.content;
-  const entries = extractToc(content);
+  const htmlPreview = isHtmlNote() && !state.editMode;
+  const entries = htmlPreview
+    ? extractHtmlToc()
+    : extractToc(state.editMode && state.editor
+      ? state.editor.getValue()
+      : state.activeNote.content);
 
   empty.hidden = entries.length > 0;
   count.textContent = entries.length > 0 ? entries.length : "";
@@ -1040,6 +1104,13 @@ function renderToc() {
     btn.dataset.slug = entry.slug;
     btn.className = "articleTocLink" + (entry.level > 2 ? " articleTocLinkSub" : "");
     btn.addEventListener("click", () => {
+      if (entry.html) {
+        scrollHtmlFrameToFragment(htmlFrame(), entry.fragment, {
+          behavior: "smooth",
+          pushHistory: true,
+        });
+        return;
+      }
       const docArea = qs("doc-area");
       const heading = docArea.querySelector(`[data-heading-slug="${entry.slug}"]`);
       if (heading) heading.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -1055,6 +1126,31 @@ function renderToc() {
 function updateActiveTocLink() {
   const list = qs("toc-list");
   if (!list.childElementCount) return;
+  if (isHtmlNote() && !state.editMode) {
+    const frame = htmlFrame();
+    const doc = frame?.contentDocument;
+    const view = frame?.contentWindow;
+    const headings = doc?.querySelectorAll("[data-inkfellow-heading-key]");
+    if (!headings?.length) return;
+    let active = headings[0].dataset.inkfellowHeadingKey;
+    const atBottom = view
+      && view.scrollY + view.innerHeight >= doc.documentElement.scrollHeight - 2;
+    if (atBottom) {
+      active = headings[headings.length - 1].dataset.inkfellowHeadingKey;
+    } else {
+      for (const heading of headings) {
+        if (heading.getBoundingClientRect().top <= 90) {
+          active = heading.dataset.inkfellowHeadingKey;
+        } else {
+          break;
+        }
+      }
+    }
+    list.querySelectorAll(".articleTocLink").forEach((btn) => {
+      btn.classList.toggle("articleTocLinkActive", btn.dataset.slug === active);
+    });
+    return;
+  }
   const docArea = qs("doc-area");
   const headings = docArea.querySelectorAll("[data-heading-slug]");
   if (!headings.length) return;
@@ -1074,6 +1170,187 @@ function updateActiveTocLink() {
   });
 }
 
+function decodeHtmlFragment(value) {
+  let fragment = String(value || "").replace(/^#/, "");
+  try { fragment = decodeURIComponent(fragment); } catch {}
+  return fragment;
+}
+
+function htmlFragmentTarget(doc, fragment) {
+  fragment = decodeHtmlFragment(fragment);
+  if (!fragment) return doc.documentElement;
+  return doc.getElementById(fragment) || doc.getElementsByName(fragment)[0] || null;
+}
+
+function scrollHtmlFrameToFragment(frame, fragment, options = {}) {
+  const doc = frame?.contentDocument;
+  const view = frame?.contentWindow;
+  if (!doc || !view) return false;
+  const decoded = decodeHtmlFragment(fragment);
+  const target = htmlFragmentTarget(doc, decoded);
+  if (!target) return false;
+  if (!decoded) view.scrollTo({ top: 0, behavior: options.behavior || "auto" });
+  else target.scrollIntoView({ behavior: options.behavior || "auto", block: "start" });
+  if (options.pushHistory && state.activePath) navPush(state.activePath, decoded);
+  if (state.outlineOpen) requestAnimationFrame(updateActiveTocLink);
+  updateNavButtons();
+  return true;
+}
+
+function currentReadingScrollTop() {
+  const frame = isHtmlNote() && !state.editMode ? htmlFrame() : null;
+  if (frame?.contentWindow) {
+    return frame.contentWindow.scrollY
+      || frame.contentDocument?.documentElement?.scrollTop
+      || frame.contentDocument?.body?.scrollTop
+      || 0;
+  }
+  return qs("doc-area")?.scrollTop || 0;
+}
+
+function htmlPreviewBaseHref(notePath = state.activePath) {
+  const convertFileSrc = window.__TAURI__?.core?.convertFileSrc;
+  if (!convertFileSrc || !state.vaultPath) return "";
+  const separator = state.vaultPath.includes("\\") ? "\\" : "/";
+  const root = state.vaultPath.replace(/[\\/]+$/, "");
+  const folder = parentFolder(notePath || "").replaceAll("/", separator);
+  const absoluteFolder = folder ? `${root}${separator}${folder}` : root;
+  const url = convertFileSrc(absoluteFolder, "asset");
+  return url.endsWith("/") ? url : `${url}/`;
+}
+
+function htmlPreviewContent(content, notePath = state.activePath) {
+  const baseHref = htmlPreviewBaseHref(notePath);
+  if (!baseHref) return content;
+  const existingBase = /(<base\b[^>]*\bhref\s*=\s*)(["'])([^"']*)\2/i;
+  const match = content.match(existingBase);
+  if (match) {
+    try {
+      const resolved = new URL(match[3], baseHref).href;
+      return content.replace(existingBase, () => `${match[1]}${match[2]}${resolved}${match[2]}`);
+    } catch {
+      return content;
+    }
+  }
+  const baseTag = `<base href="${escapeHtml(baseHref)}">`;
+  const head = content.match(/<head\b[^>]*>/i);
+  if (head?.index != null) {
+    const insertion = head.index + head[0].length;
+    return `${content.slice(0, insertion)}${baseTag}${content.slice(insertion)}`;
+  }
+  const html = content.match(/<html\b[^>]*>/i);
+  if (html?.index != null) {
+    const insertion = html.index + html[0].length;
+    return `${content.slice(0, insertion)}<head>${baseTag}</head>${content.slice(insertion)}`;
+  }
+  return `<head>${baseTag}</head>${content}`;
+}
+
+function findLinkedNote(rawPath) {
+  let decoded = rawPath;
+  try { decoded = decodeURIComponent(rawPath); } catch {}
+  decoded = decoded.replaceAll("\\", "/");
+  const noteDir = parentFolder(state.activePath || "");
+  const resolved = decoded.startsWith("/")
+    ? resolveRelativePath("", decoded.replace(/^\/+/, ""))
+    : resolveRelativePath(noteDir, decoded);
+  const candidates = [resolved];
+  if (!extOf(resolved)) candidates.push(`${resolved}.md`, `${resolved}.html`, `${resolved}.htm`);
+  const files = flattenFiles(state.tree);
+  return files.find((file) => candidates.includes(file.path))
+    || files.find((file) => candidates.some((path) => file.path.toLowerCase() === path.toLowerCase()))
+    || null;
+}
+
+function scrollActiveDocumentToFragment(fragment, options = {}) {
+  if (isHtmlNote() && !state.editMode) {
+    return scrollHtmlFrameToFragment(htmlFrame(), fragment, options);
+  }
+  const decoded = decodeHtmlFragment(fragment);
+  if (!decoded) {
+    qs("doc-area").scrollTo({ top: 0, behavior: options.behavior || "auto" });
+    return true;
+  }
+  const slug = decoded.toLowerCase().trim()
+    .replace(/\s+/g, "-").replace(/[^\p{L}\p{N}_-]/gu, "") || decoded;
+  const target = document.getElementById(`h-${slug}`) || document.getElementById(decoded);
+  if (!target) return false;
+  target.scrollIntoView({ behavior: options.behavior || "auto", block: "start" });
+  return true;
+}
+
+async function openLinkedNote(path, fragment = null) {
+  if (path === state.activePath) {
+    if (fragment != null && scrollActiveDocumentToFragment(fragment, { behavior: "smooth" })) {
+      navPush(path, decodeHtmlFragment(fragment));
+      updateNavButtons();
+    }
+    return;
+  }
+  const opts = fragment == null ? {} : { fragment: decodeHtmlFragment(fragment) };
+  await loadNote(path, opts);
+}
+
+function routeDocumentLink(event, rawHref, frame = null) {
+  const href = String(rawHref || "").trim();
+  if (!href || href.startsWith("inkwell-wiki:")) return false;
+
+  if (href.startsWith("#")) {
+    if (!frame) return false;
+    event.preventDefault();
+    scrollHtmlFrameToFragment(frame, href, { behavior: "smooth", pushHistory: true });
+    return true;
+  }
+
+  if (/^https?:\/\//i.test(href) || href.startsWith("//")) {
+    event.preventDefault();
+    const externalUrl = href.startsWith("//") ? `https:${href}` : href;
+    invoke("open_external_url", { url: externalUrl }).catch(() => {});
+    return true;
+  }
+
+  if (href.startsWith("obsidian://")) {
+    event.preventDefault();
+    try {
+      const url = new URL(href);
+      const filePath = decodeURIComponent(url.searchParams.get("file") || "");
+      if (filePath) void openLinkedNote(filePath);
+    } catch {}
+    return true;
+  }
+
+  if (/^[a-z][a-z0-9+.-]*:/i.test(href)) return false;
+  const hashIndex = href.indexOf("#");
+  const pathAndQuery = hashIndex === -1 ? href : href.slice(0, hashIndex);
+  const queryIndex = pathAndQuery.indexOf("?");
+  const rawPath = queryIndex === -1 ? pathAndQuery : pathAndQuery.slice(0, queryIndex);
+  const fragment = hashIndex === -1 ? null : href.slice(hashIndex + 1);
+  if (!rawPath) return false;
+  const match = findLinkedNote(rawPath);
+  if (!match) return false;
+  event.preventDefault();
+  void openLinkedNote(match.path, fragment);
+  return true;
+}
+
+function wireHtmlFrameLinks(frame, notePath) {
+  const doc = frame.contentDocument;
+  const view = frame.contentWindow;
+  if (!doc || !view) return;
+
+  view.addEventListener("scroll", () => {
+    if (state.activePath === notePath) state.tabScroll.set(notePath, currentReadingScrollTop());
+    if (state.outlineOpen) updateActiveTocLink();
+  }, { passive: true });
+
+  doc.addEventListener("click", (event) => {
+    const target = event.target?.closest ? event.target : event.target?.parentElement;
+    const link = target?.closest?.("a");
+    if (!link) return;
+    routeDocumentLink(event, link.getAttribute("href") || "", frame);
+  });
+}
+
 /* ── Document area render ────────────────────────── */
 function renderDocArea(options = {}) {
   const docArea = qs("doc-area");
@@ -1087,14 +1364,14 @@ function renderDocArea(options = {}) {
     docArea.className = docAreaClass();
     docArea.innerHTML = renderDashboard();
     wireDashboard();
-    qs("btn-toggle-mode").hidden = true;
+    updateReaderDocumentActions();
     return;
   }
 
   const ext = state.activeNote.extension;
   const isText = /^(md|html?)$/.test(ext);
   const isImage = isImageExt(ext);
-  qs("btn-toggle-mode").hidden = !isText;
+  updateReaderDocumentActions();
 
   state.editor = null;
 
@@ -1161,24 +1438,23 @@ function renderDocArea(options = {}) {
       docArea.className = docAreaClass("docAreaHtml");
       docArea.innerHTML = `<iframe id="html-frame" class="htmlFrame"></iframe>`;
       const frame = document.getElementById("html-frame");
+      const notePath = state.activeNote.path;
+      const restoreFragment = Object.prototype.hasOwnProperty.call(options, "fragment");
+      const restoreScrollTop = Number.isFinite(options.scrollTop)
+        ? options.scrollTop
+        : state.tabScroll.get(notePath) ?? 0;
       frame.addEventListener("load", () => {
-        // 拦截 obsidian:// 链接，在应用内跳转而非打开外部 Obsidian
         try {
-          frame.contentDocument.addEventListener("click", (e) => {
-            const link = e.target.closest("a");
-            if (!link) return;
-            const href = link.getAttribute("href") || "";
-            if (!href.startsWith("obsidian://")) return;
-            e.preventDefault();
-            try {
-              const url = new URL(href);
-              const filePath = decodeURIComponent(url.searchParams.get("file") || "");
-              if (filePath) loadNote(filePath);
-            } catch {}
-          }, true);
+          wireHtmlFrameLinks(frame, notePath);
+          if (restoreFragment) {
+            scrollHtmlFrameToFragment(frame, options.fragment, { behavior: "auto" });
+          } else {
+            frame.contentWindow.scrollTo(0, restoreScrollTop);
+          }
+          if (state.outlineOpen) renderToc();
         } catch {}
       });
-      frame.srcdoc = state.activeNote.content;
+      frame.srcdoc = htmlPreviewContent(state.activeNote.content, notePath);
     } else if (isImage) {
       const navigation = imageViewerNavigation(state.activeNote.path);
       docArea.innerHTML = `
@@ -1554,6 +1830,7 @@ function renderNoteMeta() {
   const titleEl = qs("note-title");
   const metaEl = qs("note-meta");
   const backBtn = qs("btn-close-git-workspace");
+  updateReaderDocumentActions();
 
   if (state.gitWorkspaceOpen) {
     titleEl.textContent = "同步";
@@ -1948,12 +2225,21 @@ async function newFolderInFolder(target) {
 }
 
 /* ── Navigation history ──────────────────────────── */
-function navPush(path) {
+function navEntry(path, fragment = null) {
+  return {
+    path,
+    fragment: fragment == null ? null : decodeHtmlFragment(fragment),
+  };
+}
+
+function navPush(path, fragment = null) {
+  const next = navEntry(path, fragment);
+  const current = state.navHistory[state.navIndex];
   // Same path: don't duplicate
-  if (state.navHistory[state.navIndex] === path) return;
+  if (current?.path === next.path && current?.fragment === next.fragment) return;
   // Truncate forward history
   state.navHistory = state.navHistory.slice(0, state.navIndex + 1);
-  state.navHistory.push(path);
+  state.navHistory.push(next);
   state.navIndex = state.navHistory.length - 1;
   // Cap at 200 entries
   if (state.navHistory.length > 200) {
@@ -1969,18 +2255,29 @@ function updateNavButtons() {
   if (fwd)  fwd.disabled  = state.navIndex >= state.navHistory.length - 1;
 }
 
+async function navigateToHistoryEntry(entry) {
+  if (!entry?.path) return;
+  if (entry.path === state.activePath && entry.fragment != null) {
+    scrollActiveDocumentToFragment(entry.fragment, { behavior: "auto" });
+    return;
+  }
+  const options = { skipHistory: true };
+  if (entry.fragment != null) options.fragment = entry.fragment;
+  await loadNote(entry.path, options);
+}
+
 async function navBack() {
   if (state.navIndex <= 0) return;
   state.navIndex--;
   updateNavButtons();
-  await loadNote(state.navHistory[state.navIndex], { skipHistory: true });
+  await navigateToHistoryEntry(state.navHistory[state.navIndex]);
 }
 
 async function navForward() {
   if (state.navIndex >= state.navHistory.length - 1) return;
   state.navIndex++;
   updateNavButtons();
-  await loadNote(state.navHistory[state.navIndex], { skipHistory: true });
+  await navigateToHistoryEntry(state.navHistory[state.navIndex]);
 }
 
 /* ── 多标签 ──────────────────────────────────────── */
@@ -2295,11 +2592,13 @@ async function loadNote(path, opts = {}) {
 
   // 记住当前笔记的阅读位置（loading 替换内容前采集，切标签回来时恢复）
   if (state.activePath && state.activePath !== path) {
-    state.tabScroll.set(state.activePath, qs("doc-area").scrollTop);
+    state.tabScroll.set(state.activePath, currentReadingScrollTop());
   }
 
   // Push to navigation history (skip when going back/forward)
-  if (!opts.skipHistory) navPush(path);
+  if (!opts.skipHistory) {
+    navPush(path, Object.prototype.hasOwnProperty.call(opts, "fragment") ? opts.fragment : null);
+  }
   updateNavButtons();
 
   const docArea = qs("doc-area");
@@ -2317,8 +2616,12 @@ async function loadNote(path, opts = {}) {
     renderTree();
     renderNoteMeta();
     setDirty(false);
-    renderDocArea();
-    docArea.scrollTop = state.tabScroll.get(note.path) ?? 0;
+    const renderOptions = { scrollTop: state.tabScroll.get(note.path) ?? 0 };
+    if (Object.prototype.hasOwnProperty.call(opts, "fragment")) {
+      renderOptions.fragment = opts.fragment;
+    }
+    renderDocArea(renderOptions);
+    if (!isHtmlNote()) docArea.scrollTop = renderOptions.scrollTop;
     if (state.outlineOpen) renderToc();
     sendNoteContext();
     try { localStorage.setItem(LAST_FILE_KEY, path); } catch {}
@@ -2932,12 +3235,12 @@ async function flushTreeRefresh() {
     if (!changed) return;
 
     const docArea = qs("doc-area");
-    const scrollTop = docArea.scrollTop;
+    const scrollTop = currentReadingScrollTop();
     const oldBlockTexts = collectDiffBlocks().map((block) => block.text);
     const imageNodes = captureMarkdownImages();
     state.activeNote = note;
-    renderDocArea({ silent: true, imageNodes });
-    docArea.scrollTop = scrollTop;
+    renderDocArea({ silent: true, imageNodes, scrollTop });
+    if (!isHtmlNote()) docArea.scrollTop = scrollTop;
     if (state.outlineOpen) renderToc();
     flashChangedPreviewBlocks(oldBlockTexts);
   } catch (err) {
@@ -3490,11 +3793,11 @@ function togglePanel() {
 /* ── Outline popover ─────────────────────────────── */
 function openOutline() {
   closeGitQuickPopover(false);
+  toggleMoreMenu(false);
   state.outlineOpen = true;
   const pop = qs("outline-popover");
-  const trigger = qs("menu-outline");
   if (pop) pop.hidden = false;
-  trigger?.setAttribute("aria-expanded", "true");
+  updateOutlineButton();
   renderToc();
   requestAnimationFrame(() => {
     if (state.outlineOpen) qs("btn-close-outline")?.focus();
@@ -3505,11 +3808,10 @@ function closeOutline(restoreFocus = true) {
   if (!state.outlineOpen) return;
   state.outlineOpen = false;
   const pop = qs("outline-popover");
-  const trigger = qs("menu-outline");
   if (pop) pop.hidden = true;
-  trigger?.setAttribute("aria-expanded", "false");
+  updateOutlineButton();
   if (restoreFocus) {
-    requestAnimationFrame(() => qs("btn-more-menu")?.focus());
+    requestAnimationFrame(() => qs("btn-outline")?.focus());
   }
 }
 
@@ -3579,7 +3881,6 @@ async function openGitWorkspace() {
   qs("git-workspace").hidden = false;
   qs("reader").classList.add("readerSyncWorkspaceOpen");
   renderNoteMeta();
-  qs("btn-toggle-mode").hidden = true;
   renderGitPanel();
   void refreshGitStatus();
   requestAnimationFrame(() => qs("btn-close-git-workspace")?.focus());
@@ -3599,7 +3900,6 @@ function closeGitWorkspace(restoreFocus = true) {
   qs("reader").classList.remove("readerSyncWorkspaceOpen");
   renderNoteMeta();
   updateEditButton();
-  qs("btn-toggle-mode").hidden = !state.activeNote || !/^(md|html?)$/i.test(state.activeNote.extension || "");
   if (restoreFocus) {
     requestAnimationFrame(() => {
       const trigger = qs("btn-git-footer");
@@ -3902,6 +4202,7 @@ function wireEvents() {
     else togglePanel();
   });
   qs("btn-toggle-mode").addEventListener("click", () => void setEditMode(!state.editMode));
+  qs("btn-outline").addEventListener("click", toggleOutline);
 
   qs("doc-area").addEventListener("dblclick", (e) => {
     if (state.editMode) return;
@@ -3912,10 +4213,9 @@ function wireEvents() {
     void setEditMode(true, block ? previewClickEditTarget(e, block) : null);
   });
 
-  qs("btn-more-menu").addEventListener("click", () => toggleMoreMenu());
-  qs("menu-outline").addEventListener("click", () => {
-    toggleMoreMenu(false);
-    toggleOutline();
+  qs("btn-more-menu").addEventListener("click", () => {
+    if (qs("more-menu").hidden) closeOutline(false);
+    toggleMoreMenu();
   });
   qs("menu-delete").addEventListener("click", () => {
     toggleMoreMenu(false);
@@ -4008,8 +4308,7 @@ function wireEvents() {
       state.outlineOpen &&
       outline &&
       !outline.contains(e.target) &&
-      !qs("menu-outline")?.contains(e.target) &&
-      !qs("btn-more-menu")?.contains(e.target)
+      !qs("btn-outline")?.contains(e.target)
     ) {
       closeOutline(false);
     }
@@ -4032,49 +4331,7 @@ function wireEvents() {
   qs("doc-area").addEventListener("click", (e) => {
     const link = e.target.closest("a");
     if (!link) return;
-    const rawHref = link.getAttribute("href") || "";
-    if (!rawHref || rawHref.startsWith("inkwell-wiki:")) return;
-
-    if (/^https?:\/\//i.test(rawHref)) {
-      e.preventDefault();
-      invoke("open_external_url", { url: rawHref }).catch(() => {});
-      return;
-    }
-
-    // 相对路径链接（[text](file.md) 或 [text](./subdir/file.md)）
-    if (!rawHref.startsWith("#")) {
-      // 分离 #fragment
-      const hashIdx = rawHref.indexOf("#");
-      const relPath = decodeURIComponent(hashIdx !== -1 ? rawHref.slice(0, hashIdx) : rawHref);
-      const fragment = hashIdx !== -1 ? rawHref.slice(hashIdx + 1) : "";
-
-      // 解析相对路径
-      const noteDir = state.activePath?.includes("/")
-        ? state.activePath.split("/").slice(0, -1).join("/")
-        : "";
-      const resolved = resolveRelativePath(noteDir, relPath);
-
-      // 在文件树中匹配（先精确，再忽略大小写，再补 .md 后缀）
-      const files = flattenFiles(state.tree);
-      const match =
-        files.find((f) => f.path === resolved) ||
-        files.find((f) => f.path.toLowerCase() === resolved.toLowerCase()) ||
-        files.find((f) => f.path.toLowerCase() === (resolved + ".md").toLowerCase());
-
-      if (match) {
-        e.preventDefault();
-        loadNote(match.path).then(() => {
-          if (!fragment) return;
-          requestAnimationFrame(() => {
-            const slug = fragment.toLowerCase().trim()
-              .replace(/\s+/g, "-").replace(/[^\p{L}\p{N}_-]/gu, "") || fragment;
-            const el = document.getElementById(`h-${slug}`) || document.getElementById(slug);
-            if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
-          });
-        });
-      }
-      // 匹配不到则不拦截（浏览器默认行为，通常无操作）
-    }
+    routeDocumentLink(e, link.getAttribute("href") || "");
   });
 
   // 鼠标侧键后退/前进（XButton1/2，与浏览器、资源管理器一致）

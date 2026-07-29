@@ -556,6 +556,13 @@ fn ensure_vault_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+fn allow_vault_assets(app: &AppHandle, path: &Path) -> Result<(), String> {
+    let canonical = fs::canonicalize(path).map_err(|err| err.to_string())?;
+    app.asset_protocol_scope()
+        .allow_directory(canonical, true)
+        .map_err(|err| err.to_string())
+}
+
 fn vault_root(app: &AppHandle) -> Result<PathBuf, String> {
     let configured = ensure_vault_path(app)?;
     fs::canonicalize(configured).map_err(|_| "Vault path is unavailable.".to_string())
@@ -1513,6 +1520,7 @@ async fn select_and_set_vault(app: AppHandle) -> Result<DesktopState, String> {
 
     fs::create_dir_all(&path).map_err(|err| err.to_string())?;
     save_vault_path(&app, &path)?;
+    allow_vault_assets(&app, &path)?;
     ensure_git_repo(&path);
     if let Err(err) = start_vault_watcher(&app) {
         eprintln!("[inkfellow] vault watcher failed: {err}");
@@ -1531,6 +1539,7 @@ async fn set_vault_path(app: AppHandle, path: String) -> Result<DesktopState, St
         return Err("Path is not a folder.".to_string());
     }
     save_vault_path(&app, &path_buf)?;
+    allow_vault_assets(&app, &path_buf)?;
     ensure_git_repo(&path_buf);
     if let Err(err) = start_vault_watcher(&app) {
         eprintln!("[inkfellow] vault watcher failed: {err}");
@@ -2554,6 +2563,9 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
             if let Ok(vault) = ensure_vault_path(&handle) {
+                if let Err(err) = allow_vault_assets(&handle, &vault) {
+                    eprintln!("[inkfellow] HTML asset scope setup failed: {err}");
+                }
                 ensure_git_repo(&vault);
             }
             if let Err(err) = start_vault_watcher(&handle) {

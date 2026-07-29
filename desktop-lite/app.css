@@ -2781,6 +2781,7 @@ input, textarea { font-family: inherit; }
   color: var(--notes-accent);
 }
 
+.readerSyncWorkspaceOpen #btn-outline,
 .readerSyncWorkspaceOpen #btn-toggle-mode,
 .readerSyncWorkspaceOpen #btn-more-menu,
 .readerSyncWorkspaceOpen #tab-strip,
@@ -3008,12 +3009,6 @@ input, textarea { font-family: inherit; }
 .moreMenuItemDanger { color: #c0392b; }
 .moreMenuItemDanger svg { color: #c0392b; }
 .moreMenuItemDanger:hover { background: rgba(192, 57, 43, 0.08); }
-
-.moreMenuDivider {
-  height: 1px;
-  margin: 4px 6px;
-  background: var(--notes-border);
-}
 
 /* ── Fellow 胶囊按钮（与 web 端 fellowPill 一致） ──── */
 .fellowPill {
