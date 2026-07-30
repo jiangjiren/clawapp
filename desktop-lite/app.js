@@ -64,7 +64,11 @@ const state = {
   agentGenerating: false,
   agentGenerationKnown: false,
   agentToken: null,
+  transientVault: false,
+  desktopReady: false,
 };
+
+let markdownOpenQueue = Promise.resolve(false);
 
 /* ── Tauri bridge ────────────────────────────────── */
 function waitForTauri(timeoutMs = 5000) {
@@ -2607,7 +2611,7 @@ async function loadNote(path, opts = {}) {
 
   try {
     const command = isImageExt(extOf(path)) ? "read_asset" : "read_note";
-    const note = await invoke(command, { path });
+    const note = opts.note ?? await invoke(command, { path });
     state.activePath = note.path;
     state.activeNote = note;
     if (opts.replaceCurrentTab) replaceTabPath(previousActivePath, note.path);
@@ -2863,7 +2867,7 @@ function renderVaultMenu() {
   const recents = getRecentVaults().filter((p) => p !== current);
 
   menu.innerHTML = `
-    <div class="vaultDropdownSectionTitle">当前笔记本</div>
+    <div class="vaultDropdownSectionTitle">${state.transientVault ? "临时打开目录" : "当前笔记本"}</div>
     <div class="activeVaultCard">
       <div class="activeVaultIcon">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1-2.5-2.5Z"/><path d="M6 6h10"/><path d="M6 10h10"/></svg>
@@ -2935,6 +2939,67 @@ async function chooseVault() {
   } catch (err) {
     if (!String(err).includes("cancelled")) showToast(String(err));
   }
+}
+
+async function openMarkdownFromShell(absolutePath) {
+  if (!absolutePath) return false;
+  if (!(await flushPendingSave())) return false;
+
+  try {
+    const result = await invoke("open_markdown_file", { path: absolutePath });
+    const rootChanged = result.rootChanged === true;
+    applyDesktopState(result.desktop);
+    if (rootChanged) {
+      state.tree = null;
+      state.tabs = [];
+      persistTabs();
+      renderTabs();
+    }
+    clearActiveNote();
+    state.navHistory = [];
+    state.navIndex = -1;
+    state.tabScroll.clear();
+    updateNavButtons();
+    await loadNote(result.path, { note: result.note });
+    showToast(`已打开 ${result.path.split("/").pop()}`);
+    requestAnimationFrame(() => {
+      void waitForAgent();
+      const backgroundTasks = [refreshGitStatus()];
+      if (rootChanged) backgroundTasks.push(loadTree(false));
+      void Promise.allSettled(backgroundTasks).then((outcomes) => {
+        for (const outcome of outcomes) {
+          if (outcome.status === "rejected") {
+            console.warn("[inkfellow] Markdown background initialization failed:", outcome.reason);
+          }
+        }
+      });
+    });
+    return true;
+  } catch (err) {
+    showToast(`无法打开 Markdown: ${String(err)}`);
+    return false;
+  }
+}
+
+async function drainPendingMarkdownFiles() {
+  const paths = await invoke("take_pending_markdown_files");
+  let opened = false;
+  for (const path of paths) {
+    opened = (await openMarkdownFromShell(path)) || opened;
+  }
+  return opened;
+}
+
+function queuePendingMarkdownOpen() {
+  const next = markdownOpenQueue
+    .catch(() => false)
+    .then(() => drainPendingMarkdownFiles())
+    .catch((err) => {
+      showToast(`无法读取待打开文件: ${String(err)}`);
+      return false;
+    });
+  markdownOpenQueue = next;
+  return next;
 }
 
 /* ── Search ──────────────────────────────────────── */
@@ -3149,6 +3214,13 @@ function renderGitStatusUI() {
   const st = state.gitStatus;
   if (!st) return;
 
+  if (state.transientVault) {
+    dot.className = "sidebarGitDot";
+    label.textContent = "临时文件不参与同步";
+    renderGitPanel();
+    return;
+  }
+
   if (!st.initialized) {
     dot.className = "sidebarGitDot";
     label.textContent = "尚未初始化同步";
@@ -3254,6 +3326,7 @@ async function flushTreeRefresh() {
 }
 
 function requestAutoPull() {
+  if (state.transientVault) return;
   if (state.gitStatus && !state.gitStatus.initialized) return;
   // 正在编辑时不拉取，保护沉浸状态
   if (state.editMode && state.dirty) return;
@@ -3266,6 +3339,10 @@ async function initSyncEvents() {
 
   await listen("vault-tree-changed", ({ payload }) => {
     scheduleTreeRefresh(payload?.changedPaths ?? []);
+  });
+
+  await listen("open-markdown-files-pending", () => {
+    if (state.desktopReady) void queuePendingMarkdownOpen();
   });
 
   await listen("sync-state", async ({ payload }) => {
@@ -3353,6 +3430,16 @@ function renderGitPanel() {
   renderGitQuickPopover();
   const panel = qs("git-panel");
   if (!panel || !state.gitWorkspaceOpen) return;
+  if (state.transientVault) {
+    panel.innerHTML = `
+      <div id="git-app" class="gitPanel">
+        <div class="gitEmptyState">
+          <div class="gitEmptyTitle">这是临时打开的 Markdown 文件</div>
+          <div class="gitEmptyDesc">临时目录不会自动初始化或同步。需要同步时，请先把目录选择为正式笔记本。</div>
+        </div>
+      </div>`;
+    return;
+  }
 
   const st = state.gitStatus;
   const files = st?.files || [];
@@ -3375,6 +3462,18 @@ function renderGitPanel() {
 function renderGitQuickPopover() {
   const content = qs("git-quick-content");
   if (!content || !state.gitQuickOpen) return;
+  if (state.transientVault) {
+    content.innerHTML = `
+      <div class="gitQuickStatus">
+        <span class="gitQuickStatusDot"></span>
+        <div class="gitQuickStatusText">
+          <strong>临时文件不参与同步</strong>
+          <span>需要同步时，请先把目录选择为正式笔记本。</span>
+        </div>
+      </div>`;
+    requestAnimationFrame(positionGitQuickPopover);
+    return;
+  }
 
   const st = state.gitStatus;
   const files = st?.files || [];
@@ -4054,7 +4153,8 @@ function restoreLayout() {
 
 /* ── Desktop state ───────────────────────────────── */
 function applyDesktopState(desktop) {
-  if (state.vaultPath !== desktop.vaultPath) {
+  const transientVault = desktop.transientVault === true;
+  if (state.vaultPath !== desktop.vaultPath || state.transientVault !== transientVault) {
     state.vaultNotesSignature = null;
     pendingAgentMessages.length = 0;
     state.agentReady = false;
@@ -4062,12 +4162,17 @@ function applyDesktopState(desktop) {
     state.agentGenerationKnown = false;
   }
   state.vaultPath = desktop.vaultPath;
+  state.transientVault = transientVault;
   state.agentUrl = desktop.agentUrl;
   state.agentPort = desktop.agentPort;
   state.agentToken = desktop.agentToken;
-  qs("vault-label").textContent = vaultDisplayName(desktop.vaultPath);
-  qs("btn-vault-switcher").title = `切换笔记本（当前: ${desktop.vaultPath}）`;
-  rememberVault(desktop.vaultPath);
+  qs("vault-label").textContent = transientVault
+    ? `临时 · ${vaultDisplayName(desktop.vaultPath)}`
+    : vaultDisplayName(desktop.vaultPath);
+  qs("btn-vault-switcher").title = transientVault
+    ? `临时打开目录（${desktop.vaultPath}）`
+    : `切换笔记本（当前: ${desktop.vaultPath}）`;
+  if (!transientVault) rememberVault(desktop.vaultPath);
 }
 
 async function loadTree(selectFirst = false) {
@@ -4408,7 +4513,11 @@ async function boot() {
     await initSyncEvents();
     const desktop = await invoke("get_desktop_state");
     applyDesktopState(desktop);
-    await Promise.all([loadTree(false), waitForAgent(), refreshGitStatus()]);
+    state.desktopReady = true;
+    const openedPendingMarkdown = await queuePendingMarkdownOpen();
+    if (!openedPendingMarkdown) {
+      await Promise.all([loadTree(false), waitForAgent(), refreshGitStatus()]);
+    }
     requestAutoPull();
     initAutoSync();
   } catch (err) {

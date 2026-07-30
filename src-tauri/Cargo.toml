@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "0.6.1"
+version = "0.6.3"
 description = "A Tauri App"
 authors = ["you"]
 license = ""
@@ -25,6 +25,7 @@ log = "0.4"
 notify = "8"
 tauri = { version = "2.11.2", features = ["protocol-asset"] }
 tauri-plugin-log = "2"
+tauri-plugin-single-instance = "2"
 rfd = "0.15"
 uuid = { version = "1", features = ["v4"] }
 

@@ -4,13 +4,16 @@ use notify::{
 };
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
-use std::sync::{mpsc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering},
+    mpsc, Mutex,
+};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, RunEvent};
 
@@ -39,6 +42,11 @@ struct AppState {
     agent_token: String,
     sync_tx: Mutex<Option<mpsc::Sender<SyncJob>>>,
     vault_watcher: Mutex<Option<RecommendedWatcher>>,
+    transient_vault_path: Mutex<Option<PathBuf>>,
+    pending_markdown_files: Mutex<Vec<PathBuf>>,
+    initial_vault_services_deferred: AtomicBool,
+    vault_services_generation: AtomicU64,
+    vault_services_ready_generation: AtomicU64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -113,6 +121,17 @@ struct DesktopState {
     agent_ready: bool,
     #[serde(rename = "agentToken")]
     agent_token: String,
+    #[serde(rename = "transientVault")]
+    transient_vault: bool,
+}
+
+#[derive(Serialize)]
+struct OpenMarkdownResponse {
+    desktop: DesktopState,
+    path: String,
+    note: NoteResponse,
+    #[serde(rename = "rootChanged")]
+    root_changed: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -222,6 +241,54 @@ fn path_extension(value: &Path) -> String {
         .and_then(OsStr::to_str)
         .unwrap_or("")
         .to_ascii_lowercase()
+}
+
+fn canonical_markdown_file(value: &Path) -> Result<PathBuf, String> {
+    let canonical = fs::canonicalize(value).map_err(|_| "Markdown file not found.".to_string())?;
+    if !canonical.is_file() {
+        return Err("The selected path is not a file.".to_string());
+    }
+    if path_extension(&canonical) != "md" {
+        return Err("Only Markdown (.md) files can be opened this way.".to_string());
+    }
+    Ok(canonical)
+}
+
+fn markdown_files_from_args(args: impl IntoIterator<Item = OsString>, cwd: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for argument in args {
+        let path = PathBuf::from(argument);
+        let candidate = if path.is_absolute() {
+            path
+        } else {
+            cwd.join(path)
+        };
+        let Ok(canonical) = canonical_markdown_file(&candidate) else {
+            continue;
+        };
+        if !files.contains(&canonical) {
+            files.push(canonical);
+        }
+    }
+    files
+}
+
+fn enqueue_pending_markdown_files(app: &AppHandle, files: Vec<PathBuf>) {
+    if files.is_empty() {
+        return;
+    }
+    let Some(state) = app.try_state::<AppState>() else {
+        return;
+    };
+    let mut pending = state
+        .pending_markdown_files
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    for path in files {
+        if !pending.contains(&path) {
+            pending.push(path);
+        }
+    }
 }
 
 fn is_note_file(value: &Path) -> bool {
@@ -544,7 +611,30 @@ fn default_vault_path(app: &AppHandle) -> PathBuf {
         .join("inkfellow_notes")
 }
 
+fn transient_vault_path(app: &AppHandle) -> Option<PathBuf> {
+    app.state::<AppState>()
+        .transient_vault_path
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+fn set_transient_vault_path(app: &AppHandle, path: Option<PathBuf>) {
+    *app.state::<AppState>()
+        .transient_vault_path
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = path;
+}
+
+fn is_transient_vault(app: &AppHandle) -> bool {
+    transient_vault_path(app).is_some()
+}
+
 fn ensure_vault_path(app: &AppHandle) -> Result<PathBuf, String> {
+    if let Some(path) = transient_vault_path(app) {
+        return Ok(path);
+    }
+
     if let Some(path) = get_saved_vault_path(app) {
         fs::create_dir_all(&path).map_err(|err| err.to_string())?;
         return Ok(path);
@@ -554,6 +644,16 @@ fn ensure_vault_path(app: &AppHandle) -> Result<PathBuf, String> {
     fs::create_dir_all(&path).map_err(|err| err.to_string())?;
     save_vault_path(app, &path)?;
     Ok(path)
+}
+
+fn persistent_vault_path(app: &AppHandle) -> Result<PathBuf, String> {
+    if is_transient_vault(app) {
+        return Err(
+            "Temporary Markdown files are not part of a sync workspace. Choose a notes folder first."
+                .to_string(),
+        );
+    }
+    ensure_vault_path(app)
 }
 
 fn allow_vault_assets(app: &AppHandle, path: &Path) -> Result<(), String> {
@@ -1262,6 +1362,50 @@ fn restart_agent(app: &AppHandle) {
     restart_agent_locked(app);
 }
 
+fn vault_services_ready(app: &AppHandle) -> bool {
+    let state = app.state::<AppState>();
+    state.vault_services_generation.load(AtomicOrdering::SeqCst)
+        == state
+            .vault_services_ready_generation
+            .load(AtomicOrdering::SeqCst)
+}
+
+fn begin_vault_services_restart(app: &AppHandle) -> u64 {
+    app.state::<AppState>()
+        .vault_services_generation
+        .fetch_add(1, AtomicOrdering::SeqCst)
+        + 1
+}
+
+fn finish_vault_services_restart(app: &AppHandle, generation: u64) {
+    let state = app.state::<AppState>();
+    if state.vault_services_generation.load(AtomicOrdering::SeqCst) == generation {
+        state
+            .vault_services_ready_generation
+            .store(generation, AtomicOrdering::SeqCst);
+    }
+}
+
+fn restart_vault_services_in_background(app: &AppHandle, root: PathBuf) {
+    let generation = begin_vault_services_restart(app);
+    let handle = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if vault_root(&handle).ok().as_ref() != Some(&root) {
+            return;
+        }
+        if let Err(err) = start_vault_watcher(&handle) {
+            eprintln!("[inkfellow] vault watcher failed: {err}");
+        }
+        if vault_root(&handle).ok().as_ref() != Some(&root) {
+            return;
+        }
+        restart_agent(&handle);
+        if vault_root(&handle).ok().as_ref() == Some(&root) {
+            finish_vault_services_restart(&handle, generation);
+        }
+    });
+}
+
 fn restart_agent_when_sidecar_safe(app: &AppHandle) -> SidecarRestartPermit {
     let state = app.state::<AppState>();
     let _restart_guard = state
@@ -1498,15 +1642,29 @@ async fn get_desktop_state(app: AppHandle) -> Result<DesktopState, String> {
         vault_path: vault.to_string_lossy().to_string(),
         agent_url: format!("http://127.0.0.1:{port}"),
         agent_port: port,
-        agent_ready: agent_ready(port),
+        agent_ready: vault_services_ready(&app) && agent_ready(port),
         agent_token: state.agent_token.clone(),
+        transient_vault: is_transient_vault(&app),
     })
+}
+
+#[tauri::command]
+fn take_pending_markdown_files(app: AppHandle) -> Vec<String> {
+    let state = app.state::<AppState>();
+    let mut pending = state
+        .pending_markdown_files
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    pending
+        .drain(..)
+        .map(|path| path.to_string_lossy().to_string())
+        .collect()
 }
 
 #[tauri::command]
 async fn agent_status(app: AppHandle) -> Result<bool, String> {
     let state = app.state::<AppState>();
-    Ok(agent_ready(state.claude_port))
+    Ok(vault_services_ready(&app) && agent_ready(state.claude_port))
 }
 
 #[tauri::command]
@@ -1520,12 +1678,15 @@ async fn select_and_set_vault(app: AppHandle) -> Result<DesktopState, String> {
 
     fs::create_dir_all(&path).map_err(|err| err.to_string())?;
     save_vault_path(&app, &path)?;
+    set_transient_vault_path(&app, None);
     allow_vault_assets(&app, &path)?;
     ensure_git_repo(&path);
+    let generation = begin_vault_services_restart(&app);
     if let Err(err) = start_vault_watcher(&app) {
         eprintln!("[inkfellow] vault watcher failed: {err}");
     }
     restart_agent(&app);
+    finish_vault_services_restart(&app, generation);
     get_desktop_state(app).await
 }
 
@@ -1539,13 +1700,58 @@ async fn set_vault_path(app: AppHandle, path: String) -> Result<DesktopState, St
         return Err("Path is not a folder.".to_string());
     }
     save_vault_path(&app, &path_buf)?;
+    set_transient_vault_path(&app, None);
     allow_vault_assets(&app, &path_buf)?;
     ensure_git_repo(&path_buf);
+    let generation = begin_vault_services_restart(&app);
     if let Err(err) = start_vault_watcher(&app) {
         eprintln!("[inkfellow] vault watcher failed: {err}");
     }
     restart_agent(&app);
+    finish_vault_services_restart(&app, generation);
     get_desktop_state(app).await
+}
+
+#[tauri::command]
+async fn open_markdown_file(app: AppHandle, path: String) -> Result<OpenMarkdownResponse, String> {
+    let markdown = canonical_markdown_file(Path::new(&path))?;
+    let previous_root = vault_root(&app).ok();
+    let saved_root = get_saved_vault_path(&app).and_then(|saved| fs::canonicalize(saved).ok());
+
+    let (root, transient) = match saved_root {
+        Some(saved) if markdown.starts_with(&saved) => (saved, false),
+        _ => (
+            markdown
+                .parent()
+                .ok_or_else(|| "Markdown file has no parent folder.".to_string())?
+                .to_path_buf(),
+            true,
+        ),
+    };
+    let relative = markdown
+        .strip_prefix(&root)
+        .map(to_slash_path)
+        .map_err(|_| "Markdown file is outside the selected folder.".to_string())?;
+
+    allow_vault_assets(&app, &root)?;
+    set_transient_vault_path(&app, transient.then_some(root.clone()));
+
+    let root_changed = previous_root.as_ref() != Some(&root);
+    let initial_services_deferred = app
+        .state::<AppState>()
+        .initial_vault_services_deferred
+        .swap(false, AtomicOrdering::SeqCst);
+    let note = read_note(app.clone(), relative.clone()).await?;
+    if root_changed || initial_services_deferred {
+        restart_vault_services_in_background(&app, root);
+    }
+
+    Ok(OpenMarkdownResponse {
+        desktop: get_desktop_state(app).await?,
+        path: relative,
+        note,
+        root_changed,
+    })
 }
 
 #[tauri::command]
@@ -2172,7 +2378,7 @@ fn emit_sync_done(
     feedback: Option<String>,
     error: Option<String>,
 ) {
-    let status = ensure_vault_path(app)
+    let status = persistent_vault_path(app)
         .and_then(|path| compute_git_status(&path))
         .ok();
     emit_sync(
@@ -2218,7 +2424,7 @@ fn sync_worker(app: AppHandle, rx: mpsc::Receiver<SyncJob>) {
     let mut fail_streak: u32 = 0;
 
     while let Ok(job) = rx.recv() {
-        let Ok(vault) = ensure_vault_path(&app) else {
+        let Ok(vault) = persistent_vault_path(&app) else {
             continue;
         };
         if !vault.join(".git").exists() {
@@ -2336,6 +2542,7 @@ fn start_sync_worker(app: &AppHandle) {
 }
 
 fn queue_sync_job(app: &AppHandle, job: SyncJob) -> Result<(), String> {
+    persistent_vault_path(app)?;
     let state = app.state::<AppState>();
     let tx = state.sync_tx.lock().unwrap();
     tx.as_ref()
@@ -2361,37 +2568,50 @@ async fn sync_commit_and_push(app: AppHandle, message: String) -> Result<(), Str
 
 #[tauri::command]
 async fn git_status(app: AppHandle) -> Result<GitStatus, String> {
-    let path = ensure_vault_path(&app)?;
+    if is_transient_vault(&app) {
+        return Ok(GitStatus {
+            initialized: false,
+            clean: true,
+            branch: None,
+            ahead: 0,
+            behind: 0,
+            entries: Vec::new(),
+            files: Vec::new(),
+            last_sync: None,
+            raw: "Temporary Markdown files are not part of a sync workspace.".to_string(),
+        });
+    }
+    let path = persistent_vault_path(&app)?;
     compute_git_status(&path)
 }
 
 #[tauri::command]
 async fn git_init(app: AppHandle) -> Result<GitOutput, String> {
-    let path = ensure_vault_path(&app)?;
+    let path = persistent_vault_path(&app)?;
     run_git(&path, &["init"])
 }
 
 #[tauri::command]
 async fn git_pull(app: AppHandle) -> Result<GitOutput, String> {
-    let path = ensure_vault_path(&app)?;
+    let path = persistent_vault_path(&app)?;
     do_git_pull(&path)
 }
 
 #[tauri::command]
 async fn git_push(app: AppHandle) -> Result<GitOutput, String> {
-    let path = ensure_vault_path(&app)?;
+    let path = persistent_vault_path(&app)?;
     do_git_push(&path)
 }
 
 #[tauri::command]
 async fn git_commit(app: AppHandle, message: String) -> Result<GitOutput, String> {
-    let path = ensure_vault_path(&app)?;
+    let path = persistent_vault_path(&app)?;
     do_git_commit(&path, &message)
 }
 
 #[tauri::command]
 async fn git_commit_and_push(app: AppHandle, message: String) -> Result<Vec<GitOutput>, String> {
-    let path = ensure_vault_path(&app)?;
+    let path = persistent_vault_path(&app)?;
     let commit = do_git_commit(&path, &message)?;
     if !commit.success {
         return Ok(vec![commit]);
@@ -2402,7 +2622,7 @@ async fn git_commit_and_push(app: AppHandle, message: String) -> Result<Vec<GitO
 
 #[tauri::command]
 async fn git_history(app: AppHandle) -> Result<Vec<GitCommitRecord>, String> {
-    let path = ensure_vault_path(&app)?;
+    let path = persistent_vault_path(&app)?;
     if !path.join(".git").exists() {
         return Ok(Vec::new());
     }
@@ -2444,7 +2664,7 @@ async fn git_history(app: AppHandle) -> Result<Vec<GitCommitRecord>, String> {
 
 #[tauri::command]
 async fn git_diff(app: AppHandle, path: String) -> Result<GitFileDiff, String> {
-    let root = ensure_vault_path(&app)?;
+    let root = persistent_vault_path(&app)?;
     let relative = normalize_relative_path(&path, false)?;
 
     let status = run_git(&root, &["status", "--porcelain=v1", "--", &relative])?;
@@ -2473,7 +2693,7 @@ async fn git_diff(app: AppHandle, path: String) -> Result<GitFileDiff, String> {
 
 #[tauri::command]
 async fn git_discard(app: AppHandle, path: String) -> Result<(), String> {
-    let root = ensure_vault_path(&app)?;
+    let root = persistent_vault_path(&app)?;
     let relative = normalize_relative_path(&path, false)?;
 
     let status = run_git(&root, &["status", "--porcelain=v1", "--", &relative])?;
@@ -2516,8 +2736,24 @@ async fn git_discard(app: AppHandle, path: String) -> Result<(), String> {
 pub fn run() {
     let claude_port = get_free_port().unwrap_or(8089);
     let agent_token = uuid::Uuid::new_v4().to_string();
+    let startup_cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let startup_markdown_files = markdown_files_from_args(std::env::args_os(), &startup_cwd);
+    let defer_initial_vault_services = !startup_markdown_files.is_empty();
 
     let app = tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
+            let markdown_files =
+                markdown_files_from_args(args.into_iter().map(OsString::from), Path::new(&cwd));
+            if !markdown_files.is_empty() {
+                enqueue_pending_markdown_files(app, markdown_files);
+                let _ = app.emit("open-markdown-files-pending", ());
+            }
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(
             tauri_plugin_log::Builder::default()
                 .level(log::LevelFilter::Info)
@@ -2530,12 +2766,19 @@ pub fn run() {
             agent_token,
             sync_tx: Mutex::new(None),
             vault_watcher: Mutex::new(None),
+            transient_vault_path: Mutex::new(None),
+            pending_markdown_files: Mutex::new(startup_markdown_files),
+            initial_vault_services_deferred: AtomicBool::new(defer_initial_vault_services),
+            vault_services_generation: AtomicU64::new(0),
+            vault_services_ready_generation: AtomicU64::new(0),
         })
         .invoke_handler(tauri::generate_handler![
             get_desktop_state,
+            take_pending_markdown_files,
             agent_status,
             select_and_set_vault,
             set_vault_path,
+            open_markdown_file,
             list_notes_tree,
             read_note,
             read_asset,
@@ -2562,17 +2805,23 @@ pub fn run() {
         ])
         .setup(|app| {
             let handle = app.handle().clone();
-            if let Ok(vault) = ensure_vault_path(&handle) {
-                if let Err(err) = allow_vault_assets(&handle, &vault) {
-                    eprintln!("[inkfellow] HTML asset scope setup failed: {err}");
+            let defer_vault_services = handle
+                .state::<AppState>()
+                .initial_vault_services_deferred
+                .load(AtomicOrdering::SeqCst);
+            if !defer_vault_services {
+                if let Ok(vault) = ensure_vault_path(&handle) {
+                    if let Err(err) = allow_vault_assets(&handle, &vault) {
+                        eprintln!("[inkfellow] HTML asset scope setup failed: {err}");
+                    }
+                    ensure_git_repo(&vault);
                 }
-                ensure_git_repo(&vault);
-            }
-            if let Err(err) = start_vault_watcher(&handle) {
-                eprintln!("[inkfellow] vault watcher failed: {err}");
+                if let Err(err) = start_vault_watcher(&handle) {
+                    eprintln!("[inkfellow] vault watcher failed: {err}");
+                }
+                spawn_agent(&handle);
             }
             start_sync_worker(&handle);
-            spawn_agent(&handle);
             start_system_proxy_watcher(handle);
             Ok(())
         })
@@ -2682,6 +2931,50 @@ mod proxy_tests {
             proxy_restart_action(SidecarRunState::Unreachable, 0, 3),
             ProxyRestartAction::Restart
         );
+    }
+}
+
+#[cfg(test)]
+mod markdown_open_tests {
+    use super::*;
+
+    #[test]
+    fn collects_existing_markdown_arguments_and_ignores_other_values() {
+        let directory = std::env::temp_dir().join(format!(
+            "inkfellow-markdown-open-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let markdown = directory.join("带 空格的笔记.MD");
+        let text = directory.join("note.txt");
+        fs::write(&markdown, b"# Test\n").unwrap();
+        fs::write(&text, b"not markdown").unwrap();
+
+        let files = markdown_files_from_args(
+            vec![
+                OsString::from("带 空格的笔记.MD"),
+                markdown.clone().into_os_string(),
+                text.into_os_string(),
+                OsString::from("--flag"),
+            ],
+            &directory,
+        );
+
+        assert_eq!(files, vec![fs::canonicalize(&markdown).unwrap()]);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn rejects_directories_and_missing_markdown_files() {
+        let directory = std::env::temp_dir().join(format!(
+            "inkfellow-markdown-open-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+
+        assert!(canonical_markdown_file(&directory).is_err());
+        assert!(canonical_markdown_file(&directory.join("missing.md")).is_err());
+        fs::remove_dir_all(directory).unwrap();
     }
 }
 
