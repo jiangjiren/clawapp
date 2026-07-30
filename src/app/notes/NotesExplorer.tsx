@@ -13,7 +13,7 @@ import type {
 } from "@/lib/notesTypes";
 import { extractHeadings, type TocEntry } from "@/lib/noteToc";
 import dynamic from "next/dynamic";
-import NotesHtml from "./NotesHtml";
+import NotesHtml, { type NotesHtmlHandle } from "./NotesHtml";
 import NotesMarkdown from "./NotesMarkdown";
 import { NoteTabs, useNoteTabs } from "./NoteTabs";
 import NotesGit from "./NotesGit";
@@ -74,6 +74,11 @@ type LoadNoteOptions = {
   updateHistory?: boolean;
 };
 
+type NavHistoryEntry = {
+  path: string;
+  hash: string | null;
+};
+
 const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
 
 const isSearchQueryReady = (value: string) => {
@@ -81,6 +86,55 @@ const isSearchQueryReady = (value: string) => {
   return trimmed.length >= 2 || /[^\u0000-\u007f]/.test(trimmed);
 };
 const getParentFolder = (filePath: string) => filePath.includes("/") ? filePath.split("/").slice(0, -1).join("/") : "";
+const normalizeNavigationHash = (hash?: string | null) => {
+  const value = hash?.trim() ?? "";
+  if (!value) return null;
+  return value.startsWith("#") ? value : `#${value}`;
+};
+
+const resolveRelativeVaultPath = (base: string, relativePath: string) => {
+  const output = base ? base.split("/") : [];
+  const segments = relativePath.replace(/\\/g, "/").replace(/^\.\//, "").split("/");
+  for (const segment of segments) {
+    if (segment === "..") output.pop();
+    else if (segment && segment !== ".") output.push(segment);
+  }
+  return output.join("/");
+};
+
+const resolveHtmlLinkTarget = (
+  rawHref: string,
+  currentPath: string,
+  files: NotesFileNode[],
+): { path: string; hash: string | null } | null => {
+  const hashIndex = rawHref.indexOf("#");
+  const pathAndQuery = hashIndex === -1 ? rawHref : rawHref.slice(0, hashIndex);
+  const queryIndex = pathAndQuery.indexOf("?");
+  const encodedPath = queryIndex === -1 ? pathAndQuery : pathAndQuery.slice(0, queryIndex);
+  if (!encodedPath) return null;
+
+  const decodedPath = decodeLoose(encodedPath).replace(/\\/g, "/");
+  const resolved = decodedPath.startsWith("/")
+    ? resolveRelativeVaultPath("", decodedPath.replace(/^\/+/, ""))
+    : resolveRelativeVaultPath(getParentFolder(currentPath), decodedPath);
+  const candidates = [resolved];
+  if (!/\.[^/]+$/.test(resolved)) {
+    candidates.push(`${resolved}.md`, `${resolved}.html`, `${resolved}.htm`);
+  }
+
+  const exact = files.find((file) => candidates.includes(file.path));
+  const matched = exact ?? files.find((file) =>
+    candidates.some((candidate) => file.path.toLocaleLowerCase() === candidate.toLocaleLowerCase()),
+  );
+  if (!matched) return null;
+
+  const fragment = hashIndex === -1 ? null : decodeLoose(rawHref.slice(hashIndex + 1));
+  return {
+    path: matched.path,
+    hash: fragment === null ? null : normalizeNavigationHash(fragment),
+  };
+};
+
 const sanitizeEntryName = (value: string) => value.trim().replace(/[/\\:*?"<>|]/g, "-");
 const replaceMovedPath = (currentPath: string, oldPath: string, nextPath: string, kind: TreeActionTarget["kind"]) => {
   if (kind === "file") {
@@ -735,6 +789,7 @@ export default function NotesExplorer() {
   const suppressScrollSaveRef = useRef(false);
   const noteUpdatedAtRef = useRef<string | null>(null);
   const claudeFrameRef = useRef<HTMLIFrameElement>(null);
+  const htmlPreviewRef = useRef<NotesHtmlHandle>(null);
   // iframe 是否已 load 完：load 前 postMessage 会丢，提问先暂存到 pending，就绪后补投
   const claudeFrameReadyRef = useRef(false);
   const pendingClaudeAskRef = useRef<string | null>(null);
@@ -742,13 +797,17 @@ export default function NotesExplorer() {
   const isSilentReloadRef = useRef(false);
   const syncTocRef = useRef<(() => void) | null>(null);
   const [activeTocSlug, setActiveTocSlug] = useState("");
+  const [htmlToc, setHtmlToc] = useState<{ path: string; entries: TocEntry[] }>({
+    path: "",
+    entries: [],
+  });
   const [isScrolled, setIsScrolled] = useState(false);
   const [aiStatus, setAiStatus] = useState<"idle" | "thinking" | "done">("idle");
   const aiStatusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [keyboardHeight, setKeyboardHeight] = useState(0);
 
   // ── 导航历史（前进/后退）─────────────────────────────
-  const navHistoryRef = useRef<string[]>([]);
+  const navHistoryRef = useRef<NavHistoryEntry[]>([]);
   const navCursorRef = useRef<number>(-1);
   const [navCanGoBack, setNavCanGoBack] = useState(false);
   const [navCanGoForward, setNavCanGoForward] = useState(false);
@@ -977,12 +1036,12 @@ export default function NotesExplorer() {
   }, [tree, captureFolder]);
 
   const articleTocEntries = useMemo(() => {
-    if (!note || /\.html?$/i.test(note.path)) {
-      return [];
+    if (!note) return [];
+    if (/\.html?$/i.test(note.path)) {
+      return htmlToc.path === note.path ? htmlToc.entries : [];
     }
-
     return extractHeadings(note.content);
-  }, [note]);
+  }, [htmlToc, note]);
 
   useEffect(() => {
     setActiveTocSlug(articleTocEntries[0]?.slug ?? "");
@@ -990,6 +1049,11 @@ export default function NotesExplorer() {
 
   useEffect(() => {
     if (articleTocEntries.length === 0) {
+      return;
+    }
+    if (/\.html?$/i.test(note?.path ?? "")) {
+      // HTML 标题位于 iframe 文档中，由 NotesHtml 按外层 reader 的滚动位置同步。
+      syncTocRef.current = null;
       return;
     }
 
@@ -1036,7 +1100,7 @@ export default function NotesExplorer() {
       window.clearTimeout(timeout);
       syncTocRef.current = null;
     };
-  }, [articleTocEntries]);
+  }, [articleTocEntries, note?.path]);
 
   useEffect(() => {
     // 底部抽屉（手机式）适用条件：窄屏，或任意竖屏（平板/桌面竖屏都跟手机一致）。
@@ -1340,12 +1404,14 @@ export default function NotesExplorer() {
     };
   }, [saveCurrentScrollSnapshot]);
 
-  const pushNavHistory = useCallback((p: string) => {
+  const pushNavHistory = useCallback((path: string, hash?: string | null) => {
     const hist = navHistoryRef.current;
     const cur = navCursorRef.current;
-    if (hist[cur] !== p) {
+    const entry = { path, hash: normalizeNavigationHash(hash) };
+    const current = hist[cur];
+    if (current?.path !== entry.path || current.hash !== entry.hash) {
       const next = hist.slice(0, cur + 1);
-      next.push(p);
+      next.push(entry);
       if (next.length > 200) next.shift();
       navHistoryRef.current = next;
       navCursorRef.current = next.length - 1;
@@ -1388,7 +1454,7 @@ export default function NotesExplorer() {
           nextUrl.searchParams.set("file", path);
           nextUrl.hash = "";
           window.history.replaceState(null, "", nextUrl);
-          pushNavHistory(path);
+          pushNavHistory(path, null);
         }
         suppressScrollSaveRef.current = false;
         return;
@@ -1419,9 +1485,9 @@ export default function NotesExplorer() {
         if (options.updateHistory !== false) {
           const nextUrl = new URL(window.location.href);
           nextUrl.searchParams.set("file", payload.path);
-          nextUrl.hash = hash ?? "";
+          nextUrl.hash = normalizeNavigationHash(hash) ?? "";
           window.history.replaceState(null, "", nextUrl);
-          pushNavHistory(payload.path);
+          pushNavHistory(payload.path, hash);
         }
 
         let scrollSnapshot: ScrollSnapshot | null = null;
@@ -1866,7 +1932,14 @@ export default function NotesExplorer() {
 
     pendingHashRef.current = null;
     window.requestAnimationFrame(() => {
-      const targetId = decodeURIComponent(pendingHash.replace(/^#/, ""));
+      if (/\.html?$/i.test(note?.path ?? "")) {
+        htmlPreviewRef.current?.scrollToFragment(pendingHash, {
+          behavior: "auto",
+          recordHistory: false,
+        });
+        return;
+      }
+      const targetId = decodeLoose(pendingHash.replace(/^#/, ""));
       document.getElementById(targetId)?.scrollIntoView({ block: "start" });
     });
   }, [noteState, note?.path]);
@@ -2534,14 +2607,76 @@ export default function NotesExplorer() {
     [loadNote],
   );
 
+  const handleHtmlHeadingsChange = useCallback((path: string, entries: TocEntry[]) => {
+    setHtmlToc((current) => {
+      const unchanged =
+        current.path === path &&
+        current.entries.length === entries.length &&
+        current.entries.every((entry, index) => {
+          const next = entries[index];
+          return (
+            next?.level === entry.level &&
+            next.text === entry.text &&
+            next.slug === entry.slug
+          );
+        });
+      return unchanged ? current : { path, entries };
+    });
+  }, []);
+
+  const handleHtmlHashNavigate = useCallback((fragment: string) => {
+    const path = activePathRef.current;
+    if (!path) return;
+    const hash = normalizeNavigationHash(fragment);
+    const nextUrl = new URL(window.location.href);
+    nextUrl.searchParams.set("file", path);
+    nextUrl.hash = hash ?? "";
+    window.history.replaceState(null, "", nextUrl);
+    pushNavHistory(path, hash);
+  }, [pushNavHistory]);
+
+  const handleHtmlLinkNavigate = useCallback((href: string) => {
+    const currentPath = activePathRef.current;
+    if (!currentPath) return;
+    const target = resolveHtmlLinkTarget(href, currentPath, files);
+    if (!target) return;
+
+    if (target.path === currentPath) {
+      if (target.hash !== null) {
+        htmlPreviewRef.current?.scrollToFragment(target.hash, {
+          behavior: "smooth",
+          recordHistory: true,
+        });
+      }
+      return;
+    }
+    void loadNote(target.path, target.hash);
+  }, [files, loadNote]);
+
+  const navigateToHistoryEntry = useCallback((entry: NavHistoryEntry) => {
+    const nextUrl = new URL(window.location.href);
+    nextUrl.searchParams.set("file", entry.path);
+    nextUrl.hash = entry.hash ?? "";
+    window.history.replaceState(null, "", nextUrl);
+
+    if (entry.path === activePathRef.current && /\.html?$/i.test(entry.path)) {
+      htmlPreviewRef.current?.scrollToFragment(entry.hash ?? "", {
+        behavior: "auto",
+        recordHistory: false,
+      });
+      return;
+    }
+    void loadNote(entry.path, entry.hash, { updateHistory: false });
+  }, [loadNote]);
+
   const handleNavBack = useCallback(() => {
     const cur = navCursorRef.current;
     if (cur <= 0) return;
     navCursorRef.current = cur - 1;
     setNavCanGoBack(navCursorRef.current > 0);
     setNavCanGoForward(true);
-    void loadNote(navHistoryRef.current[navCursorRef.current], null, { updateHistory: false });
-  }, [loadNote]);
+    navigateToHistoryEntry(navHistoryRef.current[navCursorRef.current]);
+  }, [navigateToHistoryEntry]);
 
   const handleNavForward = useCallback(() => {
     const cur = navCursorRef.current;
@@ -2550,8 +2685,8 @@ export default function NotesExplorer() {
     navCursorRef.current = cur + 1;
     setNavCanGoBack(true);
     setNavCanGoForward(navCursorRef.current < hist.length - 1);
-    void loadNote(hist[navCursorRef.current], null, { updateHistory: false });
-  }, [loadNote]);
+    navigateToHistoryEntry(hist[navCursorRef.current]);
+  }, [navigateToHistoryEntry]);
 
   const handleCreateWikiNote = useCallback(
     (noteName: string) => {
@@ -2929,8 +3064,15 @@ export default function NotesExplorer() {
 
   const handleSelectTocHeading = useCallback(
     (slug: string) => {
-      const target = document.getElementById(slug);
-      target?.scrollIntoView({ behavior: "smooth", block: "start" });
+      if (/\.html?$/i.test(activePathRef.current ?? "")) {
+        htmlPreviewRef.current?.scrollToHeading(slug, {
+          behavior: "smooth",
+          recordHistory: true,
+        });
+      } else {
+        const target = document.getElementById(slug);
+        target?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
       setActiveTocSlug(slug);
 
       if (isMobileViewport) {
@@ -3696,8 +3838,16 @@ export default function NotesExplorer() {
         </div>
       </div>
 
-      <section className={`${styles.reader} ${isDashboardChatMode ? styles.readerHidden : ""} ${isDesktopGitView ? styles.readerGitMode : ""}`} ref={readerRef} onDoubleClick={handleReaderDoubleClick}>
-        <header className={`${styles.readerHeader} ${isScrolled ? styles.readerHeaderScrolled : ""}`}>
+      <section
+        className={`${styles.reader} ${isDashboardChatMode ? styles.readerHidden : ""} ${isDesktopGitView ? styles.readerGitMode : ""}`}
+        ref={readerRef}
+        onDoubleClick={handleReaderDoubleClick}
+        data-notes-reader
+      >
+        <header
+          className={`${styles.readerHeader} ${isScrolled ? styles.readerHeaderScrolled : ""}`}
+          data-notes-reader-header
+        >
           <div className={styles.readerActions}>
             <button
               type="button"
@@ -3853,7 +4003,6 @@ export default function NotesExplorer() {
                           className={styles.moreMenuItem}
                           role="menuitem"
                           onClick={() => { setMoreMenuOpen(false); handleTocToggle(); }}
-                          disabled={/\.html?$/i.test(note.path ?? "")}
                         >
                           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                             <line x1="8" y1="6" x2="21" y2="6" /><line x1="8" y1="12" x2="21" y2="12" /><line x1="8" y1="18" x2="21" y2="18" />
@@ -4083,7 +4232,17 @@ export default function NotesExplorer() {
 
             {noteState === "ready" && note ? (
               /\.html?$/i.test(note.path) ? (
-                <NotesHtml html={note.content} onNavigate={handleMarkdownNavigate} />
+                <NotesHtml
+                  ref={htmlPreviewRef}
+                  html={note.content}
+                  notePath={note.path}
+                  initialHash={pendingHashRef.current}
+                  onNavigate={handleMarkdownNavigate}
+                  onLinkNavigate={handleHtmlLinkNavigate}
+                  onHashNavigate={handleHtmlHashNavigate}
+                  onHeadingsChange={handleHtmlHeadingsChange}
+                  onActiveHeadingChange={setActiveTocSlug}
+                />
               ) : (
                 <div data-markdown-content>
                   <NotesMarkdown

@@ -31,14 +31,41 @@ const IMAGE_EXTENSIONS = new Set([
 ]);
 
 const MIME_TYPES: Record<string, string> = {
+  ".aac": "audio/aac",
   ".avif": "image/avif",
+  ".css": "text/css; charset=utf-8",
+  ".csv": "text/csv; charset=utf-8",
+  ".eot": "application/vnd.ms-fontobject",
   ".gif": "image/gif",
+  ".htm": "text/html; charset=utf-8",
+  ".html": "text/html; charset=utf-8",
+  ".ico": "image/x-icon",
   ".jpeg": "image/jpeg",
   ".jpg": "image/jpeg",
+  ".js": "text/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".m4a": "audio/mp4",
+  ".md": "text/markdown; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".mp3": "audio/mpeg",
+  ".mp4": "video/mp4",
+  ".oga": "audio/ogg",
+  ".ogg": "audio/ogg",
+  ".ogv": "video/ogg",
+  ".otf": "font/otf",
   ".pdf": "application/pdf",
   ".png": "image/png",
   ".svg": "image/svg+xml",
+  ".ttf": "font/ttf",
+  ".txt": "text/plain; charset=utf-8",
+  ".wasm": "application/wasm",
+  ".wav": "audio/wav",
+  ".webm": "video/webm",
+  ".webmanifest": "application/manifest+json; charset=utf-8",
   ".webp": "image/webp",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+  ".xml": "application/xml; charset=utf-8",
 };
 
 export class VaultAccessError extends Error {
@@ -284,6 +311,24 @@ export const readVaultDocument = async (relativePath: string) => {
     size: stat.size,
     updatedAt: stat.mtime.toUTCString(),
     fileName: path.basename(resolved.relativePath),
+  };
+};
+
+// HTML 预览的相对资源（CSS、脚本、字体、图片、音视频等）。路径仍统一经过
+// resolveExistingVaultPath，沿用 vault 边界、排除目录和符号链接校验。
+export const readVaultHtmlAsset = async (relativePath: string) => {
+  const resolved = await resolveExistingVaultPath(relativePath);
+  const stat = await fs.stat(resolved.absolutePath);
+  if (!stat.isFile()) {
+    throw new VaultAccessError("HTML preview asset not found.", 404);
+  }
+
+  const ext = path.extname(resolved.relativePath).toLowerCase();
+  return {
+    body: await fs.readFile(resolved.absolutePath),
+    contentType: MIME_TYPES[ext] ?? "application/octet-stream",
+    size: stat.size,
+    updatedAt: stat.mtime.toUTCString(),
   };
 };
 
