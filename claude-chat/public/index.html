@@ -618,6 +618,216 @@ html, body {
   box-shadow: var(--shadow-soft), 0 0 0 3px var(--accent-ring);
 }
 
+/* ── Steering tray ──
+   待追加消息留在 composer 里，直到服务端确认已经交给 AI；这样“按下 Enter”
+   和“已经进入对话”不会被混成同一个状态。视觉上沿用文档批注，而不是另起一套卡片。 */
+#steering-tray {
+  display: none;
+  border-bottom: 1px solid var(--border);
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--accent) 5%, transparent), transparent 42%),
+    var(--bg-document);
+}
+#steering-tray.visible { display: block; }
+.steering-tray-head {
+  min-height: 29px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px 4px 11px;
+  color: var(--text-dim);
+}
+.steering-tray-mark {
+  width: 12px;
+  height: 12px;
+  color: var(--accent);
+  flex: 0 0 auto;
+}
+#steering-tray-title {
+  min-width: 0;
+  flex: 1;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.015em;
+}
+#steering-clear {
+  min-height: 21px;
+  padding: 2px 5px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+#steering-clear:hover { background: var(--bg3); color: var(--text); }
+#steering-list {
+  display: flex;
+  flex-direction: column;
+  padding: 0 6px 6px;
+  gap: 3px;
+}
+.steering-item {
+  position: relative;
+  display: grid;
+  grid-template-columns: 15px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 5px;
+  min-height: 39px;
+  padding: 5px 4px 5px 5px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--bg) 62%, transparent);
+  transition: background 0.14s, border-color 0.14s, opacity 0.14s, transform 0.14s;
+}
+.steering-item:hover,
+.steering-item:focus-within {
+  background: var(--bg3);
+  border-color: var(--border);
+}
+.steering-item.dragging { opacity: 0.45; }
+.steering-item.drag-over {
+  border-color: color-mix(in srgb, var(--accent) 48%, transparent);
+  transform: translateY(1px);
+}
+.steering-grip {
+  align-self: stretch;
+  display: grid;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: color-mix(in srgb, var(--text-dim) 72%, transparent);
+  cursor: grab;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  letter-spacing: -2px;
+  user-select: none;
+}
+.steering-grip:active { cursor: grabbing; }
+.steering-copy { min-width: 0; }
+.steering-summary {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: 11.5px;
+  line-height: 1.35;
+}
+.steering-meta {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  margin-top: 2px;
+  color: var(--text-dim);
+  font-size: 9.5px;
+  line-height: 1.25;
+}
+.steering-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+.steering-state::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  border: 1px solid var(--text-dim);
+  opacity: 0.8;
+}
+.steering-item[data-state="sending"] .steering-state::before {
+  border-color: var(--accent);
+  border-top-color: transparent;
+  animation: steeringSpin var(--beat-half) linear infinite;
+}
+.steering-item[data-state="paused"] .steering-state::before {
+  border: 0;
+  border-radius: 1px;
+  width: 2px;
+  height: 6px;
+  background: var(--yellow);
+  box-shadow: 3px 0 0 var(--yellow);
+  margin-right: 3px;
+}
+@keyframes steeringSpin { to { transform: rotate(360deg); } }
+.steering-attachments {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.steering-actions {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+}
+.steering-action {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+}
+.steering-action:hover:not(:disabled) { background: var(--bg-document); color: var(--text); }
+.steering-action.remove:hover { color: var(--red); }
+.steering-action:disabled { opacity: 0.24; cursor: default; }
+.steering-edit {
+  grid-column: 2 / -1;
+  min-width: 0;
+  padding: 1px 1px 2px 0;
+}
+.steering-edit textarea {
+  width: 100%;
+  min-height: 48px;
+  max-height: 104px;
+  resize: vertical;
+  padding: 6px 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  outline: none;
+  background: var(--bg-document);
+  color: var(--text);
+  font: inherit;
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+.steering-edit textarea:focus {
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  box-shadow: 0 0 0 2px var(--accent-ring);
+}
+.steering-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 4px;
+  margin-top: 4px;
+}
+.steering-edit-actions button {
+  min-height: 23px;
+  padding: 2px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 10.5px;
+  cursor: pointer;
+}
+.steering-edit-actions button:hover { background: var(--bg3); color: var(--text); }
+.steering-edit-actions .save { background: var(--accent); color: #fff; }
+.steering-edit-actions .save:hover { background: var(--accent-hover); color: #fff; }
+
 /* context chip — full-width header row inside composer */
 #context-chip {
   display: none;
@@ -824,7 +1034,8 @@ html, body {
 }
 #prompt::placeholder { color: var(--text-dim); opacity: 0.85; }
 
-#send {
+#send,
+#stop-generation {
   flex-shrink: 0;
   width: 30px;
   height: 30px;
@@ -840,8 +1051,16 @@ html, body {
 #send:disabled { background: color-mix(in srgb, var(--text-dim) 35%, transparent); cursor: default; }
 #send:not(:disabled):hover { background: var(--accent-hover); }
 #send:not(:disabled):active { transform: scale(0.93); }
-#send.stopping { background: var(--red); }
-#send.stopping:hover { background: #a02d22; }
+#stop-generation {
+  margin-right: 3px;
+  border: 1px solid color-mix(in srgb, var(--red) 24%, var(--border));
+  background: color-mix(in srgb, var(--red) 8%, var(--bg-document));
+  color: var(--red);
+}
+#stop-generation[hidden] { display: none; }
+#stop-generation:not(:disabled):hover { background: color-mix(in srgb, var(--red) 14%, var(--bg-document)); }
+#stop-generation:not(:disabled):active { transform: scale(0.93); }
+#stop-generation:disabled { opacity: 0.42; cursor: default; }
 
 #messages::-webkit-scrollbar { width: 5px; }
 #messages::-webkit-scrollbar-track { background: transparent; }
@@ -1345,6 +1564,14 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
     padding: 0 6px;
     font-size: 11px;
     max-width: 96px;
+  }
+  .steering-item {
+    grid-template-columns: 12px minmax(0, 1fr) auto;
+    gap: 3px;
+  }
+  .steering-action {
+    width: 20px;
+    height: 22px;
   }
 }
 .history-head {
@@ -2037,6 +2264,7 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
   .bga-item[data-s="running"] .bga-idot,
   .sq-row[data-s="running"] .sq-dot,
   .todo-i.now .todo-b::after,
+  .steering-item[data-state="sending"] .steering-state::before,
   #git-banner-dot {
     animation: none !important;
     opacity: 0.55;          /* 半透明 = 进行中，实心 = 已结束 */
@@ -2247,6 +2475,14 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
       <div class="bga-body"><div class="bga-clip"><div class="bga-list"></div></div></div>
     </div>
     <div id="composer">
+      <section id="steering-tray" aria-label="待追加到当前任务的消息">
+        <div class="steering-tray-head">
+          <svg class="steering-tray-mark" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M2 3.5h5.5a3.5 3.5 0 0 1 0 7H4M4 8.3 1.8 10.5 4 12.7" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span id="steering-tray-title">追加到当前任务</span>
+          <button id="steering-clear" type="button">清空</button>
+        </div>
+        <div id="steering-list" role="list" aria-live="polite"></div>
+      </section>
       <div id="image-chip"></div>
       <div id="mention-chips" aria-label="已选择的笔记上下文"></div>
       <div id="quote-chip">
@@ -2353,12 +2589,14 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
             </div>
           </div>
         </div>
+        <button id="stop-generation" type="button" aria-label="停止当前回答" title="停止当前回答" hidden>
+          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true">
+            <rect x="1" y="1" width="8" height="8" rx="1.5" fill="currentColor"/>
+          </svg>
+        </button>
         <button id="send" aria-label="发送">
           <svg id="icon-send" width="14" height="14" viewBox="0 0 14 14" fill="none">
             <path d="M7 12V2M7 2L2.5 6.5M7 2L11.5 6.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-          <svg id="icon-stop" width="10" height="10" viewBox="0 0 10 10" fill="none" style="display:none">
-            <rect x="1" y="1" width="8" height="8" rx="1.5" fill="currentColor"/>
           </svg>
         </button>
       </div>
@@ -2370,6 +2608,11 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
 const messagesEl  = document.getElementById("messages");
 const promptEl    = document.getElementById("prompt");
 const sendBtn     = document.getElementById("send");
+const stopGenerationBtn = document.getElementById("stop-generation");
+const steeringTrayEl = document.getElementById("steering-tray");
+const steeringListEl = document.getElementById("steering-list");
+const steeringTrayTitleEl = document.getElementById("steering-tray-title");
+const steeringClearBtn = document.getElementById("steering-clear");
 const popupEl     = document.getElementById("slash-popup");
 const askUserQuestionEl = document.getElementById("ask-user-question");
 const contextChip = document.getElementById("context-chip");
@@ -2434,7 +2677,6 @@ const authViewForm  = document.getElementById("auth-view-form");
 const authBackBtn   = document.getElementById("auth-back");
 const authFormStatusEl = document.getElementById("auth-form-status");
 const iconSend = document.getElementById("icon-send");
-const iconStop = document.getElementById("icon-stop");
 
 function showInlineError(text) {
   const el = document.createElement("div");
@@ -2452,8 +2694,10 @@ let resetRequested = false;
 let pendingRequestDraft = null;
 let activeRequestId = null;
 let requestRetryTimer = null;
-const followUpQueue = [];
-let followUpDrainTimer = null;
+const steeringQueue = [];
+const steeringRemovalPending = new Set();
+let steeringEditingId = null;
+let steeringDraggingId = null;
 let errorCompletionTimer = null;
 let connectionStateSyncTimer = null;
 let genChipEl = null;
@@ -3714,11 +3958,17 @@ function setGenerating(v, notifyParent = true) {
     cleanupRunningTools();
   }
 
-  sendBtn.disabled = v && stopRequested && !stopResendPending;
-  sendBtn.classList.toggle("stopping", v);
-  sendBtn.setAttribute("aria-label", v ? "停止" : "发送");
-  iconSend.style.display = v ? "none" : "";
-  iconStop.style.display = v ? "" : "none";
+  const socketReady = Boolean(ws && ws.readyState === WebSocket.OPEN);
+  sendBtn.disabled = resetRequested || !socketReady;
+  sendBtn.setAttribute("aria-label", v ? "追加到当前任务" : "发送");
+  sendBtn.title = v ? "追加到当前任务（Enter）" : "发送（Enter）";
+  iconSend.style.display = "";
+  stopGenerationBtn.hidden = !v;
+  stopGenerationBtn.disabled = !socketReady || (stopRequested && !stopResendPending);
+  stopGenerationBtn.setAttribute(
+    "aria-label",
+    stopRequested && !stopResendPending ? "正在停止当前回答" : "停止当前回答",
+  );
   // 前台轮结束时，后台任务若还在跑要接手表达 —— 发送键保持可用
   updateBackgroundActivity();
   if (notifyParent) postParentMessage({ type: "ai-generating-state", isGenerating: v });
@@ -3911,23 +4161,29 @@ let ws = null;
 function connect() {
   ws = new WebSocket(wsUrl);
   ws.onopen = () => {
-    sendBtn.disabled = isGenerating && stopRequested && !stopResendPending;
+    sendBtn.disabled = resetRequested;
+    stopGenerationBtn.disabled = !isGenerating || (stopRequested && !stopResendPending);
     if (resetRequested) sendResetRequest();
     else resendPendingRequest();
+    if (!pendingRequestDraft) flushLocalSteering();
     requestSkillRefresh(true);
     postParentMessage({ type: "agent-ready" });
     clearTimeout(connectionStateSyncTimer);
     connectionStateSyncTimer = setTimeout(() => {
       if (ws?.readyState !== WebSocket.OPEN) return;
       postParentMessage({ type: "ai-generating-state", isGenerating });
-      if (!isGenerating) scheduleFollowUpDrain();
+      flushLocalSteering();
     }, 100);
   };
   ws.onclose = () => {
     clearTimeout(connectionStateSyncTimer);
     if (stopRequested) stopResendPending = true;
+    for (const item of steeringQueue) {
+      if (!item.serverOwned && item.sent) item.sent = false;
+    }
     postParentMessage({ type: "agent-not-ready" });
     sendBtn.disabled = true;
+    stopGenerationBtn.disabled = true;
     setTimeout(connect, 3000);
   };
   ws.onerror = () => { };
@@ -4098,7 +4354,6 @@ function finishGenerationAndContinue(requestId = null) {
   resetAssistantState();
   setGenerating(false);
   removeTyping();
-  scheduleFollowUpDrain();
   return true;
 }
 
@@ -5152,6 +5407,7 @@ function handleEvent(ev) {
   // Server heartbeat (every 30s) — only used to keep lastWsEventAt fresh so the
   // dead-socket detector below never fires on a healthy connection.
   if (ev.type === "ping") return;
+  if (handleSteeringEvent(ev)) return;
 
   // 跨厂商子 agent 的工具动作：它跑在独立进程里，事件不会带 parent_tool_use_id
   // 冒泡上来，只能由服务端单独转发，这里补进对应卡片的步骤流。
@@ -5180,7 +5436,10 @@ function handleEvent(ev) {
     messageLog = [];
     currentConvId = null;
     currentSessionId = null;
-    scheduleFollowUpDrain();
+    steeringQueue.length = 0;
+    steeringRemovalPending.clear();
+    steeringEditingId = null;
+    renderSteeringTray();
     return;
   }
 
@@ -5189,6 +5448,7 @@ function handleEvent(ev) {
   if (resetRequested) return;
 
   if (ev.type === "request_ack") {
+    if (ev.state === "running") materializeStartedSteering(ev);
     if (pendingRequestDraft?.userMessageId === ev.userMessageId) {
       pendingRequestDraft = null;
       clearTimeout(requestRetryTimer);
@@ -5202,11 +5462,12 @@ function handleEvent(ev) {
     } else if (activeRequestId && ev.userMessageId === activeRequestId) {
       finishGenerationAndContinue(ev.userMessageId);
     }
-    if (!isGenerating) scheduleFollowUpDrain();
+    flushLocalSteering();
     return;
   }
 
   if (ev.type === "request_started") {
+    materializeStartedSteering(ev);
     if (pendingRequestDraft?.userMessageId === ev.userMessageId) {
       pendingRequestDraft = null;
       clearTimeout(requestRetryTimer);
@@ -5215,6 +5476,7 @@ function handleEvent(ev) {
     activeRequestId = ev.userMessageId || activeRequestId;
     setGenerating(true);
     if (!document.getElementById("typing")) addTyping();
+    flushLocalSteering();
     return;
   }
 
@@ -5257,8 +5519,8 @@ function handleEvent(ev) {
       finishGenerationAndContinue(activeRequestId);
     } else {
       setGenerating(false);
-      scheduleFollowUpDrain();
     }
+    flushLocalSteering();
     return;
   }
 
@@ -5266,6 +5528,7 @@ function handleEvent(ev) {
     if (ev.userMessageId) activeRequestId = ev.userMessageId;
     setGenerating(true);
     updateTypingStatus(`服务端排队中${ev.position ? `（第 ${ev.position} 条）` : ""}...`);
+    flushLocalSteering();
     return;
   }
 
@@ -6092,6 +6355,7 @@ function takeRequestDraft(textOverride = null, { consumeComposer = textOverride 
   if (!rawText) return null;
   const providerDispatch = parseProviderDispatchText(rawText);
   const draft = {
+    composerText: rawText,
     text: providerDispatch?.task || rawText,
     displayText: providerDispatch?.displayText || null,
     dispatchProvider: providerDispatch?.profile.id || null,
@@ -6128,19 +6392,644 @@ function takeRequestDraft(textOverride = null, { consumeComposer = textOverride 
   return draft;
 }
 
-function showFollowUpQueueStatus() {
-  if (followUpQueue.length === 0) return;
-  const text = `已排队 ${followUpQueue.length} 条后续消息`;
-  updateTypingStatus(text);
-  if (assistantEl) {
-    if (!genChipEl) showGenChip(text);
-    else updateGenChip(text);
+function prepareRequestDraft(draft) {
+  const mentionedNotes = Array.isArray(draft.mentionedNotes) ? draft.mentionedNotes : [];
+  const composerText = String(draft.composerText || draft.text || "").trim();
+  draft.composerText = composerText;
+  draft.displayText = draft.dispatchProvider
+    ? composerText
+    : (mentionedNotes.length > 0
+      ? `${draft.text}\n\n引用笔记：${mentionedNotes.map((note) => `@${note.title}`).join(" · ")}`
+      : draft.text);
+
+  const parts = [];
+  if (draft.noteFile) parts.push(`当前查看的文件：${draft.noteFile}`);
+  if (mentionedNotes.length > 0) {
+    parts.push(
+      "用户指定以下 vault 笔记作为本轮上下文。请优先读取这些文件，并基于其中内容回答：\n"
+      + mentionedNotes.map((note) => `- ${JSON.stringify(note.path)}`).join("\n"),
+    );
+  }
+  if (draft.quote) {
+    const sectionHint = draft.quote.section ? `（「${draft.quote.section}」章节）` : "";
+    let anchor = "";
+    if (draft.quote.prefix || draft.quote.suffix) {
+      const pre = draft.quote.prefix ? `…${draft.quote.prefix}` : "";
+      const suf = draft.quote.suffix ? `${draft.quote.suffix}…` : "";
+      anchor = `\n位置锚点：${pre}【${draft.quote.text}】${suf}`;
+    }
+    parts.push(`用户引用了以下文段${sectionHint}：\n"${draft.quote.text}"${anchor}`);
+  }
+  parts.push(draft.text);
+  draft.prompt = parts.join("\n\n");
+  return draft;
+}
+
+function requestPayloadForDraft(draft, deliveryMode = null) {
+  prepareRequestDraft(draft);
+  const payload = {
+    conversationId: draft.conversationId,
+    userMessageId: draft.userMessageId,
+    displayText: draft.displayText,
+    composerText: draft.composerText,
+    prompt: draft.prompt,
+    model: draft.model,
+    permissionMode: draft.permissionMode,
+    effort: draft.effort,
+    profileId: draft.profileId,
+  };
+  if (deliveryMode) payload.deliveryMode = deliveryMode;
+  if (draft.dispatchProvider) {
+    payload.dispatchProvider = draft.dispatchProvider;
+    payload.dispatchReason = draft.dispatchReason;
+  }
+  if (draft.images?.length > 0) {
+    payload.images = draft.images.map((image) => ({ data: image.data, mediaType: image.mediaType }));
+  }
+  return payload;
+}
+
+function normalizeSteeringEvent(raw = {}) {
+  return {
+    ...raw,
+    id: String(raw.userMessageId || raw.steeringId || ""),
+    conversationId: raw.conversationId || currentConvId || null,
+    displayText: String(raw.displayText || raw.text || ""),
+    composerText: String(raw.composerText || raw.displayText || raw.text || ""),
+    position: Number.isFinite(Number(raw.position)) ? Number(raw.position) : null,
+    delivery: raw.delivery === "next_turn" ? "next_turn" : "steer",
+    paused: Boolean(raw.paused),
+  };
+}
+
+function steeringById(id) {
+  return steeringQueue.find((item) => item.id === id) || null;
+}
+
+function steeringStateLabel(item) {
+  if (item.removing) return "正在移除";
+  if (item.paused || item.status === "paused") return "已暂停";
+  if (item.status === "sending") return "正在加入";
+  if (item.delivery === "next_turn") return "等待 AI 接收";
+  return "等待当前步骤";
+}
+
+function steeringContextLabel(item) {
+  const bits = [];
+  const imageCount = item.draft?.images?.length || 0;
+  const noteCount = item.draft?.mentionedNotes?.length || 0;
+  if (imageCount) bits.push(`${imageCount} 张图片`);
+  if (noteCount) bits.push(`${noteCount} 篇笔记`);
+  if (item.draft?.noteFile) bits.push("当前笔记");
+  if (item.draft?.quote) bits.push("含引用");
+  return bits.join(" · ");
+}
+
+function steeringAction(label, title, className, onClick, disabled = false) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = `steering-action ${className}`;
+  button.textContent = label;
+  button.title = title;
+  button.setAttribute("aria-label", title);
+  button.disabled = disabled;
+  button.addEventListener("click", onClick);
+  return button;
+}
+
+function renderSteeringTray() {
+  const count = steeringQueue.length;
+  steeringTrayEl.classList.toggle("visible", count > 0);
+  steeringTrayEl.hidden = count === 0;
+  steeringTrayTitleEl.textContent = count > 0 ? `追加到当前任务 · ${count}` : "追加到当前任务";
+  steeringListEl.innerHTML = "";
+  if (count === 0) return;
+
+  steeringQueue.forEach((item, index) => {
+    const row = document.createElement("div");
+    row.className = "steering-item";
+    row.dataset.id = item.id;
+    row.dataset.state = item.paused ? "paused" : item.status;
+    row.setAttribute("role", "listitem");
+    row.draggable = steeringEditingId !== item.id;
+
+    const grip = document.createElement("button");
+    grip.type = "button";
+    grip.className = "steering-grip";
+    grip.textContent = "⋮⋮";
+    grip.title = "拖动调整顺序";
+    grip.setAttribute("aria-label", "拖动调整顺序");
+    grip.tabIndex = -1;
+    row.appendChild(grip);
+
+    if (steeringEditingId === item.id) {
+      const edit = document.createElement("div");
+      edit.className = "steering-edit";
+      const textarea = document.createElement("textarea");
+      textarea.value = item.draft?.composerText || item.displayText || "";
+      textarea.setAttribute("aria-label", "编辑待追加消息");
+      const actions = document.createElement("div");
+      actions.className = "steering-edit-actions";
+      const cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.textContent = "取消";
+      cancel.addEventListener("click", () => {
+        steeringEditingId = null;
+        renderSteeringTray();
+      });
+      const save = document.createElement("button");
+      save.type = "button";
+      save.className = "save";
+      save.textContent = "保存";
+      save.addEventListener("click", () => updateSteeringItem(item.id, textarea.value));
+      textarea.addEventListener("keydown", (event) => {
+        if (event.isComposing) return;
+        if (event.key === "Escape") {
+          event.preventDefault();
+          cancel.click();
+        } else if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+          event.preventDefault();
+          save.click();
+        }
+      });
+      actions.append(cancel, save);
+      edit.append(textarea, actions);
+      row.appendChild(edit);
+      steeringListEl.appendChild(row);
+      queueMicrotask(() => {
+        textarea.focus();
+        textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+      });
+      return;
+    }
+
+    const copy = document.createElement("div");
+    copy.className = "steering-copy";
+    const summary = document.createElement("div");
+    summary.className = "steering-summary";
+    summary.textContent = item.displayText || item.draft?.composerText || "待追加消息";
+    summary.title = summary.textContent;
+    const meta = document.createElement("div");
+    meta.className = "steering-meta";
+    const state = document.createElement("span");
+    state.className = "steering-state";
+    state.textContent = steeringStateLabel(item);
+    meta.appendChild(state);
+    const context = steeringContextLabel(item);
+    if (context) {
+      const attachments = document.createElement("span");
+      attachments.className = "steering-attachments";
+      attachments.textContent = context;
+      meta.appendChild(attachments);
+    }
+    copy.append(summary, meta);
+    row.appendChild(copy);
+
+    const actions = document.createElement("div");
+    actions.className = "steering-actions";
+    if (item.paused) {
+      actions.appendChild(steeringAction("▶", "继续处理", "resume", () => resumeSteeringItem(item.id)));
+    }
+    actions.append(
+      steeringAction("↑", "上移", "up", () => moveSteeringItem(item.id, -1), index === 0),
+      steeringAction("↓", "下移", "down", () => moveSteeringItem(item.id, 1), index === count - 1),
+      steeringAction("✎", "编辑", "edit", () => {
+        steeringEditingId = item.id;
+        renderSteeringTray();
+      }),
+      steeringAction("×", "删除", "remove", () => removeSteeringItem(item.id)),
+    );
+    row.appendChild(actions);
+
+    row.addEventListener("dblclick", (event) => {
+      if (event.target.closest("button")) return;
+      steeringEditingId = item.id;
+      renderSteeringTray();
+    });
+    row.addEventListener("dragstart", (event) => {
+      steeringDraggingId = item.id;
+      row.classList.add("dragging");
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", item.id);
+    });
+    row.addEventListener("dragover", (event) => {
+      if (!steeringDraggingId || steeringDraggingId === item.id) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "move";
+      row.classList.add("drag-over");
+    });
+    row.addEventListener("dragleave", () => row.classList.remove("drag-over"));
+    row.addEventListener("drop", (event) => {
+      event.preventDefault();
+      row.classList.remove("drag-over");
+      reorderSteeringBefore(steeringDraggingId, item.id);
+    });
+    row.addEventListener("dragend", () => {
+      steeringDraggingId = null;
+      steeringListEl.querySelectorAll(".dragging, .drag-over").forEach((el) => {
+        el.classList.remove("dragging", "drag-over");
+      });
+    });
+    steeringListEl.appendChild(row);
+  });
+}
+
+function sendSteeringCommand(command) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  try {
+    ws.send(JSON.stringify(command));
+    return true;
+  } catch {
+    return false;
   }
 }
 
-function enqueueFollowUp(draft) {
-  followUpQueue.push(draft);
-  showFollowUpQueueStatus();
+function sendSteeringOrder() {
+  const order = steeringQueue
+    .filter((item) => item.serverOwned || item.sent)
+    .map((item) => item.id);
+  if (order.length > 1) sendSteeringCommand({ type: "steering_reorder", order });
+}
+
+function moveSteeringItem(id, delta) {
+  const from = steeringQueue.findIndex((item) => item.id === id);
+  const to = Math.max(0, Math.min(steeringQueue.length - 1, from + delta));
+  if (from < 0 || from === to) return;
+  const [item] = steeringQueue.splice(from, 1);
+  steeringQueue.splice(to, 0, item);
+  renderSteeringTray();
+  sendSteeringOrder();
+}
+
+function reorderSteeringBefore(sourceId, targetId) {
+  if (!sourceId || !targetId || sourceId === targetId) return;
+  const from = steeringQueue.findIndex((item) => item.id === sourceId);
+  let to = steeringQueue.findIndex((item) => item.id === targetId);
+  if (from < 0 || to < 0) return;
+  const [item] = steeringQueue.splice(from, 1);
+  if (from < to) to -= 1;
+  steeringQueue.splice(to, 0, item);
+  renderSteeringTray();
+  sendSteeringOrder();
+}
+
+function updateSteeringItem(id, value) {
+  const item = steeringById(id);
+  const composerText = String(value || "").trim();
+  if (!item || !composerText) return;
+  const providerDispatch = parseProviderDispatchText(composerText);
+  item.draft.composerText = composerText;
+  item.draft.text = providerDispatch?.task || composerText;
+  item.draft.dispatchProvider = providerDispatch?.profile.id || null;
+  item.draft.dispatchReason = providerDispatch ? "用户通过 > 明确指定厂商" : null;
+  prepareRequestDraft(item.draft);
+  item.displayText = item.draft.displayText;
+  steeringEditingId = null;
+  if (item.serverOwned || item.sent) {
+    item.status = "sending";
+    if (!sendSteeringCommand({
+      type: "steering_update",
+      userMessageId: id,
+      displayText: item.draft.displayText,
+      composerText: item.draft.composerText,
+      prompt: item.draft.prompt,
+    })) {
+      item.status = item.paused ? "paused" : "waiting";
+    }
+  }
+  renderSteeringTray();
+}
+
+function removeSteeringItem(id) {
+  const index = steeringQueue.findIndex((item) => item.id === id);
+  if (index < 0) return;
+  const item = steeringQueue[index];
+  if (item.serverOwned || item.sent) {
+    steeringRemovalPending.add(id);
+    item.removing = true;
+    item.status = "sending";
+    if (!sendSteeringCommand({ type: "steering_remove", userMessageId: id })) {
+      steeringRemovalPending.delete(id);
+      item.removing = false;
+      item.status = item.paused ? "paused" : "waiting";
+    }
+  } else {
+    steeringQueue.splice(index, 1);
+  }
+  if (steeringEditingId === id) steeringEditingId = null;
+  renderSteeringTray();
+}
+
+function resumeSteeringItem(id) {
+  const item = steeringById(id);
+  if (!item) return;
+  item.paused = false;
+  item.status = "sending";
+  if (!sendSteeringCommand({ type: "steering_resume", userMessageId: id })) {
+    item.paused = true;
+    item.status = "paused";
+  }
+  renderSteeringTray();
+}
+
+function clearSteeringQueue() {
+  for (let index = steeringQueue.length - 1; index >= 0; index -= 1) {
+    const item = steeringQueue[index];
+    if (!item.serverOwned && !item.sent) {
+      steeringQueue.splice(index, 1);
+      continue;
+    }
+    steeringRemovalPending.add(item.id);
+    item.removing = true;
+    item.status = "sending";
+    if (!sendSteeringCommand({ type: "steering_remove", userMessageId: item.id })) {
+      steeringRemovalPending.delete(item.id);
+      item.removing = false;
+      item.status = item.paused ? "paused" : "waiting";
+    }
+  }
+  steeringEditingId = null;
+  renderSteeringTray();
+}
+
+steeringClearBtn.addEventListener("click", clearSteeringQueue);
+
+function sendSteeringItem(item) {
+  if (
+    !item
+    || item.removing
+    || steeringRemovalPending.has(item.id)
+    || item.serverOwned
+    || item.sent
+    || resetRequested
+    || pendingRequestDraft
+    || !activeRequestId
+    || !ws
+    || ws.readyState !== WebSocket.OPEN
+  ) return false;
+  item.draft.conversationId = currentConvId;
+  item.draft.userMessageId = item.id;
+  item.draft.wsPayload = requestPayloadForDraft(item.draft, "steer");
+  item.status = "sending";
+  item.sent = true;
+  try {
+    ws.send(JSON.stringify(item.draft.wsPayload));
+    renderSteeringTray();
+    return true;
+  } catch {
+    item.sent = false;
+    item.status = "paused";
+    renderSteeringTray();
+    return false;
+  }
+}
+
+function flushLocalSteering() {
+  if (!isGenerating || pendingRequestDraft) return;
+  for (const item of steeringQueue) {
+    if (!item.serverOwned && !item.sent) sendSteeringItem(item);
+  }
+}
+
+function enqueueSteering(draft) {
+  prepareRequestDraft(draft);
+  const item = {
+    id: draft.userMessageId || genId(),
+    draft,
+    displayText: draft.displayText,
+    delivery: "steer",
+    paused: false,
+    status: "sending",
+    sent: false,
+    serverOwned: false,
+  };
+  draft.userMessageId = item.id;
+  steeringQueue.push(item);
+  renderSteeringTray();
+  sendSteeringItem(item);
+  return true;
+}
+
+function materializeSteeringItem(item, event) {
+  const id = event.id || item?.id;
+  if (!id || messageLog.some((message) => message.id === id)) return;
+  const displayText = event.displayText || item?.displayText || item?.draft?.displayText || "";
+  const imagePreviewUrls = item?.draft?.images?.map((image) => image.previewUrl).filter(Boolean) || [];
+
+  // steering 是同一任务里的新用户边界。先把边界前已经可见的 assistant 内容
+  // 固化成一段历史，再让后续内容从用户消息下方另起 bubble；刷新后的顺序因此
+  // 仍是「回答片段 → 用户追加 → 回答续段」，不会聚合成一整段跑到追加消息后面。
+  const priorText = assistantTxt;
+  const priorBlocks = cloneJson(assistantBlocks);
+  const priorRawMessages = cloneJson(assistantRawMessages);
+  const priorEvents = cloneJson(assistantEvents);
+  if (priorText || priorBlocks?.length) {
+    messageLog.push({
+      id: genId(),
+      role: "assistant",
+      text: priorText,
+      blocks: priorBlocks,
+      raw: priorRawMessages,
+      events: priorEvents,
+      cost: null,
+      status: "complete",
+    });
+  }
+  cleanupRunningTools();
+  removeGenChip();
+  assistantEl = null;
+  assistantTxt = "";
+  assistantBlocks = [];
+  assistantRawMessages = [];
+  assistantEvents = [];
+  blockMap = {};
+  prevTurnTexts = [];
+
+  addMessage("user", displayText, imagePreviewUrls);
+  messageLog.push({ id, role: "user", text: displayText, cost: null });
+  saveCurrentConversation();
+}
+
+function materializeStartedSteering(raw) {
+  const event = normalizeSteeringEvent(raw);
+  const index = steeringQueue.findIndex((item) => item.id === event.id);
+  if (index < 0) return false;
+  const [item] = steeringQueue.splice(index, 1);
+  materializeSteeringItem(item, event);
+  steeringRemovalPending.delete(event.id);
+  if (steeringEditingId === event.id) steeringEditingId = null;
+  renderSteeringTray();
+  return true;
+}
+
+function upsertSteeringFromEvent(raw) {
+  const event = normalizeSteeringEvent(raw);
+  if (!event.id || steeringRemovalPending.has(event.id)) return null;
+  let item = steeringById(event.id);
+  if (!item) {
+    const draft = {
+      composerText: event.composerText,
+      text: event.composerText,
+      displayText: event.displayText,
+      mentionedNotes: [],
+      images: [],
+      noteFile: null,
+      quote: null,
+      model: selectedModel,
+      permissionMode: selectedPermissionMode,
+      effort: selectedEffort,
+      profileId: _profileData.activeProfileId,
+      conversationId: event.conversationId,
+      userMessageId: event.id,
+    };
+    item = {
+      id: event.id,
+      draft,
+      displayText: event.displayText,
+      delivery: event.delivery,
+      paused: event.paused,
+      status: event.paused ? "paused" : "waiting",
+      sent: true,
+      serverOwned: true,
+    };
+    const insertAt = event.position == null
+      ? steeringQueue.length
+      : Math.max(0, Math.min(steeringQueue.length, event.position - 1));
+    steeringQueue.splice(insertAt, 0, item);
+  } else {
+    item.serverOwned = true;
+    item.sent = true;
+    item.delivery = event.delivery;
+    item.paused = event.paused;
+    item.status = event.paused ? "paused" : "waiting";
+    if (event.displayText) {
+      item.displayText = event.displayText;
+      item.draft.displayText = event.displayText;
+    }
+  }
+  return item;
+}
+
+function applySteeringOrder(order) {
+  const positions = new Map((order || []).map((id, index) => [String(id), index]));
+  steeringQueue.sort((a, b) => {
+    const ai = positions.has(a.id) ? positions.get(a.id) : Number.MAX_SAFE_INTEGER;
+    const bi = positions.has(b.id) ? positions.get(b.id) : Number.MAX_SAFE_INTEGER;
+    return ai - bi;
+  });
+}
+
+function handleSteeringEvent(raw) {
+  if (!String(raw?.type || "").startsWith("steering_")) return false;
+  const event = normalizeSteeringEvent(raw);
+  if (raw.type !== "steering_snapshot" && event.conversationId && event.conversationId !== currentConvId) {
+    return true;
+  }
+
+  if (raw.type === "steering_snapshot") {
+    const localItems = steeringQueue.filter((item) => !item.serverOwned);
+    const priorItems = new Map(steeringQueue.map((item) => [item.id, item]));
+    steeringQueue.length = 0;
+    const snapshotItems = Array.isArray(raw.items) ? [...raw.items] : [];
+    snapshotItems.sort((a, b) => (Number(a.position) || 0) - (Number(b.position) || 0));
+    for (const snapshotRaw of snapshotItems) {
+      const snapshot = normalizeSteeringEvent(snapshotRaw);
+      if (
+        !snapshot.id
+        || !currentConvId
+        || snapshot.conversationId !== currentConvId
+      ) continue;
+      const prior = priorItems.get(snapshot.id);
+      if (prior) {
+        prior.serverOwned = true;
+        prior.sent = true;
+        prior.delivery = snapshot.delivery;
+        prior.paused = snapshot.paused;
+        prior.status = steeringRemovalPending.has(snapshot.id)
+          ? "sending"
+          : (snapshot.paused ? "paused" : "waiting");
+        prior.removing = steeringRemovalPending.has(snapshot.id);
+        if (snapshot.displayText) {
+          prior.displayText = snapshot.displayText;
+          prior.draft.displayText = snapshot.displayText;
+        }
+        steeringQueue.push(prior);
+      } else {
+        const restored = upsertSteeringFromEvent(snapshotRaw);
+        if (restored && steeringRemovalPending.has(snapshot.id)) {
+          restored.removing = true;
+          restored.status = "sending";
+        }
+      }
+    }
+    for (const local of localItems) {
+      if (!steeringById(local.id)) steeringQueue.push(local);
+    }
+    for (const id of steeringRemovalPending) {
+      sendSteeringCommand({ type: "steering_remove", userMessageId: id });
+    }
+    renderSteeringTray();
+    flushLocalSteering();
+    return true;
+  }
+
+  if (raw.type === "steering_queued" || raw.type === "steering_updated") {
+    upsertSteeringFromEvent(raw);
+    renderSteeringTray();
+    return true;
+  }
+
+  if (raw.type === "steering_command_error") {
+    const item = steeringById(event.id);
+    if (raw.command === "steering_remove") {
+      steeringRemovalPending.delete(event.id);
+      if (item) {
+        item.removing = false;
+        item.status = item.paused ? "paused" : "waiting";
+      }
+    } else if (item) {
+      item.status = raw.command === "steering_resume"
+        ? "paused"
+        : (item.paused ? "paused" : "waiting");
+      if (raw.command === "steering_resume") item.paused = true;
+    }
+    showInlineError("待追加消息未更新，请重试。");
+    renderSteeringTray();
+    return true;
+  }
+
+  if (raw.type === "steering_reordered") {
+    applySteeringOrder(raw.order);
+    renderSteeringTray();
+    return true;
+  }
+
+  if (raw.type === "steering_paused") {
+    const ids = new Set((raw.userMessageIds || (event.id ? [event.id] : [])).map(String));
+    for (const item of steeringQueue) {
+      if (ids.size === 0 || ids.has(item.id)) {
+        item.paused = true;
+        item.status = "paused";
+      }
+    }
+    renderSteeringTray();
+    return true;
+  }
+
+  if (raw.type === "steering_applied" || raw.type === "steering_removed") {
+    const index = steeringQueue.findIndex((item) => item.id === event.id);
+    const item = index >= 0 ? steeringQueue[index] : null;
+    if (raw.type === "steering_applied" || raw.reason === "fallback_started") {
+      materializeSteeringItem(item, event);
+    }
+    if (index >= 0) steeringQueue.splice(index, 1);
+    steeringRemovalPending.delete(event.id);
+    if (steeringEditingId === event.id) steeringEditingId = null;
+    renderSteeringTray();
+    return true;
+  }
+
+  return true;
 }
 
 function resendPendingRequest() {
@@ -6180,21 +7069,17 @@ function dispatchRequestDraft(draft) {
     clearTimeout(requestRetryTimer);
     requestRetryTimer = null;
     hidePopup();
-    scheduleFollowUpDrain();
     return true;
   }
 
   hidePopup();
-  const mentionedNotes = draft.mentionedNotes;
   if (!draft.conversationId) draft.conversationId = currentConvId || genId();
   if (!currentConvId) currentConvId = draft.conversationId;
   const userMessageId = draft.userMessageId || genId();
   draft.userMessageId = userMessageId;
+  prepareRequestDraft(draft);
   const imagePreviewUrls = draft.images.map((image) => image.previewUrl);
-  const displayText = draft.displayText || (mentionedNotes.length > 0
-    ? `${draft.text}\n\n引用笔记：${mentionedNotes.map((note) => `@${note.title}`).join(" · ")}`
-    : draft.text);
-  draft.displayText = displayText;
+  const displayText = draft.displayText;
   if (!draft.rendered) {
     // If a previous request froze without a done/stopped event, assistantEl still
     // points to the old AI message element. Clear it so the upcoming response is
@@ -6208,73 +7093,18 @@ function dispatchRequestDraft(draft) {
   setGenerating(true);
   lastWsEventAt = Date.now();
 
-  const parts = [];
-  if (draft.noteFile) parts.push(`当前查看的文件：${draft.noteFile}`);
-  if (mentionedNotes.length > 0) {
-    parts.push(
-      "用户指定以下 vault 笔记作为本轮上下文。请优先读取这些文件，并基于其中内容回答：\n"
-      + mentionedNotes.map((note) => `- ${JSON.stringify(note.path)}`).join("\n"),
-    );
-  }
-  if (draft.quote) {
-    const sectionHint = draft.quote.section ? `（「${draft.quote.section}」章节）` : "";
-    let anchor = "";
-    if (draft.quote.prefix || draft.quote.suffix) {
-      const pre = draft.quote.prefix ? `…${draft.quote.prefix}` : "";
-      const suf = draft.quote.suffix ? `${draft.quote.suffix}…` : "";
-      anchor = `\n位置锚点：${pre}【${draft.quote.text}】${suf}`;
-    }
-    parts.push(`用户引用了以下文段${sectionHint}：\n"${draft.quote.text}"${anchor}`);
-  }
-  parts.push(draft.text);
-  const wsPayload = {
-    conversationId: draft.conversationId,
-    userMessageId,
-    displayText,
-    prompt: parts.join("\n\n"),
-    model: draft.model,
-    permissionMode: draft.permissionMode,
-    effort: draft.effort,
-    profileId: draft.profileId,
-  };
-  if (draft.dispatchProvider) {
-    wsPayload.dispatchProvider = draft.dispatchProvider;
-    wsPayload.dispatchReason = draft.dispatchReason;
-  }
-  if (draft.images.length > 0) {
-    wsPayload.images = draft.images.map((image) => ({ data: image.data, mediaType: image.mediaType }));
-  }
+  const wsPayload = requestPayloadForDraft(draft);
   draft.wsPayload = wsPayload;
   pendingRequestDraft = draft;
   activeRequestId = userMessageId;
   try {
     ws.send(JSON.stringify(wsPayload));
   } catch {
-    if (pendingRequestDraft === draft) pendingRequestDraft = null;
-    if (activeRequestId === userMessageId) activeRequestId = null;
-    removeTyping();
-    setGenerating(false);
-    return false;
+    updateTypingStatus("连接中断，消息会在重连后自动发送…");
+    try { ws.close(); } catch { }
+    return true;
   }
-  if (followUpQueue.length > 0) showFollowUpQueueStatus();
   return true;
-}
-
-function scheduleFollowUpDrain(delay = 0) {
-  clearTimeout(followUpDrainTimer);
-  followUpDrainTimer = null;
-  if (followUpQueue.length === 0) return;
-  followUpDrainTimer = setTimeout(() => {
-    followUpDrainTimer = null;
-    if (isGenerating || resetRequested || pendingRequestDraft || !ws || ws.readyState !== WebSocket.OPEN) return;
-    const next = followUpQueue.shift();
-    if (!dispatchRequestDraft(next)) {
-      followUpQueue.unshift(next);
-      showFollowUpQueueStatus();
-      return;
-    }
-    if (!isGenerating) scheduleFollowUpDrain();
-  }, delay);
 }
 
 function submitRequest(textOverride = null, options = {}) {
@@ -6301,20 +7131,16 @@ function submitRequest(textOverride = null, options = {}) {
       : `没有厂商叫「${wanted}」，也没读到任何已配置的厂商，去设置里看看。`);
     return false;
   }
-  const shouldQueue = isGenerating || resetRequested || pendingRequestDraft || followUpQueue.length > 0;
-  if (!shouldQueue && (!ws || ws.readyState !== WebSocket.OPEN)) return false;
+  if (resetRequested) return false;
+  if (isGenerating) {
+    const draft = takeRequestDraft(textOverride, options);
+    if (!draft) return false;
+    return enqueueSteering(draft);
+  }
+  if (pendingRequestDraft || !ws || ws.readyState !== WebSocket.OPEN) return false;
   const draft = takeRequestDraft(textOverride, options);
   if (!draft) return false;
-  if (shouldQueue) {
-    enqueueFollowUp(draft);
-    if (!isGenerating) scheduleFollowUpDrain();
-    return true;
-  }
-  if (dispatchRequestDraft(draft)) return true;
-  // The socket can close between the OPEN check and send(). Keep the already
-  // rendered draft and retry it once the reconnect state is known.
-  enqueueFollowUp(draft);
-  return true;
+  return dispatchRequestDraft(draft);
 }
 
 function send() {
@@ -6473,8 +7299,8 @@ function sendStopRequest() {
   }
   stopRequested = true;
   stopResendPending = false;
-  sendBtn.disabled = true;
-  sendBtn.setAttribute("aria-label", "正在停止");
+  stopGenerationBtn.disabled = true;
+  stopGenerationBtn.setAttribute("aria-label", "正在停止当前回答");
   updateTypingStatus("正在停止...");
   if (!genChipEl && assistantEl) showGenChip("正在停止...");
   else updateGenChip("正在停止...");
@@ -6483,20 +7309,19 @@ function sendStopRequest() {
     return true;
   } catch {
     stopResendPending = true;
-    sendBtn.disabled = false;
-    sendBtn.setAttribute("aria-label", "重试停止");
+    stopGenerationBtn.disabled = false;
+    stopGenerationBtn.setAttribute("aria-label", "重试停止当前回答");
     updateTypingStatus("停止请求未送达，请重试");
     return false;
   }
 }
 
 sendBtn.addEventListener("click", () => {
-  if (isGenerating) {
-    if (stopRequested && !stopResendPending) return;
-    sendStopRequest();
-  } else {
-    send();
-  }
+  send();
+});
+stopGenerationBtn.addEventListener("click", () => {
+  if (stopRequested && !stopResendPending) return;
+  sendStopRequest();
 });
 
 // ── Header pickers ───────────────────────────────────────
@@ -6688,8 +7513,8 @@ async function deleteConversation(id) {
 }
 
 async function loadConversation(conv) {
-  if (isGenerating || followUpQueue.length > 0) {
-    showInlineError("当前回答或后续消息仍在处理中，请等待完成，或新建对话以明确取消。 ");
+  if (isGenerating || steeringQueue.length > 0) {
+    showInlineError("当前回答或待追加消息仍在处理中，请等待完成，或新建对话以明确取消。");
     return;
   }
   await saveCurrentConversation();
@@ -6735,9 +7560,10 @@ async function startNewConversation() {
   activeRequestId = null;
   clearTimeout(requestRetryTimer);
   requestRetryTimer = null;
-  followUpQueue.length = 0;
-  clearTimeout(followUpDrainTimer);
-  followUpDrainTimer = null;
+  steeringQueue.length = 0;
+  steeringRemovalPending.clear();
+  steeringEditingId = null;
+  renderSteeringTray();
   clearTimeout(errorCompletionTimer);
   errorCompletionTimer = null;
   clearAskUserQuestion();

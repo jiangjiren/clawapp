@@ -3,7 +3,12 @@ import { EventEmitter } from "node:events";
 import { PassThrough, Writable } from "node:stream";
 import test from "node:test";
 import { query } from "@anthropic-ai/claude-agent-sdk";
-import { AsyncMessageQueue, PersistentQueryRuntime, updateTaskRegistry } from "./agent-session.js";
+import {
+  AsyncMessageQueue,
+  PersistentQueryRuntime,
+  SteeringQueue,
+  updateTaskRegistry,
+} from "./agent-session.js";
 
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const waitFor = async (predicate, timeoutMs = 2000) => {
@@ -62,6 +67,125 @@ test("task registry stays busy until a terminal lifecycle event", () => {
   assert.equal(tasks.size, 1);
   updateTaskRegistry(tasks, { type: "system", subtype: "task_notification", task_id: "task-2", status: "completed" });
   assert.equal(tasks.size, 0);
+});
+
+test("steering queue is idempotent, owner-scoped, editable, and reorderable before apply", () => {
+  const queue = new SteeringQueue();
+  const first = queue.enqueue({
+    userMessageId: "steer-1",
+    ownerToken: "conv-a|profile-a",
+    displayText: "first",
+    prompt: "first prompt",
+  });
+  queue.enqueue({
+    userMessageId: "other-1",
+    ownerToken: "conv-b|profile-a",
+    displayText: "other",
+    prompt: "other prompt",
+  });
+  queue.enqueue({
+    userMessageId: "steer-2",
+    ownerToken: "conv-a|profile-a",
+    displayText: "second",
+    prompt: "second prompt",
+  });
+  const duplicate = queue.enqueue({
+    userMessageId: "steer-1",
+    ownerToken: "conv-b|profile-b",
+    displayText: "must not replace",
+  });
+
+  assert.equal(first.inserted, true);
+  assert.equal(duplicate.inserted, false, "a retried userMessageId must not create a second steering item");
+  assert.equal(duplicate.item.ownerToken, "conv-a|profile-a", "a duplicate ID cannot steal another owner");
+  assert.equal(duplicate.item.displayText, "first");
+  assert.equal(queue.length, 3);
+
+  assert.equal(
+    queue.update("steer-1", { displayText: "hijack" }, "conv-b|profile-a"),
+    null,
+    "another conversation cannot edit a pending steering item",
+  );
+  const updated = queue.update(
+    "steer-1",
+    {
+      displayText: "first edited",
+      prompt: "first edited prompt",
+      userMessageId: "renamed",
+      ownerToken: "conv-b|profile-b",
+      state: "applied",
+      claimToken: "forged",
+    },
+    "conv-a|profile-a",
+  );
+  assert.equal(updated?.userMessageId, "steer-1", "the canonical id is immutable while editing");
+  assert.equal(updated?.ownerToken, "conv-a|profile-a", "editing content cannot move an item to another owner");
+  assert.equal(updated?.state, "queued");
+  assert.equal(updated?.claimToken, null);
+  assert.equal(updated?.displayText, "first edited");
+
+  assert.equal(queue.reorder("conv-a|profile-a", ["steer-2", "steer-1"]), true);
+  assert.deepEqual(
+    queue.snapshot().map(item => item.userMessageId),
+    ["steer-2", "other-1", "steer-1"],
+    "reordering one owner keeps other conversations in their original slots",
+  );
+  assert.equal(queue.remove("steer-2", "conv-b|profile-a"), null);
+  assert.equal(queue.remove("steer-2", "conv-a|profile-a")?.userMessageId, "steer-2");
+  assert.deepEqual(
+    queue.snapshot("conv-a|profile-a").map(item => [item.userMessageId, item.displayText]),
+    [["steer-1", "first edited"]],
+    "the reconnect snapshot contains the latest pending content exactly once",
+  );
+});
+
+test("steering claims are FIFO, compare-and-delete, pausable on Stop, and isolated on reset", () => {
+  const queue = new SteeringQueue();
+  const ownerA = "conv-a|profile-a";
+  const ownerB = "conv-b|profile-b";
+  for (const [userMessageId, ownerToken] of [
+    ["a-1", ownerA],
+    ["b-1", ownerB],
+    ["a-2", ownerA],
+  ]) {
+    queue.enqueue({ userMessageId, ownerToken, displayText: userMessageId });
+  }
+
+  const claim = queue.claimNext(ownerA);
+  assert.equal(claim?.item.userMessageId, "a-1", "the first unpaused item for an owner is claimed first");
+  assert.equal(queue.update("a-1", { displayText: "too late" }, ownerA), null);
+  assert.equal(queue.remove("a-1", ownerA), null, "an applied-in-progress item cannot be removed by a stale UI command");
+  assert.equal(queue.commitClaim("a-1", "wrong-token"), null, "a stale claim cannot delete the current owner's item");
+
+  const paused = queue.pauseOwner(ownerA);
+  assert.deepEqual(paused.map(item => item.userMessageId), ["a-2"]);
+  assert.equal(queue.claimNext(ownerA), null, "Stop pauses pending work instead of automatically draining it");
+  assert.equal(queue.claimNext(ownerB)?.item.userMessageId, "b-1", "pausing one conversation does not pause another");
+
+  assert.equal(queue.releaseClaim("a-1", claim.claimToken, { paused: true })?.paused, true);
+  assert.equal(queue.hasUnpaused(ownerA), false);
+  assert.deepEqual(
+    queue.resumeOwner(ownerA).map(item => item.userMessageId),
+    ["a-1", "a-2"],
+  );
+  assert.equal(queue.claimNext(ownerA)?.item.userMessageId, "a-1", "released work returns to its original FIFO position");
+
+  const resetRemoved = queue.removeOwner(ownerA);
+  assert.deepEqual(
+    resetRemoved.map(item => item.userMessageId).sort(),
+    ["a-1", "a-2"],
+    "reset invalidates both queued and claimed work owned by the old conversation",
+  );
+  assert.deepEqual(
+    queue.snapshot().map(item => item.userMessageId),
+    ["b-1"],
+    "reset cannot clear another conversation and leaves no old steering claim recoverable",
+  );
+  assert.equal(
+    queue.commitClaim("a-1", claim.claimToken),
+    null,
+    "a stale apply callback cannot resurrect or commit a claim invalidated by reset",
+  );
 });
 
 test("persistent runtime reuses one query across turns and preserves background tasks", async () => {
@@ -201,6 +325,59 @@ test("persistent runtime forwards cross-provider dispatch events without closing
   runtime.send({ type: "user", message: { role: "user", content: "continue" } });
   await flush();
   assert.equal(fake.received.length, 2, "dispatch result must not force a replacement query");
+  runtime.close();
+});
+
+test("active runtime accepts FIFO steering messages without an implicit interrupt", async () => {
+  const queries = [];
+  const seen = [];
+  const runtime = new PersistentQueryRuntime({
+    queryFactory: ({ prompt }) => {
+      const fake = new FakeQuery(prompt);
+      queries.push(fake);
+      return fake;
+    },
+    onEvent: event => seen.push(event),
+  });
+
+  runtime.start({});
+  runtime.send({ type: "user", message: { role: "user", content: "first" }, priority: "next" });
+  await waitFor(() => queries[0].received.length === 1);
+  queries[0].events.push({ type: "system", subtype: "session_state_changed", state: "running" });
+  queries[0].events.push({
+    type: "assistant",
+    message: {
+      role: "assistant",
+      content: [{ type: "tool_use", id: "tool-1", name: "Read", input: { file_path: "a.txt" } }],
+    },
+  });
+  queries[0].events.push({
+    type: "user",
+    message: {
+      role: "user",
+      content: [{ type: "tool_result", tool_use_id: "tool-1", content: "ok" }],
+    },
+  });
+  await waitFor(() => seen.some(event =>
+    event.type === "user"
+    && event.message?.content?.some(block => block.type === "tool_result" && block.tool_use_id === "tool-1")
+  ));
+
+  runtime.send({ type: "user", message: { role: "user", content: "steer-one" }, priority: "next" });
+  runtime.send({ type: "user", message: { role: "user", content: "steer-two" }, priority: "next" });
+  await waitFor(() => queries[0].received.length === 3);
+
+  assert.equal(queries.length, 1, "steering must reuse the active SDK query");
+  assert.equal(queries[0].interruptCalls, 0, "steering must not turn a second Enter into Stop");
+  assert.deepEqual(
+    queries[0].received.map(message => message.message.content),
+    ["first", "steer-one", "steer-two"],
+    "multiple steering messages reach the SDK in FIFO order",
+  );
+  assert.equal(runtime.foregroundRunning, true, "a steering send keeps the foreground turn owned until idle");
+
+  queries[0].events.push({ type: "system", subtype: "session_state_changed", state: "idle" });
+  await waitFor(() => runtime.foregroundRunning === false);
   runtime.close();
 });
 

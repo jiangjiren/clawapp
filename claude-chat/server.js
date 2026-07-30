@@ -13,7 +13,8 @@ import { query, tool, createSdkMcpServer } from "@anthropic-ai/claude-agent-sdk"
 import Anthropic from "@anthropic-ai/sdk";
 import { Codex } from "@openai/codex-sdk";
 import * as scheduler from "./scheduler.js";
-import { PersistentQueryRuntime, isTaskLifecycleEvent } from "./agent-session.js";
+import { PersistentQueryRuntime, SteeringQueue, isTaskLifecycleEvent } from "./agent-session.js";
+import { hasSchedulerIntent, hasSchedulerIntentForMessage } from "./scheduler-intent.js";
 import { z } from "zod";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -38,7 +39,6 @@ const htmlPath   = join(__dirname, "public/index.html");
 const AUTH_PROFILE_FILE = process.env.CLAUDE_CHAT_AUTH_PROFILE_FILE || join(__dirname, "auth-profile.json");
 const WEB_SCHEDULER_PEER = `web:${PORT}`;
 
-const SCHEDULER_INTENT_RE = /分钟后|小时后|一会儿|稍后|稍候|等会|定时|每天|每周|每月|每小时|每隔|工作日|提醒|自动|取消任务|删除任务|查看任务|暂停任务|恢复任务/;
 const INKFELLOW_SCHEDULER_PROMPT = `【inkfellow 定时任务规则】
 
 当用户提到以下任一场景时，必须使用 scheduler MCP 工具处理，不能只用文字承诺：
@@ -2019,10 +2019,6 @@ async function startWechatPolling(baseUrl, token, initialBuf = "") {
   })();
 }
 
-function hasSchedulerIntent(prompt) {
-  return SCHEDULER_INTENT_RE.test(String(prompt || ""));
-}
-
 function normalizeProviderSelector(value) {
   return String(value || "").trim().toLocaleLowerCase();
 }
@@ -3299,6 +3295,7 @@ const RESTART_LEASE_MS = 15_000;
 let restartLease = null;
 let activeForegroundRequestId = null;
 let activeForegroundConversationId = null;
+let activeForegroundDeliveryContext = null;
 let claudeRuntimeConversationId = null;
 let claudeAutoWakeOwner = null;
 let claudeAutoWakeOwnerTimer = null;
@@ -3456,6 +3453,9 @@ function completeClientRequest(state, requestId = activeForegroundRequestId) {
     activeForegroundRequestId = null;
     activeForegroundConversationId = null;
   }
+  if (activeForegroundDeliveryContext?.requestId === requestId) {
+    activeForegroundDeliveryContext = null;
+  }
 }
 
 const FORWARDED_CLAUDE_SYSTEM_EVENTS = new Set([
@@ -3477,8 +3477,181 @@ let claudeErrorHandled = false;
 let claudeTaskWakeGraceUntil = 0;
 let claudeTurnEpoch = 0;
 const queuedClientPrompts = [];
+const steeringQueue = new SteeringQueue();
 let queuedClientPromptDrain = null;
 let queuedClientPromptDrainTimer = null;
+
+function steeringEventItem(item) {
+  const ownerItems = steeringQueue.snapshot(item.ownerToken);
+  return {
+    userMessageId: item.userMessageId,
+    conversationId: item.conversationId,
+    position: ownerItems.findIndex(entry => entry.userMessageId === item.userMessageId) + 1,
+    displayText: item.displayText,
+    composerText: item.msg?.composerText ?? item.displayText,
+    delivery: item.delivery,
+    paused: item.paused === true,
+    ...(item.reason ? { reason: item.reason } : {}),
+  };
+}
+
+function deliverSteeringQueued(item) {
+  deliver({ type: "steering_queued", ...steeringEventItem(item) });
+}
+
+function removeFallbackPrompt(item) {
+  const index = queuedClientPrompts.findIndex(prompt => (
+    prompt === item.msg || getClientRequestId(prompt) === item.userMessageId
+  ));
+  if (index >= 0) queuedClientPrompts.splice(index, 1);
+}
+
+function syncFallbackPromptOrder(ownerToken) {
+  const ordered = steeringQueue.snapshot(ownerToken)
+    .filter(item => item.delivery === "next_turn" && item.state === "queued" && !item.paused)
+    .map(item => item.msg);
+  if (ordered.length === 0) return;
+  let cursor = 0;
+  for (let index = 0; index < queuedClientPrompts.length; index += 1) {
+    const item = steeringQueue.get(getClientRequestId(queuedClientPrompts[index]));
+    if (item?.ownerToken !== ownerToken || item.delivery !== "next_turn") continue;
+    queuedClientPrompts[index] = ordered[cursor++];
+  }
+}
+
+function pauseSteeringOwner(ownerToken, reason = "stopped") {
+  if (!ownerToken) return [];
+  const paused = steeringQueue.pauseOwner(ownerToken);
+  for (const item of paused) removeFallbackPrompt(item);
+  if (paused.length > 0) {
+    deliver({
+      type: "steering_paused",
+      conversationId: paused[0].conversationId,
+      userMessageIds: paused.map(item => item.userMessageId),
+      reason,
+    });
+  }
+  return paused;
+}
+
+function fallbackUnappliedSteering(ownerToken, reason) {
+  if (!ownerToken) return;
+  for (const item of steeringQueue.snapshot(ownerToken)) {
+    if (item.state !== "queued" || item.paused || item.delivery !== "steer") continue;
+    steeringQueue.update(item.userMessageId, { delivery: "next_turn", reason }, ownerToken);
+    if (!queuedClientPrompts.includes(item.msg)) queuedClientPrompts.push(item.msg);
+    deliver({ type: "steering_updated", ...steeringEventItem(item) });
+  }
+}
+
+function buildClaudeUserMessage(msg) {
+  const content = [];
+  const images = msg.images ?? (msg.image ? [msg.image] : []);
+  for (const img of images) {
+    content.push({
+      type: "image",
+      source: { type: "base64", media_type: img.mediaType, data: img.data },
+    });
+  }
+  content.push({ type: "text", text: msg.prompt });
+  return {
+    type: "user",
+    message: { role: "user", content },
+    parent_tool_use_id: null,
+    priority: "next",
+  };
+}
+
+function clientRuntimeKey(msg, provider, profile) {
+  return crypto.createHash("sha256").update(JSON.stringify({
+    provider,
+    profileId: profile?.id ?? null,
+    baseUrl: profile?.baseUrl ?? null,
+    apiKey: profile?.apiKey ?? null,
+    opusModel: profile?.opusModel ?? null,
+    sonnetModel: profile?.sonnetModel ?? null,
+    haikuModel: profile?.haikuModel ?? null,
+    cwd: resolveAllowedCwd(msg.cwd),
+    permissionMode: PERMISSION_MODES.has(msg.permissionMode) ? msg.permissionMode : DEFAULT_PERMISSION_MODE,
+    effort: EFFORT_LEVELS.has(msg.effort) ? msg.effort : "medium",
+    model: msg.model ?? null,
+    schedulerRequest: hasSchedulerIntentForMessage(msg),
+  })).digest("hex");
+}
+
+function isClaudeToolResultEvent(event) {
+  if (event?.type !== "user") return false;
+  const content = event.message?.content ?? event.content;
+  return Array.isArray(content) && content.some(block => (
+    block?.type === "tool_result" || block?.type === "mcp_tool_result"
+  ));
+}
+
+function applyNextClaudeSteering(safePoint) {
+  const context = activeForegroundDeliveryContext;
+  if (
+    !context
+    || context.provider !== "claude"
+    || claudeStopRequested
+    || !claudeTurnCompletionPending
+    || !claudeRuntime.started
+    || claudeRuntimeConversationId !== context.conversationId
+  ) {
+    return false;
+  }
+  const claim = steeringQueue.claimNext(
+    context.ownerToken,
+    item => item.delivery === "steer" && item.conversationId === context.conversationId,
+  );
+  if (!claim) return false;
+  const { item, claimToken } = claim;
+  try {
+    // One persisted assistant segment must end before the steering user message.
+    // The SDK event pump awaits this callback, so no continued assistant event can
+    // race into the gap before beginServerConversationFromClient reopens history.
+    finalizeActiveAssistantHistory("complete");
+    beginServerConversationFromClient(item.msg);
+    claudeRuntime.send(buildClaudeUserMessage(item.msg));
+    const applied = steeringQueue.commitClaim(item.userMessageId, claimToken);
+    if (!applied) return false;
+    rememberClientRequest(item.userMessageId, "steering_applied");
+    acknowledgeClientRequest(item.userMessageId, "steering_applied");
+    deliver({
+      type: "steering_applied",
+      userMessageId: item.userMessageId,
+      conversationId: item.conversationId,
+      displayText: item.displayText,
+      safePoint,
+    });
+    return true;
+  } catch (error) {
+    steeringQueue.releaseClaim(item.userMessageId, claimToken, { paused: true });
+    deliver({
+      type: "steering_paused",
+      conversationId: item.conversationId,
+      userMessageIds: [item.userMessageId],
+      reason: "runtime_send_failed",
+    });
+    console.error("[Web Agent] Failed to apply steering message:", error);
+    return false;
+  }
+}
+
+function clearAllSteering(reason) {
+  const ownerTokens = [...new Set(steeringQueue.snapshot().map(item => item.ownerToken))];
+  for (const ownerToken of ownerTokens) {
+    for (const item of steeringQueue.removeOwner(ownerToken)) {
+      removeFallbackPrompt(item);
+      rememberClientRequest(item.userMessageId, "stopped");
+      deliver({
+        type: "steering_removed",
+        userMessageId: item.userMessageId,
+        conversationId: item.conversationId,
+        reason,
+      });
+    }
+  }
+}
 
 function scheduleQueuedClientPromptDrain(delayMs = 0) {
   // Never replace the task-wake grace timer with an earlier callback that can
@@ -3531,6 +3704,9 @@ function finishClaudeTurn() {
   if (!claudeTurnCompletionPending) return;
   const wasStopped = claudeStopRequested;
   const completedRequestId = activeForegroundRequestId;
+  const completedOwnerToken = activeForegroundDeliveryContext?.ownerToken ?? null;
+  if (wasStopped) pauseSteeringOwner(completedOwnerToken);
+  else fallbackUnappliedSteering(completedOwnerToken, "runtime_finished_before_safe_point");
   // Emit the terminal event while the run is still marked active so a detached
   // desktop WebView buffers it and cannot reconnect stuck in generating state.
   clearPendingAskUserQuestion("request finished");
@@ -3589,11 +3765,14 @@ async function handlePersistentClaudeEvent(ev) {
       activeAssistantHistoryMessage = null;
     }
     if (FORWARDED_CLAUDE_SYSTEM_EVENTS.has(ev.subtype)) send(ev);
-    if (ev.subtype === "session_state_changed" && ev.state === "idle") finishClaudeTurn();
+    if (ev.subtype === "session_state_changed" && ev.state === "idle") {
+      if (!applyNextClaudeSteering("idle")) finishClaudeTurn();
+    }
     return;
   }
 
   send(ev);
+  if (isClaudeToolResultEvent(ev)) applyNextClaudeSteering("tool_result");
   // origin 非空表示这条 result 来自后台任务的自动续写，不是用户轮的收尾，
   // 此时前台轮可能仍在正常运行 —— 不进入看门狗，避免误报。
   if (ev.type === "result" && !ev.origin) armTurnIdleWatchdog();
@@ -3673,6 +3852,7 @@ function isAgentWorkActive() {
     || claudeRuntime.running
     || pendingAskUserQuestion
     || queuedClientPrompts.length > 0
+    || steeringQueue.hasUnpaused()
     || Date.now() < claudeTaskWakeGraceUntil
   );
 }
@@ -3805,6 +3985,10 @@ wss.on("connection", (ws) => {
     userMessageId: attachedRequestId,
     conversationId: attachedConversationId,
   });
+  deliver({
+    type: "steering_snapshot",
+    items: steeringQueue.snapshot().map(steeringEventItem),
+  });
 
   let handleClientMessage;
   const drainThisConnection = () => {
@@ -3842,10 +4026,112 @@ wss.on("connection", (ws) => {
       return;
     }
 
+    if (msg.type === "steering_update") {
+      const steeringId = getClientRequestId(msg) || String(msg.steeringId ?? "").trim();
+      const item = steeringQueue.get(steeringId);
+      const prompt = typeof msg.prompt === "string"
+        ? msg.prompt.trim()
+        : (typeof msg.text === "string" ? msg.text.trim() : null);
+      const displayText = typeof msg.displayText === "string"
+        ? msg.displayText.trim()
+        : prompt;
+      const composerText = typeof msg.composerText === "string"
+        ? msg.composerText.trim()
+        : displayText;
+      if (!item || item.state !== "queued" || !prompt) {
+        deliver({ type: "steering_command_error", command: msg.type, userMessageId: steeringId || null });
+        return;
+      }
+      const updated = steeringQueue.update(steeringId, {
+        displayText: displayText || prompt,
+        msg: {
+          ...item.msg,
+          prompt,
+          displayText: displayText || prompt,
+          composerText: composerText || displayText || prompt,
+        },
+      }, item.ownerToken);
+      if (!updated) {
+        deliver({ type: "steering_command_error", command: msg.type, userMessageId: steeringId });
+        return;
+      }
+      const fallbackIndex = queuedClientPrompts.findIndex(prompt => getClientRequestId(prompt) === steeringId);
+      if (fallbackIndex >= 0) queuedClientPrompts[fallbackIndex] = updated.msg;
+      deliver({ type: "steering_updated", ...steeringEventItem(updated) });
+      return;
+    }
+
+    if (msg.type === "steering_remove") {
+      const steeringId = getClientRequestId(msg) || String(msg.steeringId ?? "").trim();
+      const item = steeringQueue.get(steeringId);
+      const removed = item ? steeringQueue.remove(steeringId, item.ownerToken) : null;
+      if (!removed) {
+        deliver({ type: "steering_command_error", command: msg.type, userMessageId: steeringId || null });
+        return;
+      }
+      removeFallbackPrompt(removed);
+      rememberClientRequest(steeringId, "stopped");
+      deliver({
+        type: "steering_removed",
+        userMessageId: steeringId,
+        conversationId: removed.conversationId,
+        reason: "user_removed",
+      });
+      return;
+    }
+
+    if (msg.type === "steering_reorder") {
+      const orderedIds = Array.isArray(msg.order)
+        ? msg.order.map(id => String(id ?? "").trim()).filter(Boolean)
+        : [];
+      const firstItem = orderedIds.map(id => steeringQueue.get(id)).find(Boolean);
+      if (!firstItem || !steeringQueue.reorder(firstItem.ownerToken, orderedIds)) {
+        deliver({ type: "steering_command_error", command: msg.type, userMessageId: null });
+        return;
+      }
+      syncFallbackPromptOrder(firstItem.ownerToken);
+      deliver({
+        type: "steering_reordered",
+        conversationId: firstItem.conversationId,
+        order: steeringQueue.snapshot(firstItem.ownerToken).map(item => item.userMessageId),
+      });
+      return;
+    }
+
+    if (msg.type === "steering_resume") {
+      const steeringId = getClientRequestId(msg) || String(msg.steeringId ?? "").trim();
+      const item = steeringQueue.get(steeringId);
+      if (!item) {
+        deliver({ type: "steering_command_error", command: msg.type, userMessageId: steeringId || null });
+        return;
+      }
+      const resumed = steeringQueue.resumeOwner(item.ownerToken);
+      const canStillSteer = activeForegroundDeliveryContext?.ownerToken === item.ownerToken
+        && activeForegroundDeliveryContext.provider === "claude"
+        && claudeTurnCompletionPending
+        && !claudeStopRequested;
+      for (const resumedItem of resumed) {
+        let effectiveItem = resumedItem;
+        if (!canStillSteer && resumedItem.delivery === "steer") {
+          effectiveItem = steeringQueue.update(resumedItem.userMessageId, {
+            delivery: "next_turn",
+            reason: "resumed_after_stop",
+          }, resumedItem.ownerToken) ?? resumedItem;
+        }
+        if (effectiveItem.delivery === "next_turn" && !queuedClientPrompts.includes(effectiveItem.msg)) {
+          queuedClientPrompts.push(effectiveItem.msg);
+        }
+        deliver({ type: "steering_updated", ...steeringEventItem(effectiveItem) });
+      }
+      scheduleQueuedClientPromptDrain();
+      return;
+    }
+
     if (msg.reset) {
       claudeTurnEpoch += 1;
       clearPendingAskUserQuestion("session reset");
       finalizeActiveAssistantHistory("stopped");
+      clearAllSteering("reset");
       // 派发会话一并作废——重置后是新话题，再接着上一轮就成了串台。
       // 必须赶在 clearActiveHistoryConversation() 把 id 置空之前取。
       // 这里不能用 normalizeHistoryId：它拿不到合法值时会造一个新 id，
@@ -3865,6 +4151,7 @@ wss.on("connection", (ws) => {
       claudeTaskWakeGraceUntil = 0;
       activeForegroundRequestId = null;
       activeForegroundConversationId = null;
+      activeForegroundDeliveryContext = null;
       claudeAutoWakeOwner = null;
       clearTimeout(claudeAutoWakeOwnerTimer);
       claudeAutoWakeOwnerTimer = null;
@@ -3900,6 +4187,22 @@ wss.on("connection", (ws) => {
     if (msg.stop) {
       const requestedStopId = getClientRequestId(msg);
       if (requestedStopId) {
+        const steeringItem = steeringQueue.get(requestedStopId);
+        const removedSteering = steeringItem
+          ? steeringQueue.remove(requestedStopId, steeringItem.ownerToken)
+          : null;
+        if (removedSteering) {
+          removeFallbackPrompt(removedSteering);
+          rememberClientRequest(requestedStopId, "stopped");
+          deliver({
+            type: "steering_removed",
+            userMessageId: requestedStopId,
+            conversationId: removedSteering.conversationId,
+            reason: "stopped",
+          });
+          deliver({ type: "stopped", userMessageId: requestedStopId });
+          return;
+        }
         const queuedIndex = queuedClientPrompts.findIndex(item => getClientRequestId(item) === requestedStopId);
         if (queuedIndex >= 0) {
           queuedClientPrompts.splice(queuedIndex, 1);
@@ -3916,6 +4219,14 @@ wss.on("connection", (ws) => {
       }
       clearPendingAskUserQuestion("generation stopped");
       const claudeTurnWasPending = claudeTurnCompletionPending;
+      const stoppedOwnerToken = activeForegroundDeliveryContext?.ownerToken ?? null;
+      if (stoppedOwnerToken) {
+        pauseSteeringOwner(stoppedOwnerToken);
+      } else if (!requestedStopId) {
+        for (const ownerToken of new Set(steeringQueue.snapshot().map(item => item.ownerToken))) {
+          pauseSteeringOwner(ownerToken);
+        }
+      }
       claudeTurnEpoch += 1;
       // 派出去的子进程一律先掐。放在分支之前：Claude 主模型那条路走的是
       // claudeRuntime.interrupt()，它只打断主模型，碰不到派发出去的活。
@@ -3953,13 +4264,20 @@ wss.on("connection", (ws) => {
 
     // The frontend normally queues follow-ups. Keep this server-side guard so a
     // stale or third-party client can never turn a new message into an implicit Stop.
-    const requestId = getClientRequestId(msg);
+    let requestId = getClientRequestId(msg);
+    if (!requestId && msg.deliveryMode === "steer") {
+      requestId = normalizeHistoryId(makeHistoryMessageId("user"));
+      msg.userMessageId = requestId;
+    }
     const knownRequest = requestId ? clientRequestStates.get(requestId) : null;
     if (!fromQueue && knownRequest) {
       acknowledgeClientRequest(requestId, knownRequest.state);
       if (knownRequest.state === "queued") {
         const position = queuedClientPrompts.findIndex(item => getClientRequestId(item) === requestId) + 1;
         deliver({ type: "request_queued", reason: "busy", position: position || null, userMessageId: requestId });
+      } else if (knownRequest.state === "steering_queued") {
+        const item = steeringQueue.get(requestId);
+        if (item) deliverSteeringQueued(item);
       } else if (knownRequest.state === "running") {
         deliver({ type: "request_started", userMessageId: requestId });
       }
@@ -3984,11 +4302,69 @@ wss.on("connection", (ws) => {
     const incomingDispatchProfile = msg.dispatchProvider
       ? resolveDispatchProfile(incomingProfileData, msg.dispatchProvider)
       : null;
+    const incomingActiveProfile = getActiveProfile(incomingProfileData);
     const incomingProvider = incomingDispatchProfile?.provider
-      ?? getActiveProfile(incomingProfileData)?.provider
+      ?? incomingActiveProfile?.provider
       ?? "claude";
+    const incomingProfileId = incomingDispatchProfile?.id ?? incomingActiveProfile?.id ?? null;
+    const incomingRuntimeKey = clientRuntimeKey(
+      msg,
+      incomingProvider,
+      incomingDispatchProfile ?? incomingActiveProfile,
+    );
     const crossesActiveClaudeTasks = incomingProvider === "codex" && claudeRuntime.taskIds.size > 0;
-    if (shouldQueueClientPrompt() || crossesActiveClaudeTasks) {
+    const clientPromptBusy = shouldQueueClientPrompt() || crossesActiveClaudeTasks;
+    if (!fromQueue && msg.deliveryMode === "steer" && clientPromptBusy) {
+      const steeringConversationId = msg.conversationId
+        ? normalizeHistoryId(msg.conversationId)
+        : (activeForegroundConversationId || claudeRuntimeConversationId || normalizeHistoryId(null));
+      msg.conversationId = steeringConversationId;
+      const context = activeForegroundDeliveryContext;
+      const canSteerCurrentClaudeTurn = Boolean(
+        context
+        && context.provider === "claude"
+        && incomingProvider === "claude"
+        && !msg.dispatchProvider
+        && context.conversationId === steeringConversationId
+        && context.profileId === incomingProfileId
+        && context.runtimeKey === incomingRuntimeKey
+        && claudeTurnCompletionPending
+        && !claudeStopRequested
+      );
+      const ownerToken = context?.ownerToken
+        ?? `fallback:${activeForegroundRequestId ?? "background"}:${claudeTurnEpoch}:${steeringConversationId}`;
+      const displayText = typeof msg.displayText === "string" && msg.displayText.trim()
+        ? msg.displayText.trim()
+        : String(msg.prompt || "").trim();
+      const reason = canSteerCurrentClaudeTurn
+        ? null
+        : (crossesActiveClaudeTasks ? "provider_switch_wait" : "steering_not_supported");
+      const { item, inserted } = steeringQueue.enqueue({
+        userMessageId: requestId,
+        ownerToken,
+        conversationId: steeringConversationId,
+        displayText,
+        delivery: canSteerCurrentClaudeTurn ? "steer" : "next_turn",
+        reason,
+        provider: incomingProvider,
+        profileId: incomingProfileId,
+        msg,
+      });
+      if (inserted && item.delivery === "next_turn") queuedClientPrompts.push(msg);
+      rememberClientRequest(requestId, "steering_queued");
+      acknowledgeClientRequest(requestId, "steering_queued");
+      deliverSteeringQueued(item);
+      return;
+    }
+    if (clientPromptBusy) {
+      const fallbackSteeringItem = fromQueue ? steeringQueue.get(requestId) : null;
+      if (fallbackSteeringItem?.delivery === "next_turn") {
+        queuedClientPrompts.unshift(msg);
+        rememberClientRequest(requestId, "steering_queued");
+        acknowledgeClientRequest(requestId, "steering_queued");
+        deliverSteeringQueued(fallbackSteeringItem);
+        return;
+      }
       if (fromQueue) queuedClientPrompts.unshift(msg);
       else queuedClientPrompts.push(msg);
       rememberClientRequest(requestId, "queued");
@@ -4004,29 +4380,44 @@ wss.on("connection", (ws) => {
     }
     const requestConversationId = normalizeHistoryId(msg.conversationId);
     msg.conversationId = requestConversationId;
+    if (fromQueue) {
+      const fallbackItem = steeringQueue.get(requestId);
+      if (fallbackItem?.delivery === "next_turn") {
+        const claim = steeringQueue.claimNext(
+          fallbackItem.ownerToken,
+          item => item.userMessageId === requestId && item.delivery === "next_turn",
+        );
+        if (claim) {
+          const removed = steeringQueue.commitClaim(requestId, claim.claimToken);
+          if (removed) {
+            deliver({
+              type: "steering_removed",
+              userMessageId: requestId,
+              conversationId: removed.conversationId,
+              reason: "fallback_started",
+            });
+          }
+        }
+      }
+    }
     startClientRequest(requestId, requestConversationId);
+    activeForegroundDeliveryContext = {
+      requestId,
+      ownerToken: `foreground:${requestId ?? crypto.randomUUID()}:${crypto.randomUUID()}`,
+      conversationId: requestConversationId,
+      provider: incomingProvider,
+      profileId: incomingProfileId,
+      runtimeKey: incomingRuntimeKey,
+    };
     finalizeActiveAssistantHistory("complete");
     beginServerConversationFromClient(msg);
 
-    const schedulerRequest = hasSchedulerIntent(msg.prompt);
+    const schedulerRequest = hasSchedulerIntentForMessage(msg);
 
     // Build message content — text only, or images + text
-    const content = [];
-    const images = msg.images ?? (msg.image ? [msg.image] : []); // support both formats
-    for (const img of images) {
-      content.push({
-        type: "image",
-        source: { type: "base64", media_type: img.mediaType, data: img.data },
-      });
-    }
-    content.push({ type: "text", text: msg.prompt });
-
-    const userMsg = {
-      type: "user",
-      message: { role: "user", content },
-      parent_tool_use_id: null,
-      priority: "next",
-    };
+    const images = msg.images ?? (msg.image ? [msg.image] : []);
+    const userMsg = buildClaudeUserMessage(msg);
+    const content = userMsg.message.content;
 
     const ac = new AbortController();
     const permissionMode = PERMISSION_MODES.has(msg.permissionMode)

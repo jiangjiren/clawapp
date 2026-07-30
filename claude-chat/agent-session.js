@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 export class AsyncMessageQueue {
   constructor() {
     this.items = [];
@@ -63,6 +65,171 @@ export function updateTaskRegistry(taskIds, event) {
     taskIds.add(event.task_id);
   }
   return before !== taskIds.has(event.task_id);
+}
+
+export class SteeringQueue {
+  constructor() {
+    this.items = [];
+  }
+
+  get length() {
+    return this.items.length;
+  }
+
+  enqueue(item) {
+    const userMessageId = String(item?.userMessageId ?? "").trim();
+    const ownerToken = String(item?.ownerToken ?? "").trim();
+    if (!userMessageId) throw new TypeError("userMessageId is required");
+    if (!ownerToken) throw new TypeError("ownerToken is required");
+    const existing = this.items.find(entry => entry.userMessageId === userMessageId);
+    if (existing) return { item: existing, inserted: false };
+    const queued = {
+      ...item,
+      userMessageId,
+      ownerToken,
+      paused: item.paused === true,
+      state: "queued",
+      claimToken: null,
+    };
+    this.items.push(queued);
+    return { item: queued, inserted: true };
+  }
+
+  get(userMessageId) {
+    const id = String(userMessageId ?? "").trim();
+    return this.items.find(item => item.userMessageId === id) ?? null;
+  }
+
+  snapshot(ownerToken = null) {
+    const items = ownerToken == null
+      ? this.items
+      : this.items.filter(item => item.ownerToken === ownerToken);
+    return items.map(item => ({ ...item }));
+  }
+
+  update(userMessageId, patch, ownerToken = null) {
+    const item = this.get(userMessageId);
+    if (!item || item.state !== "queued") return null;
+    if (ownerToken != null && item.ownerToken !== ownerToken) return null;
+    const originalOwnerToken = item.ownerToken;
+    Object.assign(item, patch);
+    item.userMessageId = String(userMessageId).trim();
+    item.ownerToken = originalOwnerToken;
+    item.state = "queued";
+    item.claimToken = null;
+    return item;
+  }
+
+  remove(userMessageId, ownerToken = null) {
+    const id = String(userMessageId ?? "").trim();
+    const index = this.items.findIndex(item => (
+      item.userMessageId === id
+      && item.state === "queued"
+      && (ownerToken == null || item.ownerToken === ownerToken)
+    ));
+    if (index < 0) return null;
+    return this.items.splice(index, 1)[0];
+  }
+
+  removeOwner(ownerToken) {
+    const removed = [];
+    this.items = this.items.filter(item => {
+      if (item.ownerToken !== ownerToken) return true;
+      removed.push(item);
+      return false;
+    });
+    return removed;
+  }
+
+  reorder(ownerToken, orderedIds) {
+    if (!ownerToken || !Array.isArray(orderedIds)) return false;
+    const owned = this.items.filter(item => item.ownerToken === ownerToken && item.state === "queued");
+    if (owned.length === 0) return false;
+    const byId = new Map(owned.map(item => [item.userMessageId, item]));
+    const seen = new Set();
+    const reordered = [];
+    for (const rawId of orderedIds) {
+      const id = String(rawId ?? "").trim();
+      const item = byId.get(id);
+      if (!item || seen.has(id)) continue;
+      seen.add(id);
+      reordered.push(item);
+    }
+    for (const item of owned) {
+      if (!seen.has(item.userMessageId)) reordered.push(item);
+    }
+    let cursor = 0;
+    this.items = this.items.map(item => (
+      item.ownerToken === ownerToken && item.state === "queued"
+        ? reordered[cursor++]
+        : item
+    ));
+    return true;
+  }
+
+  pauseOwner(ownerToken) {
+    const paused = [];
+    for (const item of this.items) {
+      if (item.ownerToken !== ownerToken || item.state !== "queued" || item.paused) continue;
+      item.paused = true;
+      paused.push(item);
+    }
+    return paused;
+  }
+
+  resumeOwner(ownerToken) {
+    const resumed = [];
+    for (const item of this.items) {
+      if (item.ownerToken !== ownerToken || item.state !== "queued" || !item.paused) continue;
+      item.paused = false;
+      resumed.push(item);
+    }
+    return resumed;
+  }
+
+  claimNext(ownerToken, predicate = null) {
+    const item = this.items.find(entry => (
+      entry.ownerToken === ownerToken
+      && entry.state === "queued"
+      && !entry.paused
+      && (typeof predicate !== "function" || predicate(entry))
+    ));
+    if (!item) return null;
+    item.state = "claimed";
+    item.claimToken = randomUUID();
+    return { item, claimToken: item.claimToken };
+  }
+
+  commitClaim(userMessageId, claimToken) {
+    const index = this.items.findIndex(item => (
+      item.userMessageId === userMessageId
+      && item.state === "claimed"
+      && item.claimToken === claimToken
+    ));
+    if (index < 0) return null;
+    return this.items.splice(index, 1)[0];
+  }
+
+  releaseClaim(userMessageId, claimToken, { paused = false } = {}) {
+    const item = this.items.find(entry => (
+      entry.userMessageId === userMessageId
+      && entry.state === "claimed"
+      && entry.claimToken === claimToken
+    ));
+    if (!item) return null;
+    item.state = "queued";
+    item.claimToken = null;
+    item.paused = paused;
+    return item;
+  }
+
+  hasUnpaused(ownerToken = null) {
+    return this.items.some(item => (
+      item.state === "queued"
+      && !item.paused
+      && (ownerToken == null || item.ownerToken === ownerToken)
+    ));
+  }
 }
 
 export class PersistentQueryRuntime {

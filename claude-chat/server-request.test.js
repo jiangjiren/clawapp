@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { WebSocket } from "ws";
 
@@ -110,6 +111,7 @@ test("WebSocket requests are acknowledged and duplicate IDs are not executed twi
       conversationId: "conv_ack_probe",
       userMessageId: "user_ack_probe",
       displayText: "离线确认协议测试",
+      composerText: "提醒我进行离线确认协议测试",
       prompt: "提醒我进行离线确认协议测试",
       profileId: "p_codex",
       model: "gpt-5.4",
@@ -199,6 +201,423 @@ test("WebSocket requests are acknowledged and duplicate IDs are not executed twi
     );
   } finally {
     ws?.close();
+    if (child.exitCode == null) {
+      const exited = new Promise(resolve => child.once("exit", resolve));
+      child.kill();
+      const killTimeout = new Promise(resolve => {
+        const timer = setTimeout(resolve, 2000);
+        timer.unref?.();
+      });
+      await Promise.race([exited, killTimeout]);
+    }
+    await rm(scratch, { recursive: true, force: true });
+  }
+});
+
+test("Claude steering applies at tool/idle safe points, survives reconnect, and preserves owner/history", { timeout: 25_000 }, async () => {
+  const scratch = await mkdtemp(join(tmpdir(), "inkfellow-steering-"));
+  const authFile = join(scratch, "auth-profile.json");
+  const historyFile = join(scratch, "history.json");
+  const mockLogFile = join(scratch, "mock-sdk.jsonl");
+  const mockSdkFile = join(scratch, "mock-claude-sdk.mjs");
+  const loaderFile = join(scratch, "mock-claude-loader.mjs");
+  const port = await reservePort();
+  const token = "offline-steering-test-token";
+  const wsUrl = `ws://127.0.0.1:${port}/?token=${encodeURIComponent(token)}`;
+  const apiUrl = `http://127.0.0.1:${port}`;
+
+  await writeFile(authFile, JSON.stringify({
+    activeProfileId: "p_claude",
+    profiles: [{
+      id: "p_claude",
+      name: "Claude offline steering probe",
+      provider: "claude",
+      apiKey: "",
+      baseUrl: "",
+      opusModel: "",
+      sonnetModel: "",
+      haikuModel: "",
+    }],
+  }), "utf8");
+  await writeFile(mockLogFile, "", "utf8");
+  await writeFile(mockSdkFile, `
+    import { appendFile } from "node:fs/promises";
+
+    class EventQueue {
+      constructor() {
+        this.items = [];
+        this.waiters = [];
+        this.closed = false;
+      }
+      push(value) {
+        if (this.closed) return;
+        const waiter = this.waiters.shift();
+        if (waiter) waiter({ value, done: false });
+        else this.items.push(value);
+      }
+      next() {
+        if (this.items.length > 0) return Promise.resolve({ value: this.items.shift(), done: false });
+        if (this.closed) return Promise.resolve({ value: undefined, done: true });
+        return new Promise(resolve => this.waiters.push(resolve));
+      }
+      return() {
+        this.close();
+        return Promise.resolve({ value: undefined, done: true });
+      }
+      close() {
+        if (this.closed) return;
+        this.closed = true;
+        for (const waiter of this.waiters.splice(0)) waiter({ value: undefined, done: true });
+      }
+      [Symbol.asyncIterator]() { return this; }
+    }
+
+    const log = value => appendFile(process.env.MOCK_CLAUDE_LOG_FILE, JSON.stringify(value) + "\\n", "utf8");
+    const textOf = message => {
+      const content = message?.message?.content;
+      if (typeof content === "string") return content;
+      if (!Array.isArray(content)) return "";
+      return content.filter(block => block?.type === "text").map(block => block.text).join("\\n");
+    };
+
+    class FakeQuery {
+      constructor(prompt) {
+        this.events = new EventQueue();
+        this.turn = 0;
+        this.consume(prompt);
+      }
+      [Symbol.asyncIterator]() { return this.events; }
+      async setPermissionMode() {}
+      async setModel() {}
+      async interrupt() {
+        await log({ kind: "interrupt" });
+        this.events.push({ type: "system", subtype: "session_state_changed", state: "idle" });
+      }
+      close() {
+        this.events.close();
+      }
+      async consume(prompt) {
+        for await (const message of prompt) {
+          const text = textOf(message);
+          this.turn += 1;
+          await log({ kind: "prompt", turn: this.turn, text, priority: message?.priority ?? null });
+          if (this.turn === 1) {
+            this.events.push({
+              type: "system",
+              subtype: "init",
+              session_id: "11111111-1111-4111-8111-111111111111",
+              skills: [],
+            });
+            this.events.push({ type: "system", subtype: "session_state_changed", state: "running" });
+            const withTool = text.includes("[tool]");
+            this.events.push({
+              type: "assistant",
+              message: {
+                role: "assistant",
+                content: withTool
+                  ? [
+                      { type: "text", text: "partial before tool" },
+                      { type: "tool_use", id: "tool-safe-point", name: "Read", input: { file_path: "probe.txt" } },
+                    ]
+                  : [{ type: "text", text: "partial before idle" }],
+              },
+            });
+            setTimeout(() => {
+              if (withTool) {
+                this.events.push({
+                  type: "user",
+                  message: {
+                    role: "user",
+                    content: [{ type: "tool_result", tool_use_id: "tool-safe-point", content: "tool complete" }],
+                  },
+                });
+              } else {
+                this.events.push({
+                  type: "result",
+                  subtype: "success",
+                  is_error: false,
+                  result: "first segment complete",
+                  total_cost_usd: 0,
+                  usage: {},
+                });
+                this.events.push({ type: "system", subtype: "session_state_changed", state: "idle" });
+              }
+            }, 900);
+            continue;
+          }
+          this.events.push({
+            type: "assistant",
+            message: {
+              role: "assistant",
+              content: [{ type: "text", text: "continued: " + text }],
+            },
+          });
+          this.events.push({
+            type: "result",
+            subtype: "success",
+            is_error: false,
+            result: "steering complete",
+            total_cost_usd: 0,
+            usage: {},
+          });
+          this.events.push({ type: "system", subtype: "session_state_changed", state: "idle" });
+        }
+      }
+    }
+
+    export const query = ({ prompt }) => new FakeQuery(prompt);
+    export const tool = (name, description, schema, handler) => ({ name, description, schema, handler });
+    export const createSdkMcpServer = config => config;
+  `, "utf8");
+  await writeFile(loaderFile, `
+    import { pathToFileURL } from "node:url";
+    export async function resolve(specifier, context, nextResolve) {
+      if (specifier === "@anthropic-ai/claude-agent-sdk") {
+        return { url: pathToFileURL(process.env.MOCK_CLAUDE_SDK_FILE).href, shortCircuit: true };
+      }
+      return nextResolve(specifier, context);
+    }
+  `, "utf8");
+
+  const child = spawn(process.execPath, ["--experimental-loader", pathToFileURL(loaderFile).href, "server.js"], {
+    cwd: new URL(".", import.meta.url),
+    env: {
+      ...process.env,
+      PORT: String(port),
+      HOST: "127.0.0.1",
+      DESKTOP_AGENT_TOKEN: token,
+      CLAUDE_CHAT_DATA_DIR: scratch,
+      CLAUDE_CHAT_HISTORY_FILE: historyFile,
+      CLAUDE_CHAT_AUTH_PROFILE_FILE: authFile,
+      MOCK_CLAUDE_LOG_FILE: mockLogFile,
+      MOCK_CLAUDE_SDK_FILE: mockSdkFile,
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let output = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", chunk => { output += chunk; });
+  child.stderr.on("data", chunk => { output += chunk; });
+
+  const connect = async () => {
+    const ws = new WebSocket(wsUrl);
+    const events = [];
+    ws.on("message", raw => events.push(JSON.parse(raw.toString())));
+    await new Promise((resolve, reject) => {
+      ws.once("open", resolve);
+      ws.once("error", reject);
+    });
+    return { ws, events };
+  };
+
+  let connection;
+  try {
+    const deadline = Date.now() + 5000;
+    while (!output.includes("claude-chat listening")) {
+      if (child.exitCode != null) throw new Error(`sidecar exited early (${child.exitCode}): ${output}`);
+      if (Date.now() >= deadline) throw new Error(`sidecar did not start: ${output}`);
+      await delay(20);
+    }
+
+    connection = await connect();
+    const first = {
+      conversationId: "conv_tool_steering",
+      userMessageId: "user_tool_first",
+      displayText: "first tool turn",
+      prompt: "[tool] first tool turn",
+      profileId: "p_claude",
+      permissionMode: "auto",
+      effort: "medium",
+    };
+    connection.ws.send(JSON.stringify(first));
+    await waitForMessage(
+      connection.events,
+      event => event.type === "assistant"
+        && event.userMessageId === first.userMessageId
+        && event.message?.content?.some(block => block.type === "tool_use"),
+    );
+
+    const crossConversation = {
+      ...first,
+      conversationId: "conv_cross_fallback",
+      userMessageId: "user_cross_fallback",
+      displayText: "cross conversation",
+      prompt: "[tool] cross conversation",
+      deliveryMode: "steer",
+    };
+    const steer = {
+      ...first,
+      userMessageId: "user_tool_steer",
+      displayText: "steer at tool boundary",
+      prompt: "steer at tool boundary",
+      deliveryMode: "steer",
+    };
+    connection.ws.send(JSON.stringify(crossConversation));
+    connection.ws.send(JSON.stringify(steer));
+    connection.ws.send(JSON.stringify(steer));
+    const queuedCross = await waitForMessage(
+      connection.events,
+      event => event.type === "steering_queued" && event.userMessageId === crossConversation.userMessageId,
+    );
+    assert.equal(queuedCross.delivery, "next_turn", "another conversation must not enter the active Claude turn");
+    const queuedSteer = await waitForMessage(
+      connection.events,
+      event => event.type === "steering_queued" && event.userMessageId === steer.userMessageId,
+    );
+    assert.equal(queuedSteer.delivery, "steer");
+
+    await new Promise(resolve => {
+      connection.ws.once("close", resolve);
+      connection.ws.close();
+    });
+    connection = await connect();
+    const snapshot = await waitForMessage(
+      connection.events,
+      event => event.type === "steering_snapshot"
+        && event.items?.some(item => item.userMessageId === steer.userMessageId),
+    );
+    assert.deepEqual(
+      snapshot.items
+        .filter(item => [crossConversation.userMessageId, steer.userMessageId].includes(item.userMessageId))
+        .map(item => [item.userMessageId, item.delivery]),
+      [
+        [crossConversation.userMessageId, "next_turn"],
+        [steer.userMessageId, "steer"],
+      ],
+      "reconnect restores the pending steering snapshot without changing delivery semantics",
+    );
+    const attached = connection.events.find(event => event.type === "run_attached");
+    assert.equal(attached?.userMessageId, first.userMessageId, "reconnect remains attached to the original foreground owner");
+
+    const appliedTool = await waitForMessage(
+      connection.events,
+      event => event.type === "steering_applied" && event.userMessageId === steer.userMessageId,
+    );
+    assert.equal(appliedTool.safePoint, "tool_result");
+    const continuedTool = await waitForMessage(
+      connection.events,
+      event => event.type === "assistant"
+        && event.message?.content?.some(block => block.text === "continued: steer at tool boundary"),
+    );
+    assert.equal(
+      continuedTool.userMessageId,
+      first.userMessageId,
+      "steering must not overwrite activeForegroundRequestId with the pending message id",
+    );
+    await waitForMessage(
+      connection.events,
+      event => event.type === "done" && event.userMessageId === first.userMessageId,
+    );
+    assert.equal(
+      connection.events.some(event => event.type === "steering_applied" && event.userMessageId === crossConversation.userMessageId),
+      false,
+      "cross-conversation fallback must never be reported as applied to the current runtime",
+    );
+    assert.equal(
+      connection.events.filter(event => event.type === "steering_applied" && event.userMessageId === steer.userMessageId).length,
+      1,
+      "a duplicate userMessageId is applied exactly once",
+    );
+
+    const toolHistoryResponse = await fetch(
+      `${apiUrl}/api/history/${encodeURIComponent(first.conversationId)}?token=${encodeURIComponent(token)}`,
+    );
+    assert.equal(toolHistoryResponse.status, 200);
+    const toolHistory = await toolHistoryResponse.json();
+    assert.deepEqual(toolHistory.messages.map(message => message.role), ["user", "assistant", "user", "assistant"]);
+    assert.equal(toolHistory.messages[0].id, first.userMessageId);
+    assert.equal(toolHistory.messages[1].text, "partial before tool");
+    assert.ok(
+      toolHistory.messages[1].blocks?.some(block => block.type === "tool_use" && block.id === "tool-safe-point"),
+      "the partial assistant segment retains its structured tool history",
+    );
+    assert.equal(toolHistory.messages[2].id, steer.userMessageId);
+    assert.equal(toolHistory.messages[2].text, steer.displayText);
+    assert.equal(toolHistory.messages[3].text, "continued: steer at tool boundary");
+
+    await waitForMessage(
+      connection.events,
+      event => event.type === "request_started" && event.userMessageId === crossConversation.userMessageId,
+    );
+    const firstDoneIndex = connection.events.findIndex(
+      event => event.type === "done" && event.userMessageId === first.userMessageId,
+    );
+    const crossStartedIndex = connection.events.findIndex(
+      event => event.type === "request_started" && event.userMessageId === crossConversation.userMessageId,
+    );
+    assert.ok(crossStartedIndex > firstDoneIndex, "cross-conversation fallback starts only after the active turn is done");
+
+    connection.ws.send(JSON.stringify({ reset: true, conversationId: crossConversation.conversationId }));
+    await waitForMessage(connection.events, event => event.type === "reset_complete");
+
+    const idleFirst = {
+      ...first,
+      conversationId: "conv_idle_steering",
+      userMessageId: "user_idle_first",
+      displayText: "first idle turn",
+      prompt: "[idle] first idle turn",
+    };
+    const idleStart = connection.events.length;
+    connection.ws.send(JSON.stringify(idleFirst));
+    await waitForMessage(
+      connection.events,
+      event => event.type === "assistant"
+        && event.userMessageId === idleFirst.userMessageId
+        && event.message?.content?.some(block => block.text === "partial before idle"),
+      idleStart,
+    );
+    const idleSteer = {
+      ...idleFirst,
+      userMessageId: "user_idle_steer",
+      displayText: "steer at idle boundary",
+      prompt: "steer at idle boundary",
+      deliveryMode: "steer",
+    };
+    connection.ws.send(JSON.stringify(idleSteer));
+    await waitForMessage(
+      connection.events,
+      event => event.type === "steering_queued" && event.userMessageId === idleSteer.userMessageId,
+      idleStart,
+    );
+    const appliedIdle = await waitForMessage(
+      connection.events,
+      event => event.type === "steering_applied" && event.userMessageId === idleSteer.userMessageId,
+      idleStart,
+    );
+    assert.equal(appliedIdle.safePoint, "idle", "a turn with no tool calls still continues at the idle boundary");
+    await waitForMessage(
+      connection.events,
+      event => event.type === "done" && event.userMessageId === idleFirst.userMessageId,
+      idleStart,
+    );
+    assert.equal(
+      connection.events.slice(idleStart).some(event => event.type === "stopped"),
+      false,
+      "sending steering messages never produces an implicit Stop",
+    );
+
+    const idleHistoryResponse = await fetch(
+      `${apiUrl}/api/history/${encodeURIComponent(idleFirst.conversationId)}?token=${encodeURIComponent(token)}`,
+    );
+    assert.equal(idleHistoryResponse.status, 200);
+    const idleHistory = await idleHistoryResponse.json();
+    assert.deepEqual(idleHistory.messages.map(message => message.role), ["user", "assistant", "user", "assistant"]);
+    assert.equal(idleHistory.messages[1].text, "partial before idle");
+    assert.equal(idleHistory.messages[2].id, idleSteer.userMessageId);
+    assert.equal(idleHistory.messages[3].text, "continued: steer at idle boundary");
+
+    const mockLog = (await readFile(mockLogFile, "utf8"))
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map(line => JSON.parse(line));
+    assert.equal(mockLog.some(entry => entry.kind === "interrupt"), false, "steering never calls SDK interrupt");
+    const promptTexts = mockLog.filter(entry => entry.kind === "prompt").map(entry => entry.text);
+    assert.equal(promptTexts.filter(text => text === steer.prompt).length, 1, "duplicate steering is not sent twice");
+    assert.ok(promptTexts.indexOf(first.prompt) < promptTexts.indexOf(steer.prompt));
+    assert.ok(promptTexts.indexOf(idleFirst.prompt) < promptTexts.indexOf(idleSteer.prompt));
+  } finally {
+    connection?.ws.close();
     if (child.exitCode == null) {
       const exited = new Promise(resolve => child.once("exit", resolve));
       child.kill();
