@@ -1034,33 +1034,69 @@ html, body {
 }
 #prompt::placeholder { color: var(--text-dim); opacity: 0.85; }
 
-#send,
-#stop-generation {
+/* 输入区永远只有一个主按钮。它按当前唯一合理的动作变形：
+   发送 / 追加到当前任务（箭头）→ 生成中且没东西可发时变成停止（方块）。
+   停止不是破坏性操作，所以用中性色而非 --red —— 红色会把每一轮生成都变成一次警告。 */
+#send {
   flex-shrink: 0;
   width: 30px;
   height: 30px;
   border-radius: 50%;
-  border: none;
+  border: 1px solid transparent;
   background: var(--accent);
   color: #fff;
   cursor: pointer;
   display: grid;
   place-items: center;
-  transition: background 0.15s, transform 0.1s;
+  transition: background 0.15s, border-color 0.15s, color 0.15s, transform 0.1s;
 }
 #send:disabled { background: color-mix(in srgb, var(--text-dim) 35%, transparent); cursor: default; }
 #send:not(:disabled):hover { background: var(--accent-hover); }
 #send:not(:disabled):active { transform: scale(0.93); }
-#stop-generation {
-  margin-right: 3px;
-  border: 1px solid color-mix(in srgb, var(--red) 24%, var(--border));
-  background: color-mix(in srgb, var(--red) 8%, var(--bg-document));
-  color: var(--red);
+#send[data-action="stop"] {
+  background: transparent;
+  border-color: var(--border-strong);
+  color: var(--text-dim);
 }
-#stop-generation[hidden] { display: none; }
-#stop-generation:not(:disabled):hover { background: color-mix(in srgb, var(--red) 14%, var(--bg-document)); }
-#stop-generation:not(:disabled):active { transform: scale(0.93); }
-#stop-generation:disabled { opacity: 0.42; cursor: default; }
+#send[data-action="stop"]:not(:disabled):hover {
+  background: var(--bg3);
+  border-color: var(--text-dim);
+  color: var(--text);
+}
+#send[data-action="stop"]:disabled {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text-dim);
+  opacity: 0.42;
+}
+#send #icon-stop { display: none; }
+#send[data-action="stop"] #icon-send { display: none; }
+#send[data-action="stop"] #icon-stop { display: block; }
+
+/* 停止真正的归属地：正在生成的那条回答本身。
+   跟着消息流走，指向它作用的对象，而不是常驻在工具栏里。 */
+.inline-stop {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+  padding: 1px 7px 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 10px;
+  line-height: 1.5;
+  cursor: pointer;
+  opacity: 0.85;
+  transition: opacity 0.15s, color 0.15s, border-color 0.15s, background 0.15s, transform 0.1s;
+}
+.inline-stop svg { flex-shrink: 0; }
+.inline-stop:not(:disabled):hover { opacity: 1; color: var(--text); border-color: var(--border-strong); background: var(--bg3); }
+.inline-stop:not(:disabled):active { transform: scale(0.96); }
+.inline-stop:disabled { opacity: 0.35; cursor: default; }
+.inline-stop[hidden] { display: none; }
 
 #messages::-webkit-scrollbar { width: 5px; }
 #messages::-webkit-scrollbar-track { background: transparent; }
@@ -2589,14 +2625,12 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
             </div>
           </div>
         </div>
-        <button id="stop-generation" type="button" aria-label="停止当前回答" title="停止当前回答" hidden>
-          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true">
-            <rect x="1" y="1" width="8" height="8" rx="1.5" fill="currentColor"/>
-          </svg>
-        </button>
-        <button id="send" aria-label="发送">
-          <svg id="icon-send" width="14" height="14" viewBox="0 0 14 14" fill="none">
+        <button id="send" type="button" data-action="send" aria-label="发送">
+          <svg id="icon-send" width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
             <path d="M7 12V2M7 2L2.5 6.5M7 2L11.5 6.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          <svg id="icon-stop" width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true">
+            <rect x="1" y="1" width="8" height="8" rx="1.5" fill="currentColor"/>
           </svg>
         </button>
       </div>
@@ -2608,7 +2642,6 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
 const messagesEl  = document.getElementById("messages");
 const promptEl    = document.getElementById("prompt");
 const sendBtn     = document.getElementById("send");
-const stopGenerationBtn = document.getElementById("stop-generation");
 const steeringTrayEl = document.getElementById("steering-tray");
 const steeringListEl = document.getElementById("steering-list");
 const steeringTrayTitleEl = document.getElementById("steering-tray-title");
@@ -2676,7 +2709,44 @@ const authViewList  = document.getElementById("auth-view-list");
 const authViewForm  = document.getElementById("auth-view-form");
 const authBackBtn   = document.getElementById("auth-back");
 const authFormStatusEl = document.getElementById("auth-form-status");
-const iconSend = document.getElementById("icon-send");
+
+/* ── 输入区主按钮：一个按钮，三种动作 ─────────────────────
+   send  空闲            → 发送
+   steer 生成中 + 有草稿  → 追加到当前任务（steering）
+   stop  生成中 + 无草稿  → 停止（此刻本来就没东西可发，改成 accent 实心的
+                            "发送"只会得到一个点了没反应的按钮）
+   停止的另外两个入口：正在生成那条回答上的 .inline-stop，以及 Esc。 */
+function stopActionState() {
+  const socketReady = Boolean(ws && ws.readyState === WebSocket.OPEN);
+  // 停止请求已送达、正在等服务端收尾 —— 再点一次没有意义
+  const stopping = stopRequested && !stopResendPending;
+  return { socketReady, stopping };
+}
+
+function composerAction() {
+  if (!isGenerating) return "send";
+  return promptEl.value.trim() ? "steer" : "stop";
+}
+
+function syncComposerAction() {
+  const action = composerAction();
+  const { socketReady, stopping } = stopActionState();
+  sendBtn.dataset.action = action === "stop" ? "stop" : "send";
+
+  if (action === "stop") {
+    sendBtn.disabled = !socketReady || stopping;
+    const label = stopping ? "正在停止当前回答" : "停止当前回答";
+    sendBtn.setAttribute("aria-label", label);
+    sendBtn.title = stopping ? label : "停止当前回答（Esc）";
+  } else {
+    // 草稿是空的就没有可发送的动作 —— 按钮该是灰的，而不是看着能点
+    sendBtn.disabled = resetRequested || !socketReady || !promptEl.value.trim();
+    const label = action === "steer" ? "追加到当前任务" : "发送";
+    sendBtn.setAttribute("aria-label", label);
+    sendBtn.title = `${label}（Enter）`;
+  }
+  syncInlineStops();
+}
 
 function showInlineError(text) {
   const el = document.createElement("div");
@@ -3946,6 +4016,17 @@ function applyToolFailuresFromBlocks(body, blocks) {
   }
 }
 
+/* 在跑就必须有一个进行中指示器 —— 它同时是那一轮的就地停止入口。
+   各条渲染路径各自去建太容易漏：新一轮沿用上一条 assistant 气泡时，
+   typing 不会重建、chip 也没人创建，于是会出现一段"明明在跑、却找不到停止"的空窗。
+   这条不变量在这里收口。 */
+function ensureProgressIndicator() {
+  if (!isGenerating) return;
+  if (document.getElementById("typing") || genChipEl) return;
+  if (assistantEl) showGenChip("");
+  else addTyping();
+}
+
 function setGenerating(v, notifyParent = true) {
   isGenerating = v;
   if (!v) {
@@ -3956,19 +4037,11 @@ function setGenerating(v, notifyParent = true) {
        所以中止、报错、断线这些路径下它会一直转到你刷新页面为止 ——
        一个永远在转的指示器比没有指示器更糟，它在说谎。 */
     cleanupRunningTools();
+  } else {
+    ensureProgressIndicator();
   }
 
-  const socketReady = Boolean(ws && ws.readyState === WebSocket.OPEN);
-  sendBtn.disabled = resetRequested || !socketReady;
-  sendBtn.setAttribute("aria-label", v ? "追加到当前任务" : "发送");
-  sendBtn.title = v ? "追加到当前任务（Enter）" : "发送（Enter）";
-  iconSend.style.display = "";
-  stopGenerationBtn.hidden = !v;
-  stopGenerationBtn.disabled = !socketReady || (stopRequested && !stopResendPending);
-  stopGenerationBtn.setAttribute(
-    "aria-label",
-    stopRequested && !stopResendPending ? "正在停止当前回答" : "停止当前回答",
-  );
+  syncComposerAction();
   // 前台轮结束时，后台任务若还在跑要接手表达 —— 发送键保持可用
   updateBackgroundActivity();
   if (notifyParent) postParentMessage({ type: "ai-generating-state", isGenerating: v });
@@ -4161,8 +4234,7 @@ let ws = null;
 function connect() {
   ws = new WebSocket(wsUrl);
   ws.onopen = () => {
-    sendBtn.disabled = resetRequested;
-    stopGenerationBtn.disabled = !isGenerating || (stopRequested && !stopResendPending);
+    syncComposerAction();
     if (resetRequested) sendResetRequest();
     else resendPendingRequest();
     if (!pendingRequestDraft) flushLocalSteering();
@@ -4182,14 +4254,18 @@ function connect() {
       if (!item.serverOwned && item.sent) item.sent = false;
     }
     postParentMessage({ type: "agent-not-ready" });
-    sendBtn.disabled = true;
-    stopGenerationBtn.disabled = true;
+    syncComposerAction();
     setTimeout(connect, 3000);
   };
   ws.onerror = () => { };
-  ws.onmessage = (e) => { try { handleEvent(JSON.parse(e.data)); } catch { } };
+  ws.onmessage = (e) => {
+    try { handleEvent(JSON.parse(e.data)); } catch { }
+    // 每有动静就校正一次"在跑就有指示器"，省得逐条渲染路径去补
+    ensureProgressIndicator();
+  };
 }
 connect();
+syncComposerAction();
 
 // Dead-socket detector: the server sends {type:"ping"} every 30s, so a healthy
 // connection never goes silent for long — regardless of how long the AI task runs.
@@ -4726,6 +4802,9 @@ class SquadCard {
     if (this.el) return;
     this.ensureBlock();
     if (!assistantEl) { removeTyping(); assistantEl = addMessage("assistant", ""); }
+    // typing 一走，进行中指示器（连带它身上的停止入口）必须立刻接上，否则会出现
+    // 一段"正在跑、但消息流里找不到停止"的空窗
+    if (!genChipEl && isGenerating) showGenChip("");
     const body = assistantEl.querySelector(".msg-body");
     body.appendChild(this.render());
     reanchorGenChip();
@@ -5283,6 +5362,7 @@ let todoListEl = null;
 function renderTodoList(items) {
   if (!Array.isArray(items) || !items.length) return;
   if (!assistantEl) { removeTyping(); assistantEl = addMessage("assistant", ""); }
+  if (!genChipEl && isGenerating) showGenChip("");
   const body = assistantEl.querySelector(".msg-body");
   if (!todoListEl || !body.contains(todoListEl)) {
     const wrap = document.createElement("div");
@@ -6013,12 +6093,35 @@ function makeSearchResultBlock(block) {
   return el;
 }
 
+/* 进行中的指示器（typing / gen-chip）自带停止入口。停止属于"这条正在生成的回答"，
+   把它挂在这里，输入区就不用为一个偶尔才需要的动作常驻第二个按钮。 */
+const INLINE_STOP_HTML = `<button type="button" class="inline-stop" aria-label="停止当前回答" title="停止当前回答（Esc）">`
+  + `<svg width="7" height="7" viewBox="0 0 8 8" fill="none" aria-hidden="true"><rect x="0.5" y="0.5" width="7" height="7" rx="1.2" fill="currentColor"/></svg>`
+  + `停止</button>`;
+
+function syncInlineStops() {
+  const { socketReady, stopping } = stopActionState();
+  // 正在停止时 gen-chip 的文案已经在说"正在停止..."，再留一个按钮是重复的
+  const visible = isGenerating && !stopping;
+  /* 流式输出时这个函数跟着每个事件跑，所以定向取两个已知位置，
+     不在整条消息流（可能上千个节点）里扫 class */
+  for (const btn of [
+    document.getElementById("typing")?.querySelector(".inline-stop"),
+    genChipEl?.querySelector(".inline-stop"),
+  ]) {
+    if (!btn) continue;
+    btn.hidden = !visible;
+    btn.disabled = !socketReady;
+  }
+}
+
 function addTyping() {
   removeTyping();
   const el = document.createElement("div");
   el.id = "typing"; el.className = "msg";
-  el.innerHTML = `<div class="typing"><span></span><span></span><span></span><small class="typing-status"></small></div>`;
+  el.innerHTML = `<div class="typing"><span></span><span></span><span></span><small class="typing-status"></small>${INLINE_STOP_HTML}</div>`;
   messagesEl.appendChild(el); scrollBottom();
+  syncInlineStops();
 }
 function removeTyping() { document.getElementById("typing")?.remove(); }
 
@@ -6026,15 +6129,17 @@ function showGenChip(text) {
   if (!genChipEl) {
     genChipEl = document.createElement("div");
     genChipEl.className = "gen-chip";
-    genChipEl.innerHTML = `<span class="gen-chip-dot"></span><span class="gen-chip-label"></span>`;
+    genChipEl.innerHTML = `<span class="gen-chip-dot"></span><span class="gen-chip-label"></span>${INLINE_STOP_HTML}`;
   }
   genChipEl.querySelector(".gen-chip-label").textContent = text || "";
   reanchorGenChip();
+  syncInlineStops();
 }
 function updateGenChip(text) {
   if (!genChipEl) return;
   genChipEl.querySelector(".gen-chip-label").textContent = text || "";
   reanchorGenChip();
+  syncInlineStops();
 }
 function reanchorGenChip() {
   if (!genChipEl || !assistantEl) return;
@@ -6235,6 +6340,7 @@ function selectItem(i) {
     promptEl.style.height = Math.min(promptEl.scrollHeight, 160) + "px";
     hidePopup();
     promptEl.focus();
+    syncComposerAction();
     return;
   }
   if (popupMode === "mention") {
@@ -6250,6 +6356,7 @@ function selectItem(i) {
     renderMentionChips();
     hidePopup();
     promptEl.focus();
+    syncComposerAction();
     return;
   }
   // /clear is handled locally; everything else is sent to claude
@@ -6263,6 +6370,7 @@ function selectItem(i) {
   promptEl.style.height = "36px";
   hidePopup();
   promptEl.focus();
+  syncComposerAction();
 }
 
 // click on popup item
@@ -6292,6 +6400,8 @@ function updateComposerPopup() {
 
 promptEl.addEventListener("input", updateComposerPopup);
 promptEl.addEventListener("click", updateComposerPopup);
+// 草稿有没有内容决定主按钮是"发送/追加"还是"停止"，每次改动都要重算
+promptEl.addEventListener("input", syncComposerAction);
 promptEl.addEventListener("keyup", (e) => {
   if (["ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"].includes(e.key)) {
     updateComposerPopup();
@@ -6388,6 +6498,8 @@ function takeRequestDraft(textOverride = null, { consumeComposer = textOverride 
     quotedPrefix = null;
     quotedSuffix = null;
     quoteChip.classList.remove("visible");
+    // 草稿被消费掉了 —— 生成中的话主按钮此刻应该让位给"停止"
+    syncComposerAction();
   }
   return draft;
 }
@@ -7295,12 +7407,14 @@ function sendStopRequest() {
   if (!ws || ws.readyState !== WebSocket.OPEN) {
     stopRequested = true;
     stopResendPending = true;
+    // 重连时会自动补发（见 ws.onopen），但用户按下之后必须立刻看到点动静
+    updateTypingStatus("连接中断，重连后会立刻停止");
+    syncComposerAction();
     return false;
   }
   stopRequested = true;
   stopResendPending = false;
-  stopGenerationBtn.disabled = true;
-  stopGenerationBtn.setAttribute("aria-label", "正在停止当前回答");
+  syncComposerAction();
   updateTypingStatus("正在停止...");
   if (!genChipEl && assistantEl) showGenChip("正在停止...");
   else updateGenChip("正在停止...");
@@ -7309,18 +7423,40 @@ function sendStopRequest() {
     return true;
   } catch {
     stopResendPending = true;
-    stopGenerationBtn.disabled = false;
-    stopGenerationBtn.setAttribute("aria-label", "重试停止当前回答");
+    syncComposerAction();
     updateTypingStatus("停止请求未送达，请重试");
     return false;
   }
 }
 
+/* 输入区那颗按钮点下去做什么，完全由它当前显示的动作决定 —— 图标是承诺 */
 sendBtn.addEventListener("click", () => {
-  send();
+  if (composerAction() === "stop") sendStopRequest();
+  else send();
 });
-stopGenerationBtn.addEventListener("click", () => {
+/* typing / gen-chip 里的停止按钮是随消息流动态生成的，走委托 */
+messagesEl.addEventListener("click", (e) => {
+  const btn = e.target.closest?.(".inline-stop");
+  if (!btn || btn.disabled) return;
   if (stopRequested && !stopResendPending) return;
+  sendStopRequest();
+});
+
+/* Esc = 取消当前这一轮。只有在没有更近的东西可关、焦点也不在别的输入框里时才生效。 */
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape" || e.isComposing) return;
+  // 更近的 handler（斜杠面板、steering 编辑、标题重命名）已经处理过
+  if (e.defaultPrevented) return;
+  // 下拉打开时 Esc 归下拉，不该越过它去停生成
+  if (document.querySelector(".picker-dropdown.open")) return;
+  const t = e.target;
+  const editing = t instanceof HTMLElement
+    && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable);
+  if (editing && t !== promptEl) return;
+  if (!isGenerating) return;
+  const { stopping } = stopActionState();
+  if (stopping) return;
+  e.preventDefault();
   sendStopRequest();
 });
 
