@@ -676,10 +676,18 @@ input, textarea { font-family: inherit; }
   padding: 0 8px 16px;
 }
 
-.treePanel::-webkit-scrollbar { width: 4px; }
-.treePanel::-webkit-scrollbar-thumb {
-  background: var(--notes-border-strong);
-  border-radius: 999px;
+/* 常驻的滚动条压在侧栏右缘，会和分隔线抢同一条视觉线，而它的长度还随内容变。
+   改成 macOS 的 overlay 行为：平时隐形，指针进入文件树时才浮现。
+   用标准的 scrollbar-color 而不是 ::-webkit-scrollbar-thumb：Chromium 不会因为
+   :hover 状态变化去重绘 scrollbar 伪元素，那条规则写了也不生效。 */
+.treePanel {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+  transition: scrollbar-color 0.2s ease;
+}
+
+.treePanel:hover {
+  scrollbar-color: var(--notes-border-strong) transparent;
 }
 
 .treeGroup, .treeChildren { display: grid; gap: 1px; }
@@ -744,6 +752,13 @@ input, textarea { font-family: inherit; }
 .chevron svg { width: 8px; height: 8px; }
 .chevronOpen { transform: rotate(90deg); }
 
+/* 文件没有展开箭头。不给它留出等宽的空位，同级的文件就会比文件夹左移 18px，
+   看起来像高了一级。 */
+.chevronSpacer {
+  width: 13px;
+  flex-shrink: 0;
+}
+
 .treeNodeIcon {
   display: inline-flex;
   align-items: center;
@@ -768,12 +783,24 @@ input, textarea { font-family: inherit; }
 
 .treeFileActive .treeNodeIcon { color: #fff; }
 
+/* 中间截断。中文笔记标题的区分度常落在末尾（「晨间书写」/「晨间书写结束」），
+   尾部一律保留、只压缩中段，靠 flex 让浏览器自己算可用宽度。 */
 .treeLabel {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+}
+
+.treeLabelHead {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  flex: 1;
   min-width: 0;
+}
+
+.treeLabelTail {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .treeRenameInput {

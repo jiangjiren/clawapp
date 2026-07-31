@@ -108,6 +108,28 @@ function stripExt(name) {
   return name.replace(/\.(md|html?|pdf|png|jpe?g|gif|webp|svg|avif)$/i, "");
 }
 
+/* 中文笔记标题长，每级缩进省下的都是标题宽度（VS Code 用 8px） */
+const TREE_INDENT_PX = 10;
+
+/* 树里的标题按中间截断显示：尾部这几个字固定不压缩，中段交给 ellipsis。
+   按码点切，避免把 emoji 这类代理对切坏。 */
+const TREE_LABEL_TAIL_CHARS = 4;
+function fillTreeLabel(labelEl, text) {
+  const chars = Array.from(text);
+  const head = document.createElement("span");
+  head.className = "treeLabelHead";
+  if (chars.length <= TREE_LABEL_TAIL_CHARS * 2) {
+    head.textContent = text;
+    labelEl.replaceChildren(head);
+    return;
+  }
+  head.textContent = chars.slice(0, -TREE_LABEL_TAIL_CHARS).join("");
+  const tail = document.createElement("span");
+  tail.className = "treeLabelTail";
+  tail.textContent = chars.slice(-TREE_LABEL_TAIL_CHARS).join("");
+  labelEl.replaceChildren(head, tail);
+}
+
 function parentFolder(path) {
   if (!path?.includes("/")) return "";
   return path.split("/").slice(0, -1).join("/");
@@ -1941,7 +1963,7 @@ function buildTreeNodes(node, container, level, isRoot) {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "treeFolder";
-    btn.style.paddingLeft = `${4 + level * 14}px`;
+    btn.style.paddingLeft = `${4 + level * TREE_INDENT_PX}px`;
 
     const chevron = document.createElement("span");
     chevron.className = "chevron" + (isExpanded ? " chevronOpen" : "");
@@ -1953,7 +1975,7 @@ function buildTreeNodes(node, container, level, isRoot) {
 
     const label = document.createElement("span");
     label.className = "treeLabel";
-    label.textContent = isRoot ? (node.name || "Vault") : node.name;
+    fillTreeLabel(label, isRoot ? (node.name || "Vault") : node.name);
     label.title = node.path || state.vaultPath;
     if (!isRoot) label.dataset.path = node.path;
 
@@ -1993,8 +2015,12 @@ function buildTreeNodes(node, container, level, isRoot) {
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "treeFile" + (node.path === state.activePath ? " treeFileActive" : "");
-    btn.style.paddingLeft = `${4 + level * 14}px`;
+    btn.style.paddingLeft = `${4 + level * TREE_INDENT_PX}px`;
     btn.title = `${node.path}\n${formatDate(node.updatedAt)}`;
+
+    // 文件没有展开箭头，补一个等宽空位，否则同级的文件会比文件夹左移一截
+    const spacer = document.createElement("span");
+    spacer.className = "chevronSpacer";
 
     const kind = fileKindOf(ext);
     const icon = document.createElement("span");
@@ -2003,10 +2029,10 @@ function buildTreeNodes(node, container, level, isRoot) {
 
     const label = document.createElement("span");
     label.className = "treeLabel";
-    label.textContent = stripExt(node.name);
+    fillTreeLabel(label, stripExt(node.name));
     label.dataset.path = node.path;
 
-    btn.append(icon, label);
+    btn.append(spacer, icon, label);
 
     if (ext && ext !== "md") {
       const badge = document.createElement("span");
