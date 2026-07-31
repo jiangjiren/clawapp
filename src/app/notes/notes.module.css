@@ -30,7 +30,8 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
-  border-right: none;
+  /* 毛玻璃和正文区色差太弱，边界原本只能靠滚动条暗示 —— 给一条真的分隔线 */
+  border-right: 1px solid var(--notes-border);
   background: rgba(245, 244, 239, 0.6);
   backdrop-filter: blur(25px);
   -webkit-backdrop-filter: blur(25px);
@@ -117,15 +118,16 @@
   color: var(--notes-text-primary);
 }
 
+/* 篇数是背景信息，不该在标题行占一个胶囊的视觉重量 —— 移到底部状态条，
+   和「待同步」并排，去掉边框和底色 */
 .counter {
   flex: 0 0 auto;
-  padding: 3px 8px;
-  border: 1px solid var(--notes-border);
-  border-radius: 6px;
-  font-size: 10.5px;
+  padding: 0 8px 0 4px;
+  font-size: 11px;
   line-height: 1;
-  color: var(--notes-text-secondary);
-  background: rgba(120, 120, 128, 0.04);
+  color: var(--notes-text-muted);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
 .search {
@@ -317,21 +319,26 @@
   text-overflow: ellipsis;
 }
 
+/* 常驻的深色滚动条会被读成侧栏的分隔线，而它的长度随内容变 —— 改成 macOS 的
+   overlay 行为：平时隐形，指针进入文件树时才浮现。
+   用标准的 scrollbar-color 而不是 ::-webkit-scrollbar-thumb：Chromium 不会因为
+   :hover 状态变化去重绘 scrollbar 伪元素，那条规则写了也不生效。 */
 .treePanel {
   flex: 1;
   min-height: 0;
   overflow: auto;
   padding: 0 8px 16px;
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+  transition: scrollbar-color 0.2s ease;
 }
 
-.treePanel::-webkit-scrollbar,
+.treePanel:hover {
+  scrollbar-color: var(--notes-border-strong) transparent;
+}
+
 .reader::-webkit-scrollbar {
   width: 6px;
-}
-
-.treePanel::-webkit-scrollbar-thumb {
-  background: var(--notes-border-strong);
-  border-radius: 999px;
 }
 
 .treeGroup,
@@ -342,11 +349,13 @@
 
 .treeNodeWrap {
   --level: 0;
+  /* 中文笔记标题长，每级缩进省下的都是标题宽度（VS Code 用 8px） */
+  --tree-indent: 10px;
   position: relative;
   display: flex;
   align-items: center;
   min-width: 0;
-  padding-left: calc(var(--level) * 14px);
+  padding-left: calc(var(--level) * var(--tree-indent));
 }
 
 .treeFolder,
@@ -362,7 +371,7 @@
   border-radius: var(--notes-radius-item);
   background: transparent;
   color: var(--notes-text-secondary);
-  padding: 5px 8px 5px calc(8px + (var(--level) * 14px));
+  padding: 5px 8px 5px calc(8px + (var(--level) * var(--tree-indent, 10px)));
   text-align: left;
   font: inherit;
   font-size: 13.5px;
@@ -474,10 +483,17 @@
   transform: rotate(90deg);
 }
 
+/* 文件没有展开箭头。不给它留出等宽的空位，同级的文件就会比文件夹左移 22px，
+   看起来像高了一级。 */
+.chevronSpacer {
+  flex: 0 0 14px;
+}
+
 .folderGlyph,
 .fileDot {
   display: inline-block;
-  flex-shrink: 0;
+  /* 统一 16px 图标槽：文件图标视觉上更小，但与文件夹图标同心，标签起点齐平 */
+  flex: 0 0 16px;
 }
 
 .folderGlyph {
@@ -495,11 +511,24 @@
   justify-content: center;
 }
 
+/* 中间截断。中文笔记标题的区分度常落在末尾（「晨间书写」/「晨间书写结束」），
+   尾部一律保留、只压缩中段，靠 flex 让浏览器自己算可用宽度。 */
 .treeLabel {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+}
+
+.treeLabelHead {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  flex: 1;
+  min-width: 0;
+}
+
+.treeLabelTail {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .fileTypeBadge {
@@ -536,10 +565,14 @@
   flex-shrink: 0;
   border-top: 1px solid var(--notes-border);
   padding: 6px 8px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .sidebarGitStatus {
-  width: 100%;
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 7px;

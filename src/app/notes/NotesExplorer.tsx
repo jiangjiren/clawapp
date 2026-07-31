@@ -80,6 +80,17 @@ type TreeActionTarget = {
 const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
 
 const stripNoteExtension = (value: string) => value.replace(/\.(md|html?)$/i, "");
+// 树里的标题按中间截断显示：尾部这几个字固定不压缩，中段交给 ellipsis。
+// 按码点切，避免把 emoji 这类代理对切坏。
+const TREE_LABEL_TAIL_CHARS = 4;
+const splitTreeLabel = (label: string): [string, string] => {
+  const chars = Array.from(label);
+  if (chars.length <= TREE_LABEL_TAIL_CHARS * 2) return [label, ""];
+  return [
+    chars.slice(0, -TREE_LABEL_TAIL_CHARS).join(""),
+    chars.slice(-TREE_LABEL_TAIL_CHARS).join(""),
+  ];
+};
 const isSearchQueryReady = (value: string) => {
   const trimmed = value.trim();
   return trimmed.length >= 2 || /[^\u0000-\u007f]/.test(trimmed);
@@ -363,11 +374,21 @@ function TreeItem({
               onClick={() => onSelect(node.path)}
               title={node.path}
             >
-              <svg className={styles.fileDot} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ width: "13px", height: "13px" }}>
+              <span className={styles.chevronSpacer} aria-hidden="true" />
+              <svg className={styles.fileDot} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ height: "13px" }}>
                 <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z" />
                 <polyline points="14 2 14 8 20 8" />
               </svg>
-              <span className={styles.treeLabel}>{isImg ? node.name.replace(/\.[^.]+$/, "") : isPdf ? node.name.replace(/\.pdf$/i, "") : stripNoteExtension(node.name)}</span>
+              {(() => {
+                const label = isImg ? node.name.replace(/\.[^.]+$/, "") : isPdf ? node.name.replace(/\.pdf$/i, "") : stripNoteExtension(node.name);
+                const [head, tail] = splitTreeLabel(label);
+                return (
+                  <span className={styles.treeLabel}>
+                    <span className={styles.treeLabelHead}>{head}</span>
+                    {tail ? <span className={styles.treeLabelTail}>{tail}</span> : null}
+                  </span>
+                );
+              })()}
               {isHtml ? <span className={styles.fileTypeBadge}>html</span> : null}
               {isPdf ? <span className={styles.fileTypeBadge}>pdf</span> : null}
               {isImg ? <span className={styles.fileTypeBadge}>{ext}</span> : null}
@@ -471,7 +492,15 @@ function TreeItem({
                     <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" fill="var(--notes-accent-bg)" />
                   )}
                 </svg>
-                <span className={styles.treeLabel}>{node.name}</span>
+                {(() => {
+                  const [head, tail] = splitTreeLabel(node.name);
+                  return (
+                    <span className={styles.treeLabel}>
+                      <span className={styles.treeLabelHead}>{head}</span>
+                      {tail ? <span className={styles.treeLabelTail}>{tail}</span> : null}
+                    </span>
+                  );
+                })()}
               </button>
               <button
                 type="button"
@@ -3354,7 +3383,6 @@ export default function NotesExplorer() {
               <h1 className={styles.title}>知识库</h1>
             </button>
           )}
-          {!showTauri && <span className={styles.counter}>{files.length} 篇</span>}
           <div className={styles.sidebarActions}>
             <div className={styles.globalCreateWrapper}>
               <button
@@ -3562,26 +3590,29 @@ export default function NotesExplorer() {
           />
         ) : null}
 
-        {globalGitPending !== null && (
+        {(globalGitPending !== null || !showTauri) && (
           <div className={styles.sidebarFooter}>
-            <button
-              type="button"
-              className={styles.sidebarGitStatus}
-              onClick={() => {
-                if (isMobileViewport) setMobileSidebarOpen(false);
-                setGitPanelOpen(true);
-              }}
-              tabIndex={isSidebarOpen ? 0 : -1}
-              title={globalGitPending === 0 ? "已同步到云端" : `${globalGitPending} 篇笔记有未同步的改动`}
-            >
-              <span className={`${styles.sidebarGitDot} ${globalGitPending === 0 ? styles.sidebarGitDotSynced : ""}`} />
-              <span className={styles.sidebarGitLabel}>
-                {globalGitPending === 0 ? "已同步到云端" : `${globalGitPending} 篇待同步`}
-              </span>
-              {globalGitPending > 0 && (
-                <span className={styles.sidebarGitArrow} aria-hidden="true">↑↓</span>
-              )}
-            </button>
+            {globalGitPending !== null && (
+              <button
+                type="button"
+                className={styles.sidebarGitStatus}
+                onClick={() => {
+                  if (isMobileViewport) setMobileSidebarOpen(false);
+                  setGitPanelOpen(true);
+                }}
+                tabIndex={isSidebarOpen ? 0 : -1}
+                title={globalGitPending === 0 ? "已同步到云端" : `${globalGitPending} 篇笔记有未同步的改动`}
+              >
+                <span className={`${styles.sidebarGitDot} ${globalGitPending === 0 ? styles.sidebarGitDotSynced : ""}`} />
+                <span className={styles.sidebarGitLabel}>
+                  {globalGitPending === 0 ? "已同步到云端" : `${globalGitPending} 篇待同步`}
+                </span>
+                {globalGitPending > 0 && (
+                  <span className={styles.sidebarGitArrow} aria-hidden="true">↑↓</span>
+                )}
+              </button>
+            )}
+            {!showTauri && <span className={styles.counter}>{files.length} 篇</span>}
           </div>
         )}
       </aside>
