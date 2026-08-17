@@ -27,13 +27,30 @@ const DEFAULT_PERMISSION_MODE = PERMISSION_MODES.has(process.env.CLAUDE_PERMISSI
   ? process.env.CLAUDE_PERMISSION_MODE
   : "auto";
 
-// How long a query() stream can be silent before we consider it stalled.
-// We use event-interval (not total duration) so long but active tasks (multi-tool,
-// compaction, slow thinking) are never killed — only truly frozen streams are.
+// How long a Claude query() stream can be silent before we consider it stalled.
+// Codex deliberately does not inherit these limits: reasoning models can be silent
+// for many minutes while still working, and the Codex SDK does not expose a reliable
+// progress heartbeat during that phase. Optional Codex watchdogs remain available
+// as deployment overrides, but are disabled by default.
 // 工具执行期间（assistant tool_use 之后、tool_result 之前）两个看门狗都会暂停：
 // 工具可能合法地运行数小时，期间 SDK 本来就不产生事件。
 const STREAM_STALL_MS = 180_000; // 3 min with no events → abort
 const MAX_AGENT_RUN_MS = 8 * 60_000; // 单个 API 阶段（不含工具执行）的硬上限，兜底无限 api_retry
+// 网页 Codex 面向深度研究和长时间编辑，SDK 在模型推理期间可能数分钟不产出事件。
+// 默认不使用墙上时钟自动终止：0 = 关闭。运维若确实需要资源上限，可按实例显式配置。
+export function resolveCodexRunTimeouts(env = process.env) {
+  const parse = (value) => {
+    if (value == null || String(value).trim() === "") return 0;
+    const parsed = Number(String(value).trim());
+    // Node 超过 32 位有符号整数的 timeout 会溢出成 1ms，宁可视为关闭。
+    return Number.isSafeInteger(parsed) && parsed > 0 && parsed <= 2_147_483_647 ? parsed : 0;
+  };
+  return {
+    stallMs: parse(env.CODEX_STREAM_STALL_MS),
+    maxRunMs: parse(env.CODEX_MAX_RUN_MS),
+  };
+}
+const CODEX_RUN_TIMEOUTS = resolveCodexRunTimeouts();
 const ASK_USER_QUESTION_TOOL = "AskUserQuestion";
 const USAGE_LIMIT_QUERY_TIMEOUT_MS = 12_000;
 // 客户端断线后，生成中的 run 保留这么久等待重连领回。
@@ -225,21 +242,28 @@ function clearSession() {
 // ── Codex thread persistence ───────────────────────────────
 const CODEX_THREAD_FILE = join(DATA_DIR, `codex-thread-${PORT}.json`);
 let codexThreadId = null;
+let codexThreadModel = null;
 try {
   if (existsSync(CODEX_THREAD_FILE)) {
-    codexThreadId = JSON.parse(readFileSync(CODEX_THREAD_FILE, "utf8")).threadId ?? null;
+    const savedThread = JSON.parse(readFileSync(CODEX_THREAD_FILE, "utf8"));
+    codexThreadId = savedThread.threadId ?? null;
+    codexThreadModel = savedThread.model ?? null;
     if (codexThreadId) console.log(`Restored codex thread: ${codexThreadId}`);
   }
 } catch { }
 
-function saveCodexThread(id) {
+function saveCodexThread(id, model = codexThreadModel) {
   codexThreadId = id;
-  try { writeFileSync(CODEX_THREAD_FILE, JSON.stringify({ threadId: id }), "utf8"); } catch { }
+  codexThreadModel = typeof model === "string" && model.trim() ? model.trim() : null;
+  try {
+    writeFileSync(CODEX_THREAD_FILE, JSON.stringify({ threadId: id, model: codexThreadModel }), "utf8");
+  } catch { }
 }
 
 function clearCodexThread() {
   codexThreadId = null;
-  try { writeFileSync(CODEX_THREAD_FILE, JSON.stringify({ threadId: null }), "utf8"); } catch { }
+  codexThreadModel = null;
+  try { writeFileSync(CODEX_THREAD_FILE, JSON.stringify({ threadId: null, model: null }), "utf8"); } catch { }
 }
 
 function clearAllSessions() {
@@ -247,10 +271,13 @@ function clearAllSessions() {
   clearCodexThread();
 }
 
-function setProviderSession(provider, id) {
+function setProviderSession(provider, id, model = null) {
   if (provider === "codex") {
     clearSession();
-    saveCodexThread(id);
+    const resolvedModel = typeof model === "string" && model.trim()
+      ? model.trim()
+      : (id === codexThreadId ? codexThreadModel : null);
+    saveCodexThread(id, resolvedModel);
   } else {
     clearCodexThread();
     saveSession(id);
@@ -960,7 +987,7 @@ function historyMessagesEquivalent(left, right) {
 
 function updateHistoryConversationMeta(id, current, conv) {
   const patch = {};
-  for (const key of ["title", "date", "sessionId", "sessionProvider", "profileId"]) {
+  for (const key of ["title", "date", "sessionId", "sessionProvider", "model", "profileId"]) {
     if (Object.hasOwn(conv, key) && conv[key] !== undefined) patch[key] = conv[key];
   }
   eventLog.updateMeta(id, patch);
@@ -1002,6 +1029,9 @@ function beginRunHistory(run, msg) {
   const conversationId = normalizeHistoryId(msg.conversationId);
   const userMessageId = normalizeHistoryId(msg.userMessageId);
   eventLog.ensureConversation(conversationId, { title: displayText });
+  eventLog.updateMeta(conversationId, {
+    model: typeof msg.model === "string" && msg.model.trim() ? msg.model.trim() : null,
+  });
   run.historyConversationId = conversationId;
   run.turnId = crypto.randomUUID();
   run.turnFinalized = false;
@@ -2474,7 +2504,7 @@ const http = createServer((req, res) => {
   // ── REST API: history ─────────────────────────────────────
   if (url === "/api/history" && method === "GET") {
     // 列表只读每个会话的 meta.json（几 KB），不做投影、不碰事件日志
-    res.writeHead(200, { "Content-Type": "application/json" });
+    res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
     res.end(JSON.stringify(eventLog.listConversations()));
     return;
   }
@@ -2646,7 +2676,7 @@ const http = createServer((req, res) => {
     if (method === "GET") {
       const conv = eventLog.project(id);
       if (conv) {
-        res.writeHead(200, { "Content-Type": "application/json" });
+        res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
         res.end(JSON.stringify(conv));
       } else {
         res.writeHead(404, { "Content-Type": "application/json" });
@@ -2688,7 +2718,10 @@ const http = createServer((req, res) => {
       return;
     }
   }
-  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+  res.writeHead(200, {
+    "Content-Type": "text/html; charset=utf-8",
+    "Cache-Control": "no-store",
+  });
   res.end(readFileSync(htmlPath, "utf8"));
 });
 
@@ -2768,7 +2801,16 @@ function currentTurnSnapshot(convId, meta = eventLog.getMeta(convId)) {
   if (!turn) return null;
   if (turn.status !== "running") return turn;
   const live = liveRunsByConversation.get(convId);
-  if (live && !live.finished) return turn;
+  if (live && !live.finished) {
+    return {
+      ...turn,
+      startedAt: live.startedAt ?? null,
+      lastActivityAt: live.lastActivityAt ?? live.startedAt ?? null,
+      provider: live.provider ?? null,
+      model: live.model ?? null,
+      effort: live.effort ?? null,
+    };
+  }
   return { ...turn, status: "interrupted" };
 }
 const CLIENT_REQUEST_STATE_MAX = 500;
@@ -2938,10 +2980,15 @@ function interruptClaudeTurn() {
 }
 
 function createRun(runId, ws, ac) {
+  const startedAt = Date.now();
   return {
     id: runId,
     requestId: null,
     provider: null,
+    model: null,
+    effort: null,
+    startedAt,
+    lastActivityAt: startedAt,
     steeringRequestIds: new Set(),
     ac,
     ws,
@@ -2952,6 +2999,8 @@ function createRun(runId, ws, ac) {
     pendingAskUserQuestion: null,
     send(obj) {
       if (this.discarded) return;
+      // ACK 只是传输控制帧（重连时也会补发），不能装成 Agent 有了新进展。
+      if (obj.type !== "request_ack") this.lastActivityAt = Date.now();
       // 所有事件带上 runId：客户端据此丢弃被新请求取代的旧 run 的迟到事件
       const tagged = { ...obj, runId: this.id };
       if (this.requestId && !tagged.userMessageId) tagged.userMessageId = this.requestId;
@@ -3274,7 +3323,7 @@ wss.on("connection", (ws) => {
     if (msg.setSession != null) {
       const id = String(msg.setSession);
       const provider = resolveSessionProvider(msg.sessionProvider, id);
-      setProviderSession(provider, id);
+      setProviderSession(provider, id, msg.model);
       send({ type: "session", sessionId: id, provider });
       return;
     }
@@ -3388,10 +3437,20 @@ wss.on("connection", (ws) => {
     }
     const activeProfile = getActiveProfile(profileData);
     run.provider = activeProfile?.provider ?? "claude";
+    run.model = typeof msg.model === "string" && msg.model ? msg.model : null;
+    run.effort = effort;
     msg.conversationId = beginRunHistory(run, msg);
     rememberClientRequest(requestId, "running", run.id);
     run.send({ type: "request_ack", userMessageId: requestId, state: "running" });
-    run.send({ type: "request_started", userMessageId: requestId, conversationId: msg.conversationId });
+    run.send({
+      type: "request_started",
+      userMessageId: requestId,
+      conversationId: msg.conversationId,
+      startedAt: run.startedAt,
+      provider: run.provider,
+      model: run.model,
+      effort: run.effort,
+    });
 
     if (activeProfile && activeProfile.provider !== "claude" && activeProfile.provider !== "codex" && !activeProfile.apiKey) {
       run.send({ type: "error", text: `${activeProfile.name} 的 API Key 还没有配置，请先在账号设置里保存。` });
@@ -3451,19 +3510,19 @@ wss.on("connection", (ws) => {
         const tempImagePaths = [];
         const resetStall = () => {
           clearTimeout(stallTimer);
-          if (toolRunning) return;
+          if (toolRunning || CODEX_RUN_TIMEOUTS.stallMs === 0) return;
           stallTimer = setTimeout(() => {
             isTimeoutAbort = true;
             ac.abort();
-          }, STREAM_STALL_MS);
+          }, CODEX_RUN_TIMEOUTS.stallMs);
         };
         const resetHardTimer = () => {
           clearTimeout(hardTimer);
-          if (toolRunning) return;
+          if (toolRunning || CODEX_RUN_TIMEOUTS.maxRunMs === 0) return;
           hardTimer = setTimeout(() => {
             isTimeoutAbort = true;
             ac.abort();
-          }, MAX_AGENT_RUN_MS);
+          }, CODEX_RUN_TIMEOUTS.maxRunMs);
         };
         const CODEX_TOOL_ITEMS = new Set(["command_execution", "mcp_tool_call", "web_search", "file_change"]);
         resetHardTimer();
@@ -3478,6 +3537,23 @@ wss.on("connection", (ws) => {
             modelReasoningEffort: EFFORT_TO_REASONING[effort] || "medium",
             ...(msg.model ? { model: msg.model } : {}),
           };
+          const requestedModel = typeof msg.model === "string" && msg.model.trim()
+            ? msg.model.trim()
+            : null;
+          if (codexThreadId && codexThreadModel && requestedModel
+              && codexThreadModel !== requestedModel) {
+            const previousModel = codexThreadModel;
+            console.log(`[Web Agent] Codex 模型从 ${previousModel} 切换到 ${requestedModel}，新建 thread。`);
+            clearCodexThread();
+            send({
+              type: "system",
+              subtype: "status",
+              status: "new_thread",
+              reason: "model_changed",
+              previousModel,
+              model: requestedModel,
+            });
+          }
           const thread = codexThreadId
             ? codex.resumeThread(codexThreadId, threadOptions)
             : codex.startThread(threadOptions);
@@ -3515,7 +3591,7 @@ wss.on("connection", (ws) => {
             }
             resetStall();
             if (ev.type === "thread.started") {
-              saveCodexThread(ev.thread_id);
+              saveCodexThread(ev.thread_id, requestedModel);
               send({ type: "session", sessionId: ev.thread_id, provider: "codex" });
             } else if (ev.type === "turn.started") {
               send({ type: "system", subtype: "status", status: "requesting" });

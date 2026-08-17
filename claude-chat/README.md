@@ -84,6 +84,7 @@ Profiles can be added, edited, activated, and removed in the UI. Claude is alway
 The panel supports:
 
 - Model selection and provider-specific reasoning/effort levels.
+- Unlimited Codex web runs by default. After three silent minutes the panel shows a non-blocking progress notice; after fifteen it offers `Continue waiting` and `Stop task`, but never cancels automatically.
 - `plan`, `acceptEdits`, `auto`, and `bypassPermissions` modes.
 - Streaming text, thinking, tool use/results, cost/usage events, and interactive questions.
 - New, resume, rename, and delete operations for locally stored conversations.
@@ -128,6 +129,8 @@ WeChat state and downloaded media are stored below `CLAUDE_CHAT_DATA_DIR`. Treat
 | `CLAUDE_CHAT_DATA_DIR` | `claude-chat/data` | Sessions, history, schedules, run logs, WeChat state, media, and Codex thread data. |
 | `CLAUDE_CHAT_AUTH_PROFILE_FILE` | `claude-chat/auth-profile.json` | Provider profiles and API keys. |
 | `CLAUDE_CHAT_HISTORY_FILE` | `<data dir>/history-<port>.json` | Optional override for the conversation history file. |
+| `CODEX_STREAM_STALL_MS` | `0` (disabled) | Optional Codex no-event watchdog in milliseconds. Leave disabled for long-running work. |
+| `CODEX_MAX_RUN_MS` | `0` (disabled) | Optional Codex wall-clock watchdog in milliseconds. Leave disabled for long-running work. |
 | `WECHAT_CDN_BASE_URL` | Tencent CDN URL | Override for WeChat media downloads. |
 | `WECHAT_MAX_INLINE_IMAGE_BYTES` | `5242880` | Maximum image size embedded directly into an agent request. |
 | `WECHAT_MAX_MEDIA_BYTES` | `26214400` | Maximum inbound or outbound WeChat media size. |
@@ -193,10 +196,11 @@ Recommended boundaries:
 npm ci
 node --check server.js
 node --check scheduler.js
+npm test
 npm start
 ```
 
-There is currently no automated test script in `claude-chat/package.json`; the declared `npm test` intentionally exits with an error. Use syntax checks plus a local service smoke test, then run the root project checks before release.
+`npm test` runs the isolated Node test suite. The server tests reserve temporary ports and data directories so they do not touch the production instances or credentials.
 
 ## Security Checklist
 
@@ -211,6 +215,7 @@ There is currently no automated test script in `claude-chat/package.json`; the d
 
 - **Claude shows logged out:** run `claude auth status` as the exact service user and check its `HOME` and keychain access.
 - **Codex profile is missing:** complete `codex login` as the service user and confirm that `~/.codex/auth.json` exists.
+- **A long Codex task looks quiet:** the web run has no automatic deadline by default. Keep waiting or stop it from the long-run notice; check `CODEX_*_MS` only if an operator intentionally configured a watchdog.
 - **Panel loads but streaming fails:** preserve WebSocket upgrade headers and make the configured frontend port match the service port.
 - **Agent cannot see the vault:** use an absolute `VAULT_PATH` and verify filesystem permissions for the service user.
 - **A stale provider endpoint is used:** remove inherited `ANTHROPIC_*` overrides from the process manager, then restart and activate the intended UI profile.

@@ -89,6 +89,7 @@ function emptyMeta(convId) {
     date: new Date().toISOString(),
     sessionId: null,
     sessionProvider: null,
+    model: null,
     profileId: null,
     lastSeq: 0,
     messageCount: 0,
@@ -352,6 +353,7 @@ function createProjectionState(convId) {
     last: null,          // 对应 run.lastHistoryAssistantMessage
     sessionId: null,
     sessionProvider: null,
+    model: null,
     profileId: null,
     title: null,
     date: null,
@@ -507,6 +509,7 @@ export function project(convId) {
     date: state.date || meta?.date || new Date().toISOString(),
     sessionId: state.sessionId ?? meta?.sessionId ?? null,
     sessionProvider: state.sessionProvider ?? meta?.sessionProvider ?? null,
+    model: state.model ?? meta?.model ?? null,
     profileId: meta?.profileId ?? null,
     messages: state.messages,
   };
@@ -617,6 +620,7 @@ export function replaceFromConversation(conversation) {
     date: conversation.date ?? undefined,
     sessionId: conversation.sessionId ?? null,
     sessionProvider: conversation.sessionProvider ?? null,
+    model: conversation.model ?? null,
     profileId: conversation.profileId ?? null,
     messageCount: (conversation.messages ?? []).length,
   });

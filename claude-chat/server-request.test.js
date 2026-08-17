@@ -228,6 +228,29 @@ test("Codex 只有周窗口时不会再误标成 5 小时额度", { timeout: 40_
   assert.equal(windows.legacy.week.usedPercent, 40);
 });
 
+test("Codex 网页运行默认不限时，只有正整数环境变量才启用看门狗", { timeout: 40_000 }, async () => {
+  const timeouts = await evalInServer(`m => ({
+    defaults: m.resolveCodexRunTimeouts({}),
+    configured: m.resolveCodexRunTimeouts({
+      CODEX_STREAM_STALL_MS: "600000",
+      CODEX_MAX_RUN_MS: "3600000",
+    }),
+    disabled: m.resolveCodexRunTimeouts({
+      CODEX_STREAM_STALL_MS: "0",
+      CODEX_MAX_RUN_MS: "not-a-number",
+    }),
+    overflow: m.resolveCodexRunTimeouts({
+      CODEX_STREAM_STALL_MS: "2147483648",
+      CODEX_MAX_RUN_MS: "1.5",
+    }),
+  })`);
+
+  assert.deepEqual(timeouts.defaults, { stallMs: 0, maxRunMs: 0 });
+  assert.deepEqual(timeouts.configured, { stallMs: 600_000, maxRunMs: 3_600_000 });
+  assert.deepEqual(timeouts.disabled, { stallMs: 0, maxRunMs: 0 });
+  assert.deepEqual(timeouts.overflow, { stallMs: 0, maxRunMs: 0 });
+});
+
 test("连接建立后立即下发 skill init", { timeout: 30_000 }, async () => {
   const server = await startServer();
   let ws;

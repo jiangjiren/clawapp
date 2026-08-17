@@ -299,6 +299,62 @@ html, body { height: 100%; height: 100dvh; overflow: hidden; margin: 0; padding:
 .bga-item[data-s="done"] .bga-ilabel, .bga-item[data-s="failed"] .bga-ilabel { color: var(--text-dim); }
 .bga-imeta { flex-shrink: 0; font-size: 10px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
 
+/* 长时间无 SDK 事件只是“沉默”，不等于任务失败。软提示让用户看得见时间、也保留控制权。 */
+#long-run-status {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0 0 8px;
+  padding: 8px 9px 8px 12px;
+  min-height: 38px;
+  border: 1px solid rgba(var(--accent-rgb), 0.18);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent) 4%, var(--surface));
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  animation: bgaIn 0.28s var(--ease-out) both;
+}
+#long-run-status[hidden] { display: none; }
+#long-run-status.actionable {
+  border-color: rgba(var(--yellow-rgb), 0.2);
+  background: color-mix(in srgb, var(--yellow) 5%, var(--surface));
+}
+.lrs-pulse {
+  position: relative;
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.lrs-pulse::after {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border: 1px solid rgba(var(--accent-rgb), 0.32);
+  border-radius: inherit;
+  animation: sqRing var(--beat) ease-out infinite;
+}
+#long-run-status.actionable .lrs-pulse { background: var(--yellow); }
+#long-run-status.actionable .lrs-pulse::after { border-color: rgba(var(--yellow-rgb), 0.34); }
+.lrs-copy { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.lrs-title { color: var(--text); font-size: 11.5px; font-weight: 600; line-height: 1.35; }
+.lrs-meta { color: var(--text-dim); font-size: 10px; line-height: 1.35; font-variant-numeric: tabular-nums; }
+.lrs-actions { display: none; align-items: center; gap: 4px; flex: 0 0 auto; }
+#long-run-status.actionable .lrs-actions { display: flex; }
+.lrs-btn {
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 10.5px;
+  cursor: pointer;
+}
+.lrs-btn:hover { border-color: var(--border-strong); color: var(--text); }
+.lrs-btn.stop:hover { border-color: rgba(var(--red-rgb), 0.28); color: var(--red); }
+
 /* ── Codex 的 todo_list：串行计划，刻意不长成编队卡 ── */
 .todo { border: 1px solid var(--border); border-left: 2px solid var(--text-dim); border-radius: 6px; background: var(--tool-bg); padding: 8px 11px; margin: 6px 0; animation: squadIn 0.3s var(--ease-out) both; }
 .todo-h { font-size: 10.5px; font-weight: 650; color: var(--text-dim); letter-spacing: 0.04em; margin-bottom: 6px; }
@@ -1436,6 +1492,33 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
   padding: 28px 14px; text-align: center;
   color: var(--text-dim); font-size: 12px;
 }
+.history-load-error {
+  min-height: 150px;
+  padding: 28px 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  text-align: center;
+}
+.history-load-error-title { color: var(--text); font-size: 12px; font-weight: 600; }
+.history-load-error-detail { max-width: 240px; color: var(--text-dim); font-size: 10.5px; line-height: 1.5; }
+.history-retry {
+  height: 28px;
+  margin-top: 5px;
+  padding: 0 11px;
+  border: 1px solid rgba(var(--accent-rgb), 0.24);
+  border-radius: 8px;
+  background: rgba(var(--accent-rgb), 0.06);
+  color: var(--accent);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.history-retry:hover { border-color: rgba(var(--accent-rgb), 0.42); background: rgba(var(--accent-rgb), 0.1); }
+.history-retry:focus-visible { outline: 2px solid rgba(var(--accent-rgb), 0.34); outline-offset: 2px; }
 .history-skeleton-item {
   display: flex; flex-direction: column; gap: 6px;
   padding: 10px 14px; border-bottom: 1px solid var(--border);
@@ -2067,6 +2150,7 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
   .gen-chip-dot,
   .thinking-dot,
   .bga-dot,
+  .lrs-pulse::after,
   .bga-item[data-s="running"] .bga-idot,
   .sq-row[data-s="running"] .sq-dot,
   .todo-i.now .todo-b::after,
@@ -2264,6 +2348,17 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
       </div>
       <div class="bga-body"><div class="bga-clip"><div class="bga-list"></div></div></div>
     </div>
+    <div id="long-run-status" role="status" aria-live="polite" hidden>
+      <span class="lrs-pulse" aria-hidden="true"></span>
+      <span class="lrs-copy">
+        <span class="lrs-title">Codex 正在深度处理</span>
+        <span class="lrs-meta"></span>
+      </span>
+      <span class="lrs-actions">
+        <button type="button" class="lrs-btn wait">继续等待</button>
+        <button type="button" class="lrs-btn stop">停止任务</button>
+      </span>
+    </div>
     <div id="composer">
       <div id="image-chip"></div>
       <div id="mention-chips" aria-label="已选择的文件上下文"></div>
@@ -2431,6 +2526,11 @@ const authBackBtn   = document.getElementById("auth-back");
 const authFormStatusEl = document.getElementById("auth-form-status");
 const iconSend = document.getElementById("icon-send");
 const iconStop = document.getElementById("icon-stop");
+const longRunStatusEl = document.getElementById("long-run-status");
+const longRunTitleEl = longRunStatusEl.querySelector(".lrs-title");
+const longRunMetaEl = longRunStatusEl.querySelector(".lrs-meta");
+const longRunWaitBtn = longRunStatusEl.querySelector(".lrs-btn.wait");
+const longRunStopBtn = longRunStatusEl.querySelector(".lrs-btn.stop");
 
 function showInlineError(text) {
   const el = document.createElement("div");
@@ -2446,6 +2546,12 @@ let genChipEl = null;
 let lastWsEventAt = 0; // timestamp of last event received from server, for stall detection
 let currentRunId = null; // 本次生成的 runId；断线重连后凭它向服务端领回进行中的回答
 let activeRequestId = null;
+let currentRunProvider = null;
+let runStartedAt = 0;
+let lastRunProgressAt = 0;
+let longRunAcknowledgedAt = 0;
+const LONG_RUN_NOTICE_MS = 3 * 60_000;
+const LONG_RUN_ACTION_MS = 15 * 60_000;
 const unackedRequests = new Map(); // userMessageId -> payload，ACK 丢失时可安全重发
 const queuedFollowUps = new Map(); // Codex/忙碌状态下等待下一轮的 payload
 const requestRetryTimers = new Map();
@@ -2571,6 +2677,7 @@ let messageLog = [];       // messages in current conversation
 let currentConvId = null;  // current conversation id
 let currentSessionId = null; // current Claude session / Codex thread id
 let currentSessionProvider = null; // "claude" | "codex"
+let currentSessionModel = null;
 
 // ── 游标同步状态 ──────────────────────────────────────────
 // 断线/刷新后靠 {conversationId, lastSeq} 向服务端要差量，不再依赖内存里的 runId。
@@ -2612,16 +2719,34 @@ function genId() {
 
 
 let _historyCache = null;  // in-memory cache, avoids fetch delay on open
+let _historyFetchPromise = null;
+const HISTORY_FETCH_TIMEOUT_MS = 12_000;
 
 async function fetchHistory() {
+  // 同一个面板可能被连续打开；复用在途请求，避免堆出一串永远不结束的 fetch。
+  if (_historyFetchPromise) return _historyFetchPromise;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), HISTORY_FETCH_TIMEOUT_MS);
+  const request = (async () => {
+    const res = await fetch(`api/history?_=${Date.now()}`, {
+      cache: "no-store",
+      headers: { Accept: "application/json" },
+      signal: controller.signal,
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const history = await res.json();
+    if (!Array.isArray(history)) throw new Error("invalid history response");
+    _historyCache = history;
+    return history;
+  })();
+  _historyFetchPromise = request;
   try {
-    const res = await fetch("api/history");
-    if (res.ok) {
-      _historyCache = await res.json();
-      return _historyCache;
-    }
-  } catch { }
-  return _historyCache ?? [];
+    return await request;
+  } finally {
+    clearTimeout(timeout);
+    if (_historyFetchPromise === request) _historyFetchPromise = null;
+  }
 }
 
 // ── Auth: 账号配置列表 ────────────────────────────────────────
@@ -3181,6 +3306,7 @@ async function activateProfile(id) {
     if (d.resetSession) {
       currentSessionId = null;
       currentSessionProvider = null;
+      currentSessionModel = null;
       ws?.send(JSON.stringify({ reset: true }));
     }
     setAuthStatus("saved", "已切换");
@@ -3200,6 +3326,7 @@ async function deleteProfile(id) {
     if (d.resetSession) {
       currentSessionId = null;
       currentSessionProvider = null;
+      currentSessionModel = null;
       ws?.send(JSON.stringify({ reset: true }));
     }
     setAuthStatus("saved", "已删除");
@@ -3328,6 +3455,7 @@ addSubmitBtn.addEventListener("click", async () => {
     if (d.resetSession) {
       currentSessionId = null;
       currentSessionProvider = null;
+      currentSessionModel = null;
       ws?.send(JSON.stringify({ reset: true }));
     }
     showListView();
@@ -3551,6 +3679,7 @@ async function saveCurrentConversation() {
     date: new Date().toISOString(),
     sessionId: currentSessionId,
     sessionProvider: currentSessionProvider,
+    model: currentSessionModel,
     profileId: _profileData.activeProfileId,
     messages: messageLog.map(m => ({
       id: m.id ?? undefined,
@@ -3772,10 +3901,14 @@ function applyToolFailuresFromBlocks(body, blocks) {
 }
 
 function setGenerating(v, notifyParent = true) {
+  const wasGenerating = isGenerating;
   isGenerating = v;
   if (!v) {
     removeGenChip();
     cleanupRunningTools();
+    resetLongRunMonitor();
+  } else if (!wasGenerating && !runStartedAt) {
+    startLongRunMonitor({ provider: currentSessionProvider });
   }
   sendBtn.disabled = false;
   syncSendButtonMode();
@@ -3783,6 +3916,76 @@ function setGenerating(v, notifyParent = true) {
   updateBackgroundActivity();
   if (notifyParent) postParentMessage({ type: "ai-generating-state", isGenerating: v });
 }
+
+function activeProfileProvider() {
+  return _profileData.profiles.find(profile => profile.id === _profileData.activeProfileId)?.provider
+    ?? currentSessionProvider
+    ?? "claude";
+}
+
+function validRunTimestamp(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function startLongRunMonitor({ startedAt, lastActivityAt, provider } = {}) {
+  const now = Date.now();
+  const nextStartedAt = validRunTimestamp(startedAt, now);
+  const sameRun = runStartedAt > 0 && runStartedAt === nextStartedAt;
+  currentRunProvider = provider ?? currentRunProvider ?? activeProfileProvider();
+  runStartedAt = nextStartedAt;
+  lastRunProgressAt = validRunTimestamp(lastActivityAt, runStartedAt);
+  longRunAcknowledgedAt = sameRun
+    ? Math.max(longRunAcknowledgedAt, lastRunProgressAt)
+    : lastRunProgressAt;
+  updateLongRunStatus();
+}
+
+function noteRunProgress() {
+  if (!isGenerating) return;
+  const now = Date.now();
+  if (!runStartedAt) runStartedAt = now;
+  lastRunProgressAt = now;
+  longRunAcknowledgedAt = now;
+  updateLongRunStatus();
+}
+
+function resetLongRunMonitor() {
+  currentRunProvider = null;
+  runStartedAt = 0;
+  lastRunProgressAt = 0;
+  longRunAcknowledgedAt = 0;
+  longRunStatusEl.hidden = true;
+  longRunStatusEl.classList.remove("actionable");
+}
+
+function updateLongRunStatus() {
+  if (!isGenerating || currentRunProvider !== "codex" || !runStartedAt || !lastRunProgressAt) {
+    longRunStatusEl.hidden = true;
+    longRunStatusEl.classList.remove("actionable");
+    return;
+  }
+  const now = Date.now();
+  const silentFor = Math.max(0, now - lastRunProgressAt);
+  if (silentFor < LONG_RUN_NOTICE_MS) {
+    longRunStatusEl.hidden = true;
+    longRunStatusEl.classList.remove("actionable");
+    return;
+  }
+  const elapsed = Math.max(0, now - runStartedAt);
+  const actionable = now - Math.max(lastRunProgressAt, longRunAcknowledgedAt) >= LONG_RUN_ACTION_MS;
+  longRunStatusEl.hidden = false;
+  longRunStatusEl.classList.toggle("actionable", actionable);
+  longRunTitleEl.textContent = actionable ? "Codex 长时间没有新事件" : "Codex 正在深度处理";
+  longRunMetaEl.textContent = `已运行 ${formatElapsed(elapsed)} · ${formatElapsed(silentFor)} 无新进度，任务仍在后台`;
+}
+
+setInterval(updateLongRunStatus, 5_000);
+
+longRunWaitBtn.addEventListener("click", () => {
+  longRunAcknowledgedAt = Date.now();
+  updateLongRunStatus();
+});
 
 // ── Note context + mentionable vault files ────────────────
 let currentNoteFile = null;
@@ -5074,6 +5277,7 @@ function applySyncSnapshot(snapshot, convId) {
   if (snapshot.sessionProvider === "codex" || snapshot.sessionProvider === "claude") {
     currentSessionProvider = snapshot.sessionProvider;
   }
+  currentSessionModel = typeof snapshot.model === "string" ? snapshot.model : null;
   scrollBottom();
 }
 
@@ -5104,6 +5308,7 @@ function appendSyncedUserMessage(payload) {
 function applySyncTurn(turn) {
   if (turn && turn.status === "running") {
     setGenerating(true);
+    startLongRunMonitor(turn);
     addTyping();
     return;
   }
@@ -5138,6 +5343,15 @@ function handleEvent(ev) {
     syncCursor = { conversationId: ev.conversationId, lastSeq: ev.seq };
     saveCursor();
   }
+
+  if (ev.type === "request_started") {
+    currentSessionModel = typeof ev.model === "string" ? ev.model : currentSessionModel;
+    startLongRunMonitor(ev);
+    return;
+  }
+
+  // 只有真实的 Agent/SDK 事件才算进度；重连时补发的 ACK 不重置沉默计时。
+  if (ev.runId && ev.type !== "request_ack") noteRunProgress();
 
   if (ev.type === "reset_complete") {
     clearAllUnackedRequests();
@@ -5228,7 +5442,11 @@ function handleEvent(ev) {
   }
 
   if (ev.type === "system" && ev.subtype === "status") {
-    const STATUS_LABEL = { compacting: "压缩上下文中…", requesting: "请求中…" };
+    const STATUS_LABEL = {
+      compacting: "压缩上下文中…",
+      requesting: "请求中…",
+      new_thread: "模型已切换，正在新会话中处理…",
+    };
     updateTypingStatus(STATUS_LABEL[ev.status] ?? "");
     return;
   }
@@ -5533,6 +5751,7 @@ function handleEvent(ev) {
   if (ev.type === "session" && ev.sessionId) {
     currentSessionId = ev.sessionId;
     currentSessionProvider = ev.provider === "codex" ? "codex" : "claude";
+    if (isGenerating) currentRunProvider = currentSessionProvider;
     alignProfileToSessionProvider(currentSessionProvider);
     return;
   }
@@ -5904,7 +6123,7 @@ function selectItem(i) {
     saveCurrentConversation();
     clearAskUserQuestion();
     messagesEl.innerHTML = "";
-    messageLog = []; currentConvId = null; currentSessionId = null; currentSessionProvider = null;
+    messageLog = []; currentConvId = null; currentSessionId = null; currentSessionProvider = null; currentSessionModel = null;
     resetCursor();
     promptEl.value = "";
     promptEl.style.height = "36px";
@@ -6009,6 +6228,9 @@ function scheduleQueuedFollowUpDrain(delayMs = 0) {
     resetAssistantState();
     addTyping();
     setGenerating(true);
+    const queuedProfile = _profileData.profiles.find(profile => profile.id === queuedPayload.profileId);
+    startLongRunMonitor({ provider: queuedProfile?.provider ?? activeProfileProvider() });
+    currentSessionModel = queuedPayload.model ?? currentSessionModel;
     currentRunId = crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     activeRequestId = requestId;
     const payload = { ...queuedPayload, runId: currentRunId };
@@ -6032,7 +6254,7 @@ function send() {
     saveCurrentConversation();
     clearAskUserQuestion();
     messagesEl.innerHTML = "";
-    messageLog = []; currentConvId = null; currentSessionId = null; currentSessionProvider = null;
+    messageLog = []; currentConvId = null; currentSessionId = null; currentSessionProvider = null; currentSessionModel = null;
     resetCursor();
     promptEl.value = "";
     promptEl.style.height = "36px";
@@ -6079,6 +6301,8 @@ function send() {
   if (!isFollowUp) {
     addTyping();
     setGenerating(true);
+    startLongRunMonitor({ provider: activeProfileProvider() });
+    currentSessionModel = selectedModel;
   }
   lastWsEventAt = Date.now();
 
@@ -6272,16 +6496,19 @@ function syncSendButtonMode() {
   iconStop.style.display = showStop ? "" : "none";
 }
 
+function stopCurrentRun() {
+  if (!isGenerating) return;
+  ws?.send(JSON.stringify({ stop: true }));
+  clearAskUserQuestion();
+  setGenerating(false);
+  removeTyping();
+}
+
 sendBtn.addEventListener("click", () => {
-  if (isGenerating && !promptEl.value.trim()) {
-    ws?.send(JSON.stringify({ stop: true }));
-    clearAskUserQuestion();
-    setGenerating(false);
-    removeTyping();
-  } else {
-    send();
-  }
+  if (isGenerating && !promptEl.value.trim()) stopCurrentRun();
+  else send();
 });
+longRunStopBtn.addEventListener("click", stopCurrentRun);
 
 // ── Header pickers ───────────────────────────────────────
 let selectedModel = "claude-sonnet-5";
@@ -6519,6 +6746,7 @@ async function loadConversation(conv) {
   // 换会话就得换游标：不重置的话旧会话的 lastSeq 会挡住新会话的事件
   resetCursor(conv.id);
   currentSessionId = conv.sessionId;
+  currentSessionModel = typeof conv.model === "string" ? conv.model : null;
   const savedProfile = _profileData.profiles.find(p => p.id === conv.profileId);
   currentSessionProvider = conv.sessionProvider === "codex"
     ? "codex"
@@ -6533,6 +6761,7 @@ async function loadConversation(conv) {
   if (conv.sessionId && ws && ws.readyState === WebSocket.OPEN) {
     const payload = {
       setSession: conv.sessionId,
+      model: conv.model ?? null,
     };
     if (currentSessionProvider) payload.sessionProvider = currentSessionProvider;
     ws.send(JSON.stringify(payload));
@@ -6553,6 +6782,7 @@ async function startNewConversation() {
   currentConvId = null;
   currentSessionId = null;
   currentSessionProvider = null;
+  currentSessionModel = null;
   resetCursor();
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ reset: true }));
@@ -6783,8 +7013,25 @@ async function renderHistoryList() {
       </div>`;
     listEl.innerHTML = skeletonItem(68, 38) + skeletonItem(52, 44) + skeletonItem(75, 32);
   }
-  const history = await fetchHistory();
-  renderHistoryFromData(history);
+  try {
+    const history = await fetchHistory();
+    renderHistoryFromData(history);
+  } catch (error) {
+    // 后台刷新失败时保留已有列表；首次加载失败才用明确错误态替掉无限骨架。
+    if (_historyCache !== null) {
+      renderHistoryFromData(_historyCache);
+      return;
+    }
+    const timedOut = error?.name === "AbortError";
+    listEl.innerHTML = `<div class="history-load-error" role="alert">
+      <div class="history-load-error-title">历史列表没有加载出来</div>
+      <div class="history-load-error-detail">${timedOut ? "连接等待超时，请重新加载。" : "网络连接可能已经失效，请重新加载。"}</div>
+      <button type="button" class="history-retry">重新加载</button>
+    </div>`;
+    listEl.querySelector(".history-retry")?.addEventListener("click", () => {
+      renderHistoryList();
+    }, { once: true });
+  }
 }
 
 document.getElementById("btn-history").addEventListener("click", (e) => {
