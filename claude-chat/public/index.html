@@ -126,28 +126,31 @@ html, body { height: 100%; height: 100dvh; overflow: hidden; margin: 0; padding:
   line-height: 1.55;
   box-shadow: inset 0 0 0 1px rgba(0,0,0,0.025);
 }
-.msg-body { line-height: 1.6; word-break: break-word; }
+/* 阅读面的字阶。这里显式声明 14px，不跟 html/body 的 13px 全局基准走 ——
+   那个 13px 是给侧栏 / 顶栏 / 设置面板的密度，改基准会把整套 chrome 一起
+   撑大。正文是这个产品的主要阅读物，单独抬一档，主次对比反而更清楚。 */
+.msg-body { font-size: 14px; line-height: 1.6; word-break: break-word; }
 .msg-user .msg-body { white-space: pre-wrap; overflow-wrap: anywhere; }
-.msg-body p { margin: 4px 0; }
+.msg-body p { margin: 6px 0; }
 .msg-body p:first-child { margin-top: 0; }
 .msg-body p:last-child { margin-bottom: 0; }
-.msg-body h1,.msg-body h2,.msg-body h3,.msg-body h4 { font-weight: 600; line-height: 1.3; margin: 10px 0 4px; }
-.msg-body h1 { font-size: 15px; }
-.msg-body h2 { font-size: 14px; }
-.msg-body h3,.msg-body h4 { font-size: 13px; }
-.msg-body ul,.msg-body ol { padding-left: 18px; margin: 4px 0; }
-.msg-body li { margin: 2px 0; }
+.msg-body h1,.msg-body h2,.msg-body h3,.msg-body h4 { font-weight: 600; line-height: 1.3; margin: 14px 0 5px; }
+.msg-body h1 { font-size: 17px; }
+.msg-body h2 { font-size: 16px; }
+.msg-body h3,.msg-body h4 { font-size: 14px; }
+.msg-body ul,.msg-body ol { padding-left: 20px; margin: 6px 0; }
+.msg-body li { margin: 3px 0; }
 .msg-body li > p { margin: 0; }
-.msg-body blockquote { border-left: 3px solid var(--border); padding: 2px 0 2px 10px; margin: 6px 0; color: var(--text-dim); }
+.msg-body blockquote { border-left: 3px solid var(--border); padding: 2px 0 2px 12px; margin: 8px 0; color: var(--text-dim); }
 .msg-body a { color: var(--accent); text-decoration: none; }
 .msg-body a:hover { text-decoration: underline; }
 .msg-body hr { border: none; border-top: 1px solid var(--border); margin: 10px 0; }
-.msg-body table { border-collapse: collapse; width: 100%; margin: 6px 0; font-size: 12px; }
+.msg-body table { border-collapse: collapse; width: 100%; margin: 6px 0; font-size: 13px; }
 .msg-body th,.msg-body td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; }
 .msg-body th { background: var(--bg2); font-weight: 600; }
-.msg-body code { background: var(--bg3); border: 1px solid var(--border); border-radius: 3px; padding: 0 4px; font-family: "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace; font-size: 12px; }
+.msg-body code { background: var(--bg3); border: 1px solid var(--border); border-radius: 3px; padding: 0 4px; font-family: "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace; font-size: 13px; }
 .msg-body pre { background: var(--bg2); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; overflow-x: auto; margin: 6px 0; }
-.msg-body pre code { background: none; border: none; padding: 0; font-size: 12px; }
+.msg-body pre code { background: none; border: none; padding: 0; font-size: 13px; }
 .tool-call { display: flex; align-items: center; gap: 8px; background: var(--tool-bg); border: 1px solid var(--border); border-left: 2px solid var(--border-strong); border-radius: 6px; padding: 7px 10px; margin: 4px 0; font-family: "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace; font-size: 11px; transition: border-left-color 0.2s, background 0.2s, color 0.2s; }
 .tool-call.running { border-left-color: var(--accent); background: color-mix(in srgb, var(--accent) 5%, var(--tool-bg)); }
 .tool-call.running .tool-name { color: var(--accent); }
@@ -1103,7 +1106,9 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
 
 .thinking-content {
   padding: 4px 10px 8px;
-  font-size: 11.5px;
+  /* 展开后是给人读的散文，比 11px 的工具块高一档；但必须明显低于 14px 的
+     正文，否则会跟正文抢注意力 —— 从属关系靠这个差值撑着。 */
+  font-size: 12px;
   color: var(--text-dim);
   line-height: 1.6;
   white-space: pre-wrap;
@@ -2151,35 +2156,17 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
   }
 }
 
-/* ── 触控设备的阅读字阶 ────────────────────────────────────
-   全局基准 13px 是给桌面侧栏的密度（面板宽 min(520px, 42vw)），
-   手机上 AI 回复是主要阅读物，13px 约合 9.75pt，远低于 iOS 的正文基准。
-   这里只抬「阅读面」——正文、标题、代码、表格；工具块 / 思考 / 胶囊
-   等次要信息维持原尺寸，正文一抬，主次对比反而更清楚。
-   落点取 14px 而非 16px：正文以中文为主，汉字撑满字身框，同号下的视觉
-   体量明显大于西文，16px / 15px 在窄栏里实测都偏大。
-   判据用 hover: none 而非宽度：桌面侧栏本来就窄于 768px，按宽度会误伤。 */
+/* ── 触控设备的例外 ────────────────────────────────────────
+   阅读字阶（正文 14px 那一套）现在写在基准规则里，两端共用，这里不再重复。
+   剩下的两条是触控端真正不一样的地方。
+   判据用 hover: none 而非宽度：桌面侧栏是 min(520px, 42vw)，本来就窄于
+   768px，按宽度判会误伤桌面。 */
 @media (hover: none) {
-  .msg-body { font-size: 14px; }
-  .msg-body p { margin: 6px 0; }
-  .msg-body h1 { font-size: 17px; }
-  .msg-body h2 { font-size: 16px; }
-  .msg-body h3, .msg-body h4 { font-size: 14px; }
-  .msg-body h1, .msg-body h2, .msg-body h3, .msg-body h4 { margin: 14px 0 5px; }
-  .msg-body ul, .msg-body ol { margin: 6px 0; padding-left: 20px; }
-  .msg-body li { margin: 3px 0; }
-  .msg-body table { font-size: 13px; }
-  .msg-body code { font-size: 13px; }
-  .msg-body pre code { font-size: 13px; }
-  .msg-body blockquote { margin: 8px 0; padding-left: 12px; }
+  /* 气泡贴着屏幕边，内边距给厚一点才不显局促；桌面气泡浮在宽面板里，8/12 够用 */
   .msg-user .msg-body { padding: 10px 14px; }
-  /* 思考过程展开后是给人读的散文，抬一档；工具块维持 11px —— 那是扫读的
-     标签不是阅读物，抬上去只会跟正文抢注意力。
-     正文降到 14px 后这里跟着降到 12px：13px 只比正文低 1px，从属关系就没了。 */
-  .thinking-content { font-size: 12px; }
   /* iOS Safari 会把 font-size < 16px 的输入框在聚焦时连页面一起放大。
      父页面的 viewport 没有 maximum-scale（也不该有，禁缩放伤无障碍），
-     所以只能让输入框自己达标 —— 这个 16px 是硬约束，不跟着正文降到 14px。 */
+     所以只能让输入框自己达标 —— 这个 16px 跟阅读字阶无关，是硬约束。 */
   #prompt { font-size: 16px; }
 }
 
