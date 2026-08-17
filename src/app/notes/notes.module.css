@@ -57,6 +57,7 @@
   padding: 0;
   background: transparent;
   cursor: col-resize;
+  touch-action: none;
 }
 
 .sidebarResizer::after {
@@ -1265,8 +1266,10 @@
   top: 0;
   height: 100vh;
   height: 100dvh;
-  /* 流式上限：永远不超过视口 42%，窗口变窄也只占右侧一部分，绝不铺满 */
-  width: min(var(--assistant-panel-width, 520px), 42vw);
+  /* 流式上限：永远不超过视口 42%，窗口变窄也只占右侧一部分，绝不铺满。
+     比例抽成变量，拖动逻辑要读同一个值来收敛宽度，否则会拖出死区。 */
+  --assistant-panel-max-vw: 42;
+  width: min(var(--assistant-panel-width, 520px), calc(var(--assistant-panel-max-vw) * 1vw));
   flex: 0 0 auto;
   min-width: 0;
   display: flex;
@@ -1295,17 +1298,21 @@
   pointer-events: none;
 }
 
+/* 命中区往面板内侧多让 2px（左侧只到 -7px，再往左会压住 .reader 那条 6px 滚动条），
+   并关掉 touch-action，触控板/触屏上按下时不会被判成滚动而把拖动吞掉。 */
 .assistantPanelResizer {
   position: absolute;
   left: -7px;
   top: 0;
   z-index: 8;
-  width: 14px;
+  width: 16px;
   height: 100%;
   border: 0;
   border-radius: 0;
+  padding: 0;
   background: transparent;
   cursor: col-resize;
+  touch-action: none;
 }
 
 /* 桌面端收起按钮：与 iframe 顶栏（44px 高、30px 按钮）同规格，落在其左侧空白处 */
@@ -1695,8 +1702,18 @@
   }
 }
 
-.shellResizing .assistantPanelFrame {
+/* 拖动中让两个 iframe 彻底透明化：指针捕获已保证事件不丢，这里再挡掉 iframe 内部的
+   悬停高亮与文字选中，免得拖动顺手把笔记正文划成一片蓝。 */
+.shellResizing .assistantPanelFrame,
+.shellResizing .htmlFrame {
   pointer-events: none;
+}
+
+/* 拖动中必须关掉 width 过渡：--notes-transition-spring 是 all 0.35s 的缓出曲线，
+   开着的话每次 pointermove 都在重新起一段动画，面板只能"追"光标、始终慢半拍，
+   手感就是拖不动。侧边栏一直有这条，AI 面板此前漏了。 */
+.shellResizing .assistantPanel {
+  transition: none;
 }
 
 .shellResizing .sidebar {
@@ -3926,7 +3943,8 @@
    竖屏平板不会命中这里，会落到上面的底部抽屉规则。 */
 @media (orientation: landscape) and (min-width: 901px) and (max-width: 1260px) {
   .assistantPanel {
-    width: min(var(--assistant-panel-width, 460px), 40vw);
+    --assistant-panel-max-vw: 40;
+    width: min(var(--assistant-panel-width, 460px), calc(var(--assistant-panel-max-vw) * 1vw));
   }
 }
 

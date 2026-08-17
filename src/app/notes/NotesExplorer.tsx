@@ -714,6 +714,8 @@ export default function NotesExplorer() {
   const [isResizingAssistantPanel, setIsResizingAssistantPanel] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
   const [isResizingSidebar, setIsResizingSidebar] = useState(false);
+  // 按下拖杆时，光标距离那条分界线的偏移；两个拖杆不会同时被按住，共用一个即可
+  const resizeGrabOffsetRef = useRef(0);
   const [shareModalOpen, setShareModalOpen] = useState(false);
   const [shareState, setShareState] = useState<ShareState>("idle");
   const [shareToken, setShareToken] = useState<string | null>(null);
@@ -1287,14 +1289,31 @@ export default function NotesExplorer() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [shareModalOpen, deleteConfirmOpen, moreMenuOpen, renameTarget, treeMenuTarget, treeSheetTarget, globalCreateMenuOpen, importError]);
 
+  // CSS 把面板压在 --assistant-panel-max-vw（桌面 42vw、平板横屏 40vw）以内，
+  // 若拖动仍按常量 900 收敛，超过该点后面板不再变宽而 state 继续涨，
+  // 回拖时要先把这段虚高消耗完，表现为一段推不动的死区。读同一个变量对齐两边。
+  const getMaxAssistantPanelWidth = useCallback(() => {
+    const el = assistantPanelRef.current;
+    const ratio = el
+      ? Number.parseFloat(getComputedStyle(el).getPropertyValue("--assistant-panel-max-vw"))
+      : Number.NaN;
+    const viewportCap = Number.isFinite(ratio)
+      ? (window.innerWidth * ratio) / 100
+      : Number.POSITIVE_INFINITY;
+    // 视口极窄时 vw 上限可能低于 MIN，取 max 防止上下限倒挂（clamp 里 max 会压过 min）
+    return Math.max(MIN_ASSISTANT_PANEL_WIDTH, Math.min(MAX_ASSISTANT_PANEL_WIDTH, viewportCap));
+  }, []);
+
   useEffect(() => {
     if (!isResizingAssistantPanel) {
       return;
     }
 
     const handlePointerMove = (event: PointerEvent) => {
-      const availableWidth = window.innerWidth - event.clientX;
-      setAssistantPanelWidth(clamp(availableWidth, MIN_ASSISTANT_PANEL_WIDTH, MAX_ASSISTANT_PANEL_WIDTH));
+      // 减掉按下时光标相对分界线的偏移：命中区有 16px 宽，不减的话第一次 move
+      // 面板会先跳一下去对齐光标，看起来像"没抓住"。
+      const availableWidth = window.innerWidth - (event.clientX - resizeGrabOffsetRef.current);
+      setAssistantPanelWidth(clamp(availableWidth, MIN_ASSISTANT_PANEL_WIDTH, getMaxAssistantPanelWidth()));
     };
 
     const stopResizing = () => {
@@ -1314,7 +1333,7 @@ export default function NotesExplorer() {
       window.removeEventListener("pointerup", stopResizing);
       window.removeEventListener("pointercancel", stopResizing);
     };
-  }, [isResizingAssistantPanel]);
+  }, [isResizingAssistantPanel, getMaxAssistantPanelWidth]);
 
   useEffect(() => {
     if (!isResizingSidebar) {
@@ -1322,7 +1341,7 @@ export default function NotesExplorer() {
     }
 
     const handlePointerMove = (event: PointerEvent) => {
-      setSidebarWidth(clamp(event.clientX, MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH));
+      setSidebarWidth(clamp(event.clientX - resizeGrabOffsetRef.current, MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH));
     };
 
     const stopResizing = () => {
@@ -3525,6 +3544,10 @@ export default function NotesExplorer() {
           className={styles.sidebarResizer}
           onPointerDown={(event) => {
             event.preventDefault();
+            // 同上：拖过右侧笔记 iframe 时要靠指针捕获把事件留在父页面
+            event.currentTarget.setPointerCapture(event.pointerId);
+            const edge = event.currentTarget.parentElement?.getBoundingClientRect().right;
+            resizeGrabOffsetRef.current = edge === undefined ? 0 : event.clientX - edge;
             setIsResizingSidebar(true);
           }}
           onDoubleClick={() => setSidebarWidth(DEFAULT_SIDEBAR_WIDTH)}
@@ -4652,6 +4675,11 @@ export default function NotesExplorer() {
               className={styles.assistantPanelResizer}
               onPointerDown={(event) => {
                 event.preventDefault();
+                // 捕获指针：拖过左侧笔记 iframe 时，事件本会被 iframe 自己的文档接走，
+                // 父页面既收不到 pointermove（面板停住）也收不到 pointerup（松手后还黏着）。
+                event.currentTarget.setPointerCapture(event.pointerId);
+                const edge = assistantPanelRef.current?.getBoundingClientRect().left;
+                resizeGrabOffsetRef.current = edge === undefined ? 0 : event.clientX - edge;
                 setAssistantPanelVisible(true);
                 setIsResizingAssistantPanel(true);
               }}
@@ -4659,11 +4687,11 @@ export default function NotesExplorer() {
               onKeyDown={(event) => {
                 if (event.key === "ArrowLeft") {
                   event.preventDefault();
-                  setAssistantPanelWidth((width) => clamp(width + 24, MIN_ASSISTANT_PANEL_WIDTH, MAX_ASSISTANT_PANEL_WIDTH));
+                  setAssistantPanelWidth((width) => clamp(width + 24, MIN_ASSISTANT_PANEL_WIDTH, getMaxAssistantPanelWidth()));
                 }
                 if (event.key === "ArrowRight") {
                   event.preventDefault();
-                  setAssistantPanelWidth((width) => clamp(width - 24, MIN_ASSISTANT_PANEL_WIDTH, MAX_ASSISTANT_PANEL_WIDTH));
+                  setAssistantPanelWidth((width) => clamp(width - 24, MIN_ASSISTANT_PANEL_WIDTH, getMaxAssistantPanelWidth()));
                 }
               }}
               aria-label="调整辅助面板宽度"
