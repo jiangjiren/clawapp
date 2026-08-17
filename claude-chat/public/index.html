@@ -163,8 +163,11 @@ html, body { height: 100%; height: 100dvh; overflow: hidden; margin: 0; padding:
 .typing span:nth-child(3) { animation-delay: 0.32s; }
 @keyframes blink { 0%, 70%, 100% { opacity: 0.2; } 35% { opacity: 1; } }
 .gen-chip { display: flex; align-items: center; gap: 5px; padding: 8px 0 2px; color: var(--text-dim); font-size: 11px; }
-.gen-chip-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); flex-shrink: 0; animation: genPulse var(--beat) ease-in-out infinite; }
+.gen-chip-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); flex-shrink: 0; animation: genPulse var(--beat) ease-in-out infinite var(--pulse-delay, 0s); }
 @keyframes genPulse { 0%, 100% { opacity: 0.2; transform: scale(0.7); } 50% { opacity: 1; transform: scale(1); } }
+/* 有更具体的指示器（工具转圈 / 子任务活动条 / 计划当前项）正在转时，
+   胶囊说的是同一件事，让位。见 syncBusyIndicators() */
+.gen-chip.muted { display: none; }
 
 /* ══════════════════════════════════════════════════════════
    编队卡 —— 派生子 agent 的统一呈现
@@ -213,10 +216,10 @@ html, body { height: 100%; height: 100dvh; overflow: hidden; margin: 0; padding:
 .sq-dot { position: absolute; left: 24px; top: 50%; width: 8px; height: 8px; margin-top: -4px; border-radius: 50%; display: grid; place-items: center; flex-shrink: 0; }
 .sq-row[data-s="queued"] .sq-dot { box-shadow: inset 0 0 0 1.5px var(--border-strong); }
 /* 运行中刻意无色：多个彩点同时闪会变成圣诞树 */
-.sq-row[data-s="running"] .sq-dot { background: var(--text-dim); animation: sqBreathe var(--beat) ease-in-out infinite; }
+.sq-row[data-s="running"] .sq-dot { background: var(--text-dim); animation: sqBreathe var(--beat) ease-in-out infinite var(--pulse-delay, 0s); }
 @keyframes sqBreathe { 0%,100% { opacity: 0.35; transform: scale(0.8); } 50% { opacity: 1; transform: scale(1); } }
 .sq-row[data-s="asking"] .sq-dot { background: var(--accent); }
-.sq-row[data-s="asking"] .sq-dot::after { content: ''; position: absolute; inset: -4px; border-radius: 50%; border: 1.5px solid var(--accent); animation: sqRing var(--beat) ease-out infinite; }
+.sq-row[data-s="asking"] .sq-dot::after { content: ''; position: absolute; inset: -4px; border-radius: 50%; border: 1.5px solid var(--accent); animation: sqRing var(--beat) ease-out infinite var(--pulse-delay, 0s); }
 @keyframes sqRing { 0% { opacity: 0.7; transform: scale(0.6); } 100% { opacity: 0; transform: scale(1.25); } }
 /* 排队等回答：同色不脉冲 —— 同时只能有一个注意力焦点 */
 .sq-row[data-s="waiting"] .sq-dot { background: var(--accent); opacity: 0.4; }
@@ -275,7 +278,7 @@ html, body { height: 100%; height: 100dvh; overflow: hidden; margin: 0; padding:
 .bga-head:hover { background: var(--bg3); }
 .bga-dot {
   width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0;
-  background: var(--accent); animation: genPulse var(--beat) ease-in-out infinite;
+  background: var(--accent); animation: genPulse var(--beat) ease-in-out infinite var(--pulse-delay, 0s);
 }
 .bga-text { flex: 1; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bga-chev { width: 13px; height: 13px; flex-shrink: 0; color: var(--text-dim); transform: rotate(180deg); transition: transform 0.24s var(--ease-out); }
@@ -292,7 +295,7 @@ html, body { height: 100%; height: 100dvh; overflow: hidden; margin: 0; padding:
 .bga-item { display: flex; align-items: center; gap: 9px; padding: 7px 12px; cursor: pointer; transition: background 0.12s; }
 .bga-item:hover { background: var(--bg3); }
 .bga-idot { position: relative; width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; display: grid; place-items: center; }
-.bga-item[data-s="running"] .bga-idot { background: var(--accent); animation: sqBreathe var(--beat) ease-in-out infinite; }
+.bga-item[data-s="running"] .bga-idot { background: var(--accent); animation: sqBreathe var(--beat) ease-in-out infinite var(--pulse-delay, 0s); }
 .bga-item[data-s="queued"] .bga-idot { box-shadow: inset 0 0 0 1.5px var(--border-strong); }
 .bga-item[data-s="done"] .bga-idot::after { content: ''; width: 3px; height: 6.5px; margin-top: -2px; margin-left: 1px; border: solid var(--text-dim); border-width: 0 1.5px 1.5px 0; transform: rotate(42deg); }
 .bga-item[data-s="failed"] .bga-idot { background: var(--yellow); }
@@ -334,7 +337,7 @@ html, body { height: 100%; height: 100dvh; overflow: hidden; margin: 0; padding:
   inset: -4px;
   border: 1px solid rgba(var(--accent-rgb), 0.32);
   border-radius: inherit;
-  animation: sqRing var(--beat) ease-out infinite;
+  animation: sqRing var(--beat) ease-out infinite var(--pulse-delay, 0s);
 }
 #long-run-status.actionable .lrs-pulse { background: var(--yellow); }
 #long-run-status.actionable .lrs-pulse::after { border-color: rgba(var(--yellow-rgb), 0.34); }
@@ -367,7 +370,7 @@ html, body { height: 100%; height: 100dvh; overflow: hidden; margin: 0; padding:
 .todo-i.on { color: var(--text-dim); }
 .todo-i.now { font-weight: 550; }
 .todo-i.now .todo-b { box-shadow: inset 0 0 0 1.5px var(--accent); }
-.todo-i.now .todo-b::after { content: ''; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); animation: sqBreathe var(--beat) ease-in-out infinite; }
+.todo-i.now .todo-b::after { content: ''; width: 4px; height: 4px; border-radius: 50%; background: var(--accent); animation: sqBreathe var(--beat) ease-in-out infinite var(--pulse-delay, 0s); }
 
 /* ── Composer popup: slash commands + note mentions ── */
 #input-wrap {
@@ -4474,6 +4477,7 @@ let assistantEvents = []; // non-content SDK events that still explain the AI tu
       spinner.className = "tool-spinner";
       el.appendChild(spinner);
     }
+    syncBusyIndicators();   // 转圈接管了「在忙」，胶囊让位
   }
 
   function cssEscapeValue(value) {
@@ -4494,11 +4498,12 @@ let assistantEvents = []; // non-content SDK events that still explain the AI tu
   }
 
   function cleanupRunningTools() {
-    if (!assistantEl) return;
+    if (!assistantEl) { syncBusyIndicators(); return; }
     assistantEl.querySelectorAll(".tool-call.running").forEach(el => {
       el.classList.remove("running");
       el.querySelector(".tool-spinner")?.remove();
     });
+    syncBusyIndicators();   // 没有转圈了，胶囊重新接手表达
   }
 
   function markToolSettled(toolUseId, isError) {
@@ -4508,6 +4513,7 @@ let assistantEvents = []; // non-content SDK events that still explain the AI tu
     el.classList.remove("running");
     el.querySelector(".tool-spinner")?.remove();
     el.classList.toggle("failed", !!isError);
+    syncBusyIndicators();
   }
 
 function resetAssistantState() {
@@ -4873,6 +4879,8 @@ class SquadCard {
       <span class="sq-meta num"></span>
       <button class="sq-stop">停止</button>`;
     row.querySelector(".sq-label").textContent = this.labels.get(id) || id;
+    // 子任务是陆续加进来的，不对齐相位就会一行一个节奏各闪各的
+    syncPulsePhase(row.querySelector(".sq-dot"));
 
     const det = document.createElement("div");
     det.className = "sq-detail";
@@ -5091,7 +5099,9 @@ function updateBackgroundActivity() {
       total > live ? `${live} 个子任务进行中 · 共 ${total} 项` : `${live} 个子任务进行中`;
     el.hidden = false;
     el.classList.toggle("open", bgActivityOpen);
+    syncPulsePhase(el.querySelector(".bga-dot"));
     if (bgActivityOpen) renderBgActivityList();
+    syncBusyIndicators();   // 活动条接管了「在忙」，胶囊让位
     return;
   }
 
@@ -5112,8 +5122,10 @@ function updateBackgroundActivity() {
       el.classList.remove("open");
       bgActivityOpen = false;
       syncBgActivityTicker();
+      syncBusyIndicators();
     }, 8000);
   }
+  syncBusyIndicators();   // done 态的绿点已经不脉冲了，胶囊可以回来
 }
 
 function liveSquadCards() {
@@ -5173,6 +5185,7 @@ function renderBgActivityList() {
     item.dataset.s = s.status;
     if (s.startAt) item.dataset.start = String(s.startAt);
     item.innerHTML = `<span class="bga-idot"></span><span class="bga-ilabel"></span><span class="bga-imeta"></span>`;
+    syncPulsePhase(item.querySelector(".bga-idot"));
     item.querySelector(".bga-ilabel").textContent = label;
     item.querySelector(".bga-imeta").textContent =
       s.status === "running"
@@ -5232,6 +5245,8 @@ function renderTodoList(items) {
     row.className = "todo-i" + (it.completed ? " on" : (i === nextIdx ? " now" : ""));
     row.innerHTML = `<span class="todo-b"></span><span class="todo-t"></span>`;
     row.querySelector(".todo-t").textContent = it.text ?? "";
+    // 每次进度更新都会重建整张表，不对齐相位的话当前项的呼吸会一次次从头开始
+    if (row.classList.contains("now")) syncPulsePhase(row.querySelector(".todo-b"));
     todoListEl.appendChild(row);
   });
   const doneN = items.filter((i) => i.completed).length;
@@ -5414,7 +5429,10 @@ function applySyncTurn(turn) {
   if (turn && turn.status === "running") {
     setGenerating(true);
     startLongRunMonitor(turn);
-    addTyping();
+    // 断线重连时这一轮的气泡（含正在跑的工具）已经由回放建好了，
+    // 再无条件补一行"正在输入"就会叠在工具调用下面，随后的
+    // system/status 还会往里写"请求中…"。判据与 session_state_changed 一致。
+    ensureTyping();
     return;
   }
   clearAskUserQuestion();
@@ -5542,7 +5560,7 @@ function handleEvent(ev) {
   }
 
   if (ev.type === "system" && ev.subtype === "api_retry") {
-    updateTypingStatus(`API 繁忙，正在重试 (${ev.attempt}/${ev.max_retries})…`);
+    setRunStatus(`API 繁忙，正在重试 (${ev.attempt}/${ev.max_retries})…`);
     return;
   }
 
@@ -5552,7 +5570,7 @@ function handleEvent(ev) {
       requesting: "请求中…",
       new_thread: "模型已切换，正在新会话中处理…",
     };
-    updateTypingStatus(STATUS_LABEL[ev.status] ?? "");
+    setRunStatus(STATUS_LABEL[ev.status] ?? "");
     return;
   }
 
@@ -5575,9 +5593,9 @@ function handleEvent(ev) {
   if (ev.type === "system" && ev.subtype === "session_state_changed") {
     if (ev.state === "running" || ev.state === "requires_action") {
       setGenerating(true);
-      if (!assistantEl && !document.getElementById("typing")) addTyping();
+      ensureTyping();
     } else if (ev.state === "idle") {
-      updateTypingStatus("");
+      setRunStatus("");
     }
     return;
   }
@@ -5778,7 +5796,8 @@ function handleEvent(ev) {
 
   if (isToolUseType(ev.type)) {
     if (!assistantEl) { removeTyping(); assistantEl = addMessage("assistant", ""); }
-    if (!genChipEl && isGenerating) showGenChip("调用工具中…");
+    // 用 setGenChip 而非"缺失才建"：上一阶段可能留着"请求中…"之类的旧文案
+    if (isGenerating) setGenChip("调用工具中…");
     const block = {
       type: ev.type,
       id: ev.id ?? "",
@@ -5800,7 +5819,8 @@ function handleEvent(ev) {
   if (isToolResultType(ev.type)) {
     cleanupRunningTools();
     if (!assistantEl) { removeTyping(); assistantEl = addMessage("assistant", ""); }
-    if (!genChipEl && isGenerating) showGenChip("");
+    // 工具已经回来了，胶囊不能继续挂着"调用工具中…"直到下一段正文才被清掉
+    if (isGenerating) setGenChip("");
     const block = { type: ev.type, raw: cloneJson(ev) };
     assistantBlocks.push(block);
     const body = assistantEl.querySelector(".msg-body");
@@ -5992,6 +6012,7 @@ function showGenChip(text) {
     genChipEl = document.createElement("div");
     genChipEl.className = "gen-chip";
     genChipEl.innerHTML = `<span class="gen-chip-dot"></span><span class="gen-chip-label"></span>`;
+    syncPulsePhase(genChipEl);
   }
   genChipEl.querySelector(".gen-chip-label").textContent = text || "";
   reanchorGenChip();
@@ -6005,6 +6026,7 @@ function reanchorGenChip() {
   if (!genChipEl || !assistantEl) return;
   const body = assistantEl.querySelector(".msg-body");
   if (body) body.appendChild(genChipEl);
+  syncBusyIndicators();
 }
 function removeGenChip() {
   genChipEl?.remove();
@@ -6014,6 +6036,61 @@ function removeGenChip() {
 function updateTypingStatus(text) {
   const el = document.querySelector("#typing .typing-status");
   if (el) el.textContent = text ? ` ${text}` : "";
+}
+
+/** 创建或改写气泡内状态胶囊的文案 —— 只在缺失时才写会留下上一阶段的旧标签 */
+function setGenChip(text) {
+  if (genChipEl) updateGenChip(text);
+  else showGenChip(text);
+}
+
+// ── 忙碌指示器仲裁 ───────────────────────────────────────
+// 一件正在发生的事只该由一个指示器表达，谁离它更近谁说话。由具体到笼统：
+//   工具转圈 / 子任务活动条 / 计划当前项  →  气泡胶囊  →  "正在输入"行
+// 胶囊说的是"这一轮在忙"，最笼统；只要有更具体的东西正在转，它就闭嘴，
+// 否则同一件事会被两三个蓝点同时说一遍。
+function hasSpecificBusyIndicator() {
+  if (assistantEl?.querySelector(".tool-call.running")) return true;
+  const bga = document.getElementById("bg-activity");
+  if (bga && !bga.hidden && !bga.classList.contains("done")) return true;
+  if (todoListEl?.querySelector(".todo-i.now")) return true;
+  return false;
+}
+
+function syncBusyIndicators() {
+  genChipEl?.classList.toggle("muted", hasSpecificBusyIndicator());
+}
+
+// 脉冲点各自从被创建的那一刻起算相位，先后出现的点因此永远错拍。
+// 统一对齐到一个全局节拍：同屏多个点要么不同时出现，要么一起呼吸。
+const PULSE_BEAT_MS = 1500;   // 与 CSS --beat 一致
+const pulseEpoch = performance.now();
+function syncPulsePhase(el) {
+  if (!el) return;
+  const offset = ((performance.now() - pulseEpoch) % PULSE_BEAT_MS) / 1000;
+  el.style.setProperty("--pulse-delay", `-${offset.toFixed(3)}s`);
+}
+
+/**
+ * "正在输入"行只在这一轮还没有气泡时才该存在；一旦气泡建起来，
+ * 状态就归气泡内的胶囊管，否则两个指示器会同时出现在相邻两行。
+ */
+function ensureTyping() {
+  if (assistantEl || document.getElementById("typing")) return;
+  addTyping();
+}
+
+/**
+ * 运行状态（请求中 / 压缩上下文 / API 重试）写到当前那个指示器上：
+ * 还没出气泡时写"正在输入"行，出了气泡就写气泡内的胶囊。
+ * 原来只写前者，于是气泡建立之后这些状态全部静默丢失 —— 只有重连
+ * 误插了一行"正在输入"时才会冒出来，看着就像工具调用下面挂了个"请求中"。
+ */
+function setRunStatus(text) {
+  if (document.getElementById("typing")) { updateTypingStatus(text); return; }
+  if (!isGenerating) return;
+  if (genChipEl) updateGenChip(text);
+  else if (assistantEl && text) showGenChip(text);
 }
 // ── 回复操作：复制 / 存入笔记 ─────────────────────────────
 // 只在一轮结束后挂上：生成途中挂会让按钮跟着不断增长的正文抖动。
