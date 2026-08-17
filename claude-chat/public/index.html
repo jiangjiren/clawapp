@@ -109,7 +109,9 @@ html, body { height: 100%; height: 100dvh; overflow: hidden; margin: 0; padding:
 }
 
 /* ── Messages ── */
-#messages { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 14px; display: flex; flex-direction: column; gap: 16px; scroll-behavior: smooth; }
+/* 不设 scroll-behavior: smooth —— 流式跟随必须是瞬时定位，否则每个 token 都
+   触发一段动画；只有用户点「回到最新」时才平滑，见 scrollBottom(smooth) */
+#messages { flex: 1; min-height: 0; overflow-y: auto; padding: 12px 14px; display: flex; flex-direction: column; gap: 16px; }
 .msg { display: flex; flex-direction: column; gap: 4px; }
 .msg-user {
   align-items: flex-end;
@@ -958,6 +960,83 @@ html, body { height: 100%; height: 100dvh; overflow: hidden; margin: 0; padding:
 #send:not(:disabled):active { transform: scale(0.93); }
 #send.stopping { background: var(--red); }
 #send.stopping:hover { background: var(--red-hover); }
+
+/* ── 回复操作行（复制 / 存入笔记） ── */
+.msg-actions { display: flex; gap: 2px; margin: 2px 0 0 -8px; }
+.msg-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 34px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 11.5px;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: background 0.15s, color 0.15s;
+}
+.msg-action:hover { background: var(--bg3); color: var(--text); }
+.msg-action:active { background: var(--bg2); }
+.msg-action.done { color: var(--green); }
+/* 指针设备：不常驻，指到这条消息才浮出，正文旁保持干净 */
+@media (hover: hover) {
+  .msg-actions { opacity: 0; transition: opacity 0.15s ease; }
+  .msg-assistant:hover .msg-actions,
+  .msg-actions:focus-within { opacity: 1; }
+}
+/* 触控设备：没有 hover，常驻但压低存在感；热区给到 40px */
+@media (hover: none) {
+  .msg-action { height: 40px; padding: 0 10px; }
+}
+
+/* ── 回到最新 ── */
+#jump-latest {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 6px);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 34px;
+  padding: 0 14px;
+  border: 1px solid var(--border);
+  border-radius: 17px;
+  background: color-mix(in srgb, var(--surface) 90%, transparent);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.10);
+  cursor: pointer;
+  z-index: 20;
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, 6px);
+  transition: opacity 0.18s ease, transform 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+  -webkit-tap-highlight-color: transparent;
+}
+#jump-latest.visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translate(-50%, 0);
+}
+/* 未跟随期间来过新内容才点亮，单纯往上翻看不需要这个提示 */
+.jl-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+#jump-latest.unseen .jl-dot { opacity: 1; }
 
 #messages::-webkit-scrollbar { width: 5px; }
 #messages::-webkit-scrollbar-track { background: transparent; }
@@ -2337,6 +2416,11 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
     </div>
   </section>
   <div id="input-wrap">
+    <button type="button" id="jump-latest" aria-label="回到最新消息">
+      <span class="jl-dot" aria-hidden="true"></span>
+      <svg width="11" height="11" viewBox="0 0 12 12" fill="none" aria-hidden="true"><path d="M6 2v8M6 10L2.5 6.5M6 10l3.5-3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      回到最新
+    </button>
     <div id="slash-popup" role="listbox" aria-label="输入建议"></div>
     <div id="ask-user-question" role="region" aria-live="polite" aria-label="Claude 提问"></div>
     <!-- 子任务活动条：运行期间常驻，展开后可查看每个子 Agent。 -->
@@ -2505,6 +2589,7 @@ function isTrustedParentMessage(event) {
 }
 
 const messagesEl  = document.getElementById("messages");
+const jumpLatestEl = document.getElementById("jump-latest");
 const promptEl    = document.getElementById("prompt");
 const sendBtn     = document.getElementById("send");
 const popupEl     = document.getElementById("slash-popup");
@@ -2537,7 +2622,7 @@ function showInlineError(text) {
   el.className = "msg-error";
   el.innerHTML = `<div class="msg-error-text">${renderPlain(text)}</div>`;
   messagesEl.appendChild(el);
-  scrollBottom();
+  scrollBottomIfFollowing();
 }
 
 let isGenerating = false;
@@ -3837,6 +3922,7 @@ function appendAssistantBlock(body, block) {
   if (block.type === "text" && block.text) {
     const el = document.createElement("div");
     el.className = "msg-text";
+    el.dataset.src = block.text;   // 复制 / 存入笔记要的是 markdown 源，不是渲染结果
     el.innerHTML = renderMarkdown(block.text);
     body.appendChild(el);
     return;
@@ -3907,6 +3993,7 @@ function setGenerating(v, notifyParent = true) {
     removeGenChip();
     cleanupRunningTools();
     resetLongRunMonitor();
+    refreshMessageActions();   // 一轮结束才挂复制 / 存入笔记
   } else if (!wasGenerating && !runStartedAt) {
     startLongRunMonitor({ provider: currentSessionProvider });
   }
@@ -4134,6 +4221,18 @@ window.addEventListener("message", (e) => {
     currentNoteFile = e.data.filePath;
     if (isNewFile) noteContextEnabled = true;
     renderNoteContext();
+    // 换了笔记（或换成 html）会改变「存入笔记」是否可用
+    if (isNewFile) refreshMessageActions();
+  }
+  // 存入笔记的回执：成功就在按下的那个按钮上就地确认
+  if (e.data?.type === "note-append-result") {
+    const btn = pendingNoteAppends.get(e.data.requestId);
+    pendingNoteAppends.delete(e.data.requestId);
+    if (e.data.ok) {
+      if (btn) flashAction(btn, "已存入");
+    } else {
+      showInlineError(e.data.error || "存入笔记失败");
+    }
   }
   if (e.data?.type === "note-selection" && e.data.text) {
     quotedText = e.data.text;
@@ -4431,7 +4530,7 @@ function captureAssistantEvent(ev) {
   const body = assistantEl.querySelector(".msg-body");
   appendAssistantBlock(body, block);
   reanchorGenChip();
-  scrollBottom();
+  scrollBottomIfFollowing();
 }
 
 function parseResetDate(value) {
@@ -4706,7 +4805,7 @@ class SquadCard {
     const body = assistantEl.querySelector(".msg-body");
     body.appendChild(this.render());
     reanchorGenChip();
-    scrollBottom();
+    scrollBottomIfFollowing();
   }
 
   /* 从当前状态重建整张卡 —— 全量重渲染时被 appendAssistantBlock 调用 */
@@ -4909,7 +5008,7 @@ class SquadCard {
         this.el.classList.add("done");
         this.paintSummary();
         this.syncBlock();   // 把定格的耗时一起写进历史快照
-        scrollBottom();
+        scrollBottomIfFollowing();
       }, 420);
     }, wait);
   }
@@ -5137,7 +5236,7 @@ function renderTodoList(items) {
   });
   const doneN = items.filter((i) => i.completed).length;
   updateGenChip(doneN < items.length ? `按计划执行 · 第 ${doneN + 1}/${items.length} 步` : "");
-  scrollBottom();
+  scrollBottomIfFollowing();
 }
 
 /* ══════════════════════════════════════════════════════════
@@ -5260,7 +5359,7 @@ function handleSyncEvent(ev) {
         });
       } catch { }
     }
-    if (Array.isArray(ev.events) && ev.events.length > 0) scrollBottom();
+    if (Array.isArray(ev.events) && ev.events.length > 0) scrollBottomIfFollowing();
   }
 
   if (!currentConvId && convId) currentConvId = convId;
@@ -5586,21 +5685,22 @@ function handleEvent(ev) {
 
       if (delta.type === "text_delta" && delta.text) {
         b.accumulated += delta.text;
+        b.el.dataset.src = b.accumulated;
         b.el.innerHTML = renderMarkdown(b.accumulated);
         assistantTxt = [...prevTurnTexts,
           ...Object.values(blockMap).filter(x => x.type === "text").map(x => x.accumulated),
         ].filter(Boolean).join("\n\n");
-        scrollBottom();
+        scrollBottomIfFollowing();
       } else if (delta.type === "thinking_delta" && delta.thinking) {
         b.accumulated += delta.thinking;
         const tc = b.el.querySelector(".thinking-content");
         tc.textContent = b.accumulated;
         tc.scrollTop = tc.scrollHeight;
-        scrollBottom();
+        scrollBottomIfFollowing();
       } else if (delta.type === "input_json_delta" && delta.partial_json != null) {
         b.accumulated += delta.partial_json;
         const inp = b.el?.querySelector(".tool-input");   // Task 块没有 el
-        if (inp) { inp.textContent = b.accumulated.slice(0, 120); scrollBottom(); }
+        if (inp) { inp.textContent = b.accumulated.slice(0, 120); scrollBottomIfFollowing(); }
       }
       return;
     }
@@ -5664,7 +5764,7 @@ function handleEvent(ev) {
     reanchorGenChip();
     markLiveToolBlocksRunning(turnBlocks);
     assistantTxt = textFromAssistantBlocks(assistantBlocks) || assistantTxt;
-    scrollBottom();
+    scrollBottomIfFollowing();
     return;
   }
 
@@ -5693,7 +5793,7 @@ function handleEvent(ev) {
     body.appendChild(el);
     reanchorGenChip();
     markToolRunning(el);
-    scrollBottom();
+    scrollBottomIfFollowing();
     return;
   }
 
@@ -5706,7 +5806,7 @@ function handleEvent(ev) {
     const body = assistantEl.querySelector(".msg-body");
     appendAssistantBlock(body, block);
     reanchorGenChip();
-    scrollBottom();
+    scrollBottomIfFollowing();
     return;
   }
 
@@ -5786,13 +5886,14 @@ function addMessage(role, text, imageUrls) {
   if (role !== "assistant" || text) {
     const textEl = document.createElement("div");
     textEl.className = role === "assistant" ? "msg-text" : "";
+    if (role === "assistant") textEl.dataset.src = text;
     textEl.innerHTML = role === "assistant" ? renderMarkdown(text) : renderPlain(text);
     if (role === "user") textEl.style.whiteSpace = "pre-wrap";
     body.appendChild(textEl);
   }
   wrap.appendChild(body);
   messagesEl.appendChild(wrap);
-  scrollBottom();
+  scrollBottomIfFollowing();
   return wrap;
 }
 
@@ -5882,7 +5983,7 @@ function addTyping() {
   const el = document.createElement("div");
   el.id = "typing"; el.className = "msg";
   el.innerHTML = `<div class="typing"><span></span><span></span><span></span><small class="typing-status"></small></div>`;
-  messagesEl.appendChild(el); scrollBottom();
+  messagesEl.appendChild(el); scrollBottomIfFollowing();
 }
 function removeTyping() { document.getElementById("typing")?.remove(); }
 
@@ -5914,7 +6015,147 @@ function updateTypingStatus(text) {
   const el = document.querySelector("#typing .typing-status");
   if (el) el.textContent = text ? ` ${text}` : "";
 }
-function scrollBottom() { messagesEl.scrollTop = messagesEl.scrollHeight; }
+// ── 回复操作：复制 / 存入笔记 ─────────────────────────────
+// 只在一轮结束后挂上：生成途中挂会让按钮跟着不断增长的正文抖动。
+const ICON_COPY = `<svg width="12" height="12" viewBox="0 0 14 14" fill="none" aria-hidden="true"><rect x="4.75" y="4.75" width="7.5" height="7.5" rx="1.8" stroke="currentColor" stroke-width="1.3"/><path d="M9.5 4.5v-1a1.8 1.8 0 0 0-1.8-1.8H3.5a1.8 1.8 0 0 0-1.8 1.8v4.2a1.8 1.8 0 0 0 1.8 1.8h1" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>`;
+const ICON_SAVE = `<svg width="12" height="12" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M2.75 2.6c0-.5.4-.9.9-.9h6.7c.5 0 .9.4.9.9v9.1L7 9.3l-4.25 2.4V2.6Z" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>`;
+const ICON_DONE = `<svg width="12" height="12" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M2.8 7.4 5.6 10.2l5.6-6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+
+/** 一条助手消息的可复制正文：只取文本块，跳过思考过程和工具输出 */
+function assistantMessageText(wrap) {
+  return [...wrap.querySelectorAll(".msg-body > .msg-text")]
+    .map((el) => (el.dataset.src ?? el.innerText ?? "").trim())
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+/** 按钮就地反馈：变成对勾，1.6s 后复原。反馈发生在手指落下的地方 */
+function flashAction(btn, label) {
+  if (btn.dataset.busy) return;
+  btn.dataset.busy = "1";
+  const original = btn.innerHTML;
+  btn.innerHTML = `${ICON_DONE}<span>${label}</span>`;
+  btn.classList.add("done");
+  setTimeout(() => {
+    btn.innerHTML = original;
+    btn.classList.remove("done");
+    delete btn.dataset.busy;
+  }, 1600);
+}
+
+async function copyMessage(wrap, btn) {
+  const text = assistantMessageText(wrap);
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    // 无 clipboard 权限（部分 WebView）：退回选中 + execCommand
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.cssText = "position:fixed;opacity:0;";
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand("copy"); } catch { }
+    ta.remove();
+  }
+  flashAction(btn, "已复制");
+}
+
+/** 存入笔记由父页面落盘：这里只负责把 markdown 递过去，等它回执 */
+const pendingNoteAppends = new Map();
+function saveMessageToNote(wrap, btn) {
+  const text = assistantMessageText(wrap);
+  if (!text) return;
+  const requestId = `append_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+  pendingNoteAppends.set(requestId, btn);
+  setTimeout(() => pendingNoteAppends.delete(requestId), 15000);
+  const sent = postParentMessage({ type: "note-append", requestId, text });
+  if (!sent) {
+    pendingNoteAppends.delete(requestId);
+    showInlineError("独立窗口下无法存入笔记，请在笔记应用内使用");
+  }
+}
+
+function buildMessageActions(wrap) {
+  const row = document.createElement("div");
+  row.className = "msg-actions";
+
+  const copyBtn = document.createElement("button");
+  copyBtn.type = "button";
+  copyBtn.className = "msg-action";
+  copyBtn.innerHTML = `${ICON_COPY}<span>复制</span>`;
+  copyBtn.addEventListener("click", () => void copyMessage(wrap, copyBtn));
+  row.appendChild(copyBtn);
+
+  // 只有嵌在笔记应用里、且当前打开的是 markdown 笔记时才给这个入口
+  if (window.parent !== window && currentNoteFile && !/\.html?$/i.test(currentNoteFile)) {
+    const saveBtn = document.createElement("button");
+    saveBtn.type = "button";
+    saveBtn.className = "msg-action";
+    saveBtn.innerHTML = `${ICON_SAVE}<span>存入笔记</span>`;
+    saveBtn.addEventListener("click", () => saveMessageToNote(wrap, saveBtn));
+    row.appendChild(saveBtn);
+  }
+  return row;
+}
+
+/** 给所有「已完成且有正文」的助手消息补上操作行 */
+function refreshMessageActions() {
+  for (const wrap of messagesEl.querySelectorAll(".msg-assistant")) {
+    const existing = wrap.querySelector(":scope > .msg-actions");
+    if (!assistantMessageText(wrap)) { existing?.remove(); continue; }
+    // 笔记上下文会变（切文件、切成 html），重建一次比逐个同步简单
+    existing?.remove();
+    wrap.appendChild(buildMessageActions(wrap));
+  }
+}
+
+// ── 滚动跟随 ─────────────────────────────────────────────
+// 规则同 Messages / Mail：只有用户本来就贴在底部时才跟随新内容；一旦手动
+// 上滚就停止跟随，改在输入框上方浮出「回到最新」。之前每个 token 都无条件
+// 把视口拽回底部，生成期间根本没法回看上文。
+const FOLLOW_BOTTOM_PX = 64;   // 距底多少算「贴底」
+let followingBottom = true;
+let hasUnseenBelow = false;    // 未跟随期间来过新内容 —— 胶囊加个提示点
+
+function distanceFromBottom() {
+  return messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight;
+}
+function isNearBottom() { return distanceFromBottom() <= FOLLOW_BOTTOM_PX; }
+
+function syncJumpLatest() {
+  if (!jumpLatestEl) return;
+  jumpLatestEl.classList.toggle("visible", !followingBottom);
+  jumpLatestEl.classList.toggle("unseen", !followingBottom && hasUnseenBelow);
+}
+
+/** 无条件回到底部：用户自己的动作（发消息、切会话、聚焦输入框）才该这样 */
+function scrollBottom(smooth = false) {
+  if (smooth) messagesEl.scrollTo({ top: messagesEl.scrollHeight, behavior: "smooth" });
+  else messagesEl.scrollTop = messagesEl.scrollHeight;
+  // 流式期间这里每个 token 都会走一遍，状态没变就别碰 DOM
+  if (!followingBottom || hasUnseenBelow) {
+    followingBottom = true;
+    hasUnseenBelow = false;
+    syncJumpLatest();
+  }
+}
+
+/** 增量内容（流式 token、工具块、思考）：只在跟随时才动视口 */
+function scrollBottomIfFollowing() {
+  if (followingBottom) { scrollBottom(); return; }
+  if (!hasUnseenBelow) { hasUnseenBelow = true; syncJumpLatest(); }
+}
+
+messagesEl.addEventListener("scroll", () => {
+  const near = isNearBottom();
+  if (near === followingBottom) return;
+  followingBottom = near;
+  if (near) hasUnseenBelow = false;
+  syncJumpLatest();
+}, { passive: true });
+
+jumpLatestEl?.addEventListener("click", () => scrollBottom(true));
 
 
 // ── Composer popup: slash commands + @ note mentions ─────
@@ -6294,6 +6535,7 @@ function send() {
   const userMessageId = `user_${crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`}`;
   const historyImages = pendingImages.map(img => ({ data: img.data, mediaType: img.mediaType }));
   addMessage("user", displayText, imagePreviewUrls);
+  scrollBottom(); // 自己发的消息：无论此前翻到哪里都跟回底部
   messageLog.push({
     id: userMessageId,
     role: "user",
@@ -6734,6 +6976,8 @@ function renderConversationMessages(conv) {
       renderAssistantBlocks(el.querySelector(".msg-body"), msg.blocks);
     }
   }
+  refreshMessageActions();
+  scrollBottom(); // 打开一段会话总是落在最新一条
 }
 
 async function loadConversation(conv) {

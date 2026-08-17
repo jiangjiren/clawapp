@@ -2146,6 +2146,45 @@ export default function NotesExplorer() {
     }, 1500);
   }, [createDraftFile, maybeAutoTitle]); // 其余皆 ref / setter，稳定
 
+  /**
+   * 对话里的「存入笔记」：把一段回答追加到当前 markdown 笔记末尾。
+   * 编辑态走 handleEditorChange，让改动汇入既有的防抖保存，
+   * 免得直接落盘和编辑器里未保存的缓冲区互相覆盖。
+   */
+  useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      if (
+        event.origin !== window.location.origin
+        || event.source !== claudeFrameRef.current?.contentWindow
+        || event.data?.type !== "note-append"
+      ) return;
+      const requestId = event.data.requestId;
+      const reply = (ok: boolean, error?: string) => {
+        claudeFrameRef.current?.contentWindow?.postMessage(
+          { type: "note-append-result", requestId, ok, error },
+          window.location.origin,
+        );
+      };
+      const text = typeof event.data.text === "string" ? event.data.text.trim() : "";
+      if (!text) { reply(false, "没有可存入的内容"); return; }
+      if (!activePath || !note) { reply(false, "先打开一篇笔记再存入"); return; }
+      if (/\.html?$/i.test(activePath)) { reply(false, "HTML 笔记不支持追加"); return; }
+      void (async () => {
+        try {
+          const base = (isEditing ? editContent : note.content ?? "").replace(/\s+$/, "");
+          const next = `${base}\n\n${text}\n`;
+          if (isEditing) handleEditorChange(next);
+          else await handleSave(activePath, next);
+          reply(true);
+        } catch {
+          reply(false, "写入失败");
+        }
+      })();
+    };
+    window.addEventListener("message", onMessage);
+    return () => window.removeEventListener("message", onMessage);
+  }, [activePath, note, isEditing, editContent, handleSave, handleEditorChange]);
+
   /** 切换阅读 / 编辑模式 */
   const handleEditToggle = useCallback(async () => {
     if (!isEditing) {
@@ -4680,7 +4719,7 @@ export default function NotesExplorer() {
           ref={claudeFrameRef}
           className={styles.assistantPanelFrame}
           title="Claude Chat"
-          src={`/notes-claude/?v=11${process.env.NEXT_PUBLIC_CLAUDE_CHAT_PORT ? `&wsPort=${process.env.NEXT_PUBLIC_CLAUDE_CHAT_PORT}` : ""}`}
+          src={`/notes-claude/?v=12${process.env.NEXT_PUBLIC_CLAUDE_CHAT_PORT ? `&wsPort=${process.env.NEXT_PUBLIC_CLAUDE_CHAT_PORT}` : ""}`}
           allow="clipboard-read; clipboard-write"
           referrerPolicy="same-origin"
           tabIndex={isAssistantPanelOpen ? 0 : -1}
