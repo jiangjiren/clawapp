@@ -4506,14 +4506,27 @@ let assistantEvents = []; // non-content SDK events that still explain the AI tu
     syncBusyIndicators();   // 没有转圈了，胶囊重新接手表达
   }
 
+  /** 收掉指定那一个工具的转圈。返回是否真的定位到了它 */
   function markToolSettled(toolUseId, isError) {
-    if (!assistantEl || !toolUseId) return;
+    if (!assistantEl || !toolUseId) return false;
     const el = assistantEl.querySelector(`.tool-call[data-tool-id="${cssEscapeValue(toolUseId)}"]`);
-    if (!el) return;
+    if (!el) return false;
     el.classList.remove("running");
     el.querySelector(".tool-spinner")?.remove();
     el.classList.toggle("failed", !!isError);
     syncBusyIndicators();
+    return true;
+  }
+
+  /**
+   * 一条工具结果到达时只收它自己那一行。模型可以在一条回复里并行发起多个
+   * 工具，先回来的那个不该把还在跑的兄弟一起标成完成。
+   * 拿不到 id 或那一行不在 DOM 里时退回全停 —— 宁可多停一个，也不能留下
+   * 一个永远转的圈。
+   */
+  function settleToolResult(source) {
+    const id = source?.tool_use_id ?? source?.toolUseID ?? null;
+    if (!markToolSettled(id, !!source?.is_error)) cleanupRunningTools();
   }
 
 function resetAssistantState() {
@@ -5681,7 +5694,7 @@ function handleEvent(ev) {
         markToolRunning(el);
         blockMap[idx] = { el, type: block.type, accumulated: "", id: block.id };
       } else if (block.type === "web_search_tool_result" || block.type === "web_fetch_tool_result" || isToolResultType(block.type)) {
-        cleanupRunningTools();
+        settleToolResult(block);
         const el = makeHistoryBlock(blockTypeLabel(block.type), block);
         body.appendChild(el);
         reanchorGenChip();
@@ -5817,7 +5830,7 @@ function handleEvent(ev) {
   }
 
   if (isToolResultType(ev.type)) {
-    cleanupRunningTools();
+    settleToolResult(ev);
     if (!assistantEl) { removeTyping(); assistantEl = addMessage("assistant", ""); }
     // 工具已经回来了，胶囊不能继续挂着"调用工具中…"直到下一段正文才被清掉
     if (isGenerating) setGenChip("");
