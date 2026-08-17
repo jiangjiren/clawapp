@@ -4158,6 +4158,12 @@ window.addEventListener("message", (e) => {
     promptEl.dispatchEvent(new Event("input"));
     sendBtn.click();
   }
+  // 父页面收起了对话面板：把满铺的设置/历史面板也收掉，
+  // 下次展开直接回到对话，而不是停在设置页
+  if (e.data?.type === "close-overlays") {
+    closeAuthDialog();
+    closeHistoryPanel();
+  }
 });
 
 ctxToggle.addEventListener("click", () => {

@@ -28,6 +28,10 @@ export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   viewportFit: "cover",
+  // 键盘弹出时压缩 layout viewport，dvh / position:fixed 自动跟随，
+  // 底部对话抽屉不会被键盘盖住。iOS Safari 尚不支持这个属性，
+  // 那边由 NotesExplorer 的 --keyboard-height 兜底。
+  interactiveWidget: "resizes-content",
   themeColor: "#000000",
 };
 

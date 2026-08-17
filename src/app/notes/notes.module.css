@@ -3504,15 +3504,30 @@
     position: fixed;
     left: 0;
     right: 0;
-    bottom: env(safe-area-inset-bottom, 0px);
+    /* 键盘弹出时整个抽屉抬到键盘之上。--keyboard-height 由 NotesExplorer 按
+       visualViewport 实时写入；Chrome 走 interactive-widget=resizes-content，
+       layout viewport 自己会缩，那边这个值恒为 0，不会重复补偿 */
+    bottom: calc(env(safe-area-inset-bottom, 0px) + var(--keyboard-height, 0px));
     top: auto;
     z-index: 40;
     width: 100% !important;
-    /* 始终留出顶部空间：最高 85dvh，且在高屏（平板竖屏）上封顶 720px，不会铺满 */
-    height: min(85vh, 720px);
-    height: min(85dvh, 720px);
-    min-height: min(480px, 85vh);
-    min-height: min(480px, 85dvh);
+    /* 可用高度（= 满档高度）：视口扣掉上下安全区与键盘 */
+    --sheet-avail-h: calc(
+      100dvh - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)
+        - var(--keyboard-height, 0px)
+    );
+    /* 展开档：留出顶部空间，最高 85dvh 且在高屏（平板竖屏）上封顶 720px；
+       键盘顶上来时不得超过可用高度。
+       注：自定义属性的值按 token 解析，写两条 vh/dvh 兜底没有意义——
+       后一条总是胜出，dvh 本身也早已是各家基线 */
+    --sheet-expanded-h: min(85dvh, 720px, var(--sheet-avail-h));
+    /* height / min-height 同值：拖拽时 JS 只要写 inline height 0 或极大值，
+       就能分别量出这两个档位的实际像素，无需在 JS 里重写这些公式。
+       border-box 让这三个值与 offsetHeight 严格相等（否则差一条上边框） */
+    box-sizing: border-box;
+    height: var(--sheet-expanded-h);
+    min-height: var(--sheet-expanded-h);
+    max-height: var(--sheet-avail-h);
     border-left: 0;
     border-top: 1px solid var(--notes-border);
     border-radius: 16px 16px 0 0;
@@ -3520,10 +3535,18 @@
     overflow: hidden;
     box-shadow: 0 -18px 48px rgba(0, 0, 0, 0.15);
     transform: translateY(104%);
-    transition: transform 0.35s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.35s ease;
-    will-change: transform, opacity;
+    transition: transform 0.35s cubic-bezier(0.16, 1, 0.3, 1), height 0.32s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.35s ease;
+    will-change: transform, height, opacity;
     opacity: 0;
     pointer-events: none;
+  }
+
+  /* 第三档：上滑到底，沉浸对话。顶边落在安全区下沿，圆角收平。
+     不覆盖 min-height —— avail 恒 ≥ expanded，两者不会打架 */
+  .assistantPanel.assistantPanelFull {
+    height: var(--sheet-avail-h);
+    border-radius: 0;
+    border-top: none;
   }
 
   .shellMobileAssistantPanelOpen .assistantPanel {
@@ -3545,7 +3568,8 @@
      而不是浮在已无关的首页上方的底部 sheet */
   .assistantPanel.assistantPanelFullscreen {
     top: 0;
-    bottom: 0;
+    /* 全屏态同样要给键盘让位（iOS 兜底路径） */
+    bottom: var(--keyboard-height, 0px);
     height: auto;
     min-height: 0;
     border-radius: 0;
@@ -4052,6 +4076,13 @@
 
 .mobileSheetHandlePill {
   display: none;
+}
+
+/* iframe 内的设置/历史面板在移动端满铺整个 iframe，它们的返回按钮落在顶栏左侧，
+   正好被这块透明热区盖住（轻点会被当成收起 sheet）。子面板打开时让开。 */
+.mobileSheetHandleHidden {
+  opacity: 0;
+  pointer-events: none;
 }
 
 @media (max-width: 900px), (orientation: portrait) {

@@ -57,6 +57,33 @@ type NotesShellStyle = CSSProperties & {
   "--keyboard-height": string;
 };
 
+/** 移动端对话抽屉的三个吸附档位，由上到下：full → expanded → closed */
+type MobileSheetState = 'closed' | 'expanded' | 'full';
+
+/** 一次抽屉拖拽的全部量，坐标统一为「顶边到视口顶的距离」 */
+type SheetDrag = {
+  active: boolean; startY: number; baseTop: number;
+  expandedH: number; fullH: number;
+  fullTop: number; expandedTop: number; closedTop: number;
+  lastY: number; lastT: number; velocity: number; moved: number;
+};
+
+/**
+ * 把抽屉画到给定顶边位置。分两段且在展开档处连续：
+ * 顶边高于展开档 → 长高（改 height）；低于展开档 → 保持展开高度往下 translate。
+ * 不这么分的话，从满档往下拖会把输入框一起推出屏幕。
+ */
+const renderSheetAtTop = (el: HTMLElement, top: number, d: SheetDrag) => {
+  const h = Math.min(d.fullH, Math.max(0, d.closedTop - top));
+  if (h >= d.expandedH) {
+    el.style.height = `${h}px`;
+    el.style.transform = 'translateY(0px)';
+  } else {
+    el.style.height = `${d.expandedH}px`;
+    el.style.transform = `translateY(${d.expandedH - h}px)`;
+  }
+};
+
 type ShareInfo = {
   token: string | null;
   url: string | null;
@@ -668,15 +695,13 @@ export default function NotesExplorer() {
   const [sidebarPeek, setSidebarPeek] = useState<"closed" | "open" | "closing">("closed");
   const sidebarPeekTimersRef = useRef<{ hide: number | null; close: number | null }>({ hide: null, close: null });
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
-  const [mobileAssistantSheet, setMobileAssistantSheet] = useState<'closed' | 'expanded'>('closed');
-  const mobileAssistantPanelOpen = mobileAssistantSheet === 'expanded';
+  // 三档：closed（收起）/ expanded（85dvh 底部 sheet）/ full（上滑到底，沉浸对话）
+  const [mobileAssistantSheet, setMobileAssistantSheet] = useState<MobileSheetState>('closed');
+  const mobileAssistantPanelOpen = mobileAssistantSheet !== 'closed';
   const mobileOverlayOpenTime = useRef(0);
   // 移动端底部 sheet 的跟手拖拽状态（用 ref 直接改样式，避免每帧 re-render）
   const assistantPanelRef = useRef<HTMLElement>(null);
-  const sheetDragRef = useRef<{
-    active: boolean; startY: number; baseY: number; panelH: number;
-    lastY: number; lastT: number; velocity: number; moved: number;
-  } | null>(null);
+  const sheetDragRef = useRef<SheetDrag | null>(null);
   const [assistantPanelVisible, setAssistantPanelVisible] = useState(false);
   // 面板内（设置/历史）是否正显示为满铺子页面：此时唯一的"返回"控件应是子页面自己的返回按钮，
   // 收起整个面板的按钮需要让位，避免两个"返回"叠在同一个左上角
@@ -1220,7 +1245,7 @@ export default function NotesExplorer() {
   }, [isMobileViewport, sidebarVisible, clearSidebarPeekTimers]);
 
   useEffect(() => {
-    if (!isMobileViewport || (!mobileSidebarOpen && mobileAssistantSheet !== 'expanded')) {
+    if (!isMobileViewport || (!mobileSidebarOpen && mobileAssistantSheet === 'closed')) {
       return;
     }
 
@@ -3087,7 +3112,7 @@ export default function NotesExplorer() {
 
     if (isMobileViewport) {
       setMobileSidebarOpen(false);
-      setMobileAssistantSheet((s) => s === 'expanded' ? 'closed' : 'expanded');
+      setMobileAssistantSheet((s) => s === 'closed' ? 'expanded' : 'closed');
     } else {
       setAssistantPanelVisible((visible) => !visible);
     }
@@ -3119,18 +3144,28 @@ export default function NotesExplorer() {
   }, [handleClaudeToggle]);
 
   // ── 移动端底部 sheet：跟手拖拽 + 速度吸附 ─────────────────
-  // 两个吸附点（translateY，单位 px）：expanded=0, closed=H。
+  // 统一坐标是「顶边到视口顶的距离」：抽屉底边锚在视口底部不动，
+  // 三个吸附点由上到下 full → expanded → closed，见 renderSheetAtTop。
   const handleSheetPointerDown = useCallback((e: ReactPointerEvent<HTMLButtonElement>) => {
     if (!isMobileViewport) return;
     const el = assistantPanelRef.current;
     if (!el) return;
-    const panelH = el.offsetHeight;
-    const baseY = mobileAssistantSheet === 'expanded' ? 0 : panelH;
+    el.style.transition = 'none'; // 拖拽期间关闭过渡，跟手；也避免下面的探测触发 height 过渡
+    // 两个档位的实际像素直接向 CSS 问：写 inline height 后由 min-height /
+    // max-height 夹住，读回 offsetHeight 即可。同步读写、当帧还原，不会真的绘制。
+    const prevInlineH = el.style.height;
+    el.style.height = '0px';
+    const expandedH = el.offsetHeight;      // 被 min-height 顶回展开档
+    el.style.height = '100000px';
+    const fullH = el.offsetHeight;          // 被 max-height 夹到满档
+    el.style.height = prevInlineH;
+    const closedTop = el.getBoundingClientRect().bottom; // 底边锚点（收起档的顶边）
+    const baseTop = closedTop - (mobileAssistantSheet === 'full' ? fullH : expandedH);
     sheetDragRef.current = {
-      active: true, startY: e.clientY, baseY, panelH,
+      active: true, startY: e.clientY, baseTop, expandedH, fullH,
+      fullTop: closedTop - fullH, expandedTop: closedTop - expandedH, closedTop,
       lastY: e.clientY, lastT: e.timeStamp, velocity: 0, moved: 0,
     };
-    el.style.transition = 'none'; // 拖拽期间关闭过渡，跟手
     e.currentTarget.setPointerCapture(e.pointerId);
   }, [isMobileViewport, mobileAssistantSheet]);
 
@@ -3140,8 +3175,7 @@ export default function NotesExplorer() {
     if (!d || !d.active || !el) return;
     const delta = e.clientY - d.startY;
     d.moved = Math.max(d.moved, Math.abs(delta));
-    const y = Math.min(d.panelH, Math.max(0, d.baseY + delta));
-    el.style.transform = `translateY(${y}px)`;
+    renderSheetAtTop(el, Math.min(d.closedTop, Math.max(d.fullTop, d.baseTop + delta)), d);
     const dt = e.timeStamp - d.lastT;
     if (dt > 0) d.velocity = (e.clientY - d.lastY) / dt; // px/ms，正=向下
     d.lastY = e.clientY;
@@ -3154,31 +3188,31 @@ export default function NotesExplorer() {
     if (!d || !d.active) return;
     d.active = false;
 
-    // 让 class 先提交，下一帧再清掉 inline transform 并恢复过渡，
-    // 这样吸附动画从「当前拖拽位置」平滑过渡到目标档位，不会先弹回旧档再跳。
-    const settle = () => {
-      requestAnimationFrame(() => {
-        if (!el) return;
-        el.style.transition = '';
-        el.style.transform = '';
-      });
+    const clearInline = () => {
+      if (!el) return;
+      el.style.transition = '';
+      el.style.transform = '';
+      el.style.height = '';
     };
+    // 让 class 先提交，下一帧再清掉 inline 样式并恢复过渡，
+    // 这样吸附动画从「当前拖拽位置」平滑过渡到目标档位，不会先弹回旧档再跳。
+    const settle = () => requestAnimationFrame(clearInline);
 
-    // 轻点（位移很小）：等同点击切换 closed ↔ expanded
+    // 轻点（位移很小）：向下退一档 full → expanded → closed
     if (d.moved < 6) {
-      if (el) { el.style.transition = ''; el.style.transform = ''; }
-      setMobileAssistantSheet((s) => s === 'expanded' ? 'closed' : 'expanded');
+      clearInline();
+      setMobileAssistantSheet((s) => s === 'full' ? 'expanded' : 'closed');
       return;
     }
 
-    const finalY = Math.min(d.panelH, Math.max(0, d.baseY + (e.clientY - d.startY)));
-    const order: Array<'expanded' | 'closed'> = ['expanded', 'closed'];
-    const anchors = [0, d.panelH];
+    const finalTop = Math.min(d.closedTop, Math.max(d.fullTop, d.baseTop + (e.clientY - d.startY)));
+    const order: MobileSheetState[] = ['full', 'expanded', 'closed'];
+    const anchors = [d.fullTop, d.expandedTop, d.closedTop];
     // 动量投影：用松手时的速度把落点向前推一段（120ms 惯性），再吸附到最近档位。
     // 这样「快速甩到底」会落到 closed，「缓慢小拖」按实际位置就近吸附，符合直觉。
-    const projectedY = Math.min(d.panelH, Math.max(0, finalY + d.velocity * 120));
+    const projectedTop = Math.min(d.closedTop, Math.max(d.fullTop, finalTop + d.velocity * 120));
     const targetIdx = anchors.reduce((best, a, i) =>
-      Math.abs(a - projectedY) < Math.abs(anchors[best] - projectedY) ? i : best, 0);
+      Math.abs(a - projectedTop) < Math.abs(anchors[best] - projectedTop) ? i : best, 0);
     setMobileAssistantSheet(order[targetIdx]);
     settle();
   }, []);
@@ -3395,6 +3429,15 @@ export default function NotesExplorer() {
       setIsDashboardChatActive(false);
     }
   }, [activePath]);
+  // 面板收起时顺手让 iframe 里的设置/历史面板退出，
+  // 否则下次展开看到的还是设置页而不是对话本身
+  useEffect(() => {
+    if (isAssistantPanelOpen || !isChildOverlayOpen) return;
+    claudeFrameRef.current?.contentWindow?.postMessage(
+      { type: "close-overlays" },
+      window.location.origin,
+    );
+  }, [isAssistantPanelOpen, isChildOverlayOpen]);
   const postAskToClaude = useCallback((text: string) => {
     const frameWindow = claudeFrameRef.current?.contentWindow;
     if (claudeFrameReadyRef.current && frameWindow) {
@@ -3405,7 +3448,7 @@ export default function NotesExplorer() {
   }, []);
   const isDesktopAssistantPanelHidden = !isMobileViewport && !assistantPanelVisible;
   const isDesktopGitView = !isMobileViewport && gitPanelOpen;
-  const hasMobileOverlayOpen = isMobileViewport && (mobileSidebarOpen || mobileAssistantSheet === 'expanded' || gitPanelOpen || mobileTocOpen || treeSheetTarget !== null);
+  const hasMobileOverlayOpen = isMobileViewport && (mobileSidebarOpen || mobileAssistantSheet !== 'closed' || gitPanelOpen || mobileTocOpen || treeSheetTarget !== null);
   // track when overlay opens to prevent ghost-click closing it immediately (Android touch issue)
   if (hasMobileOverlayOpen) mobileOverlayOpenTime.current = mobileOverlayOpenTime.current || Date.now();
   if (!hasMobileOverlayOpen) mobileOverlayOpenTime.current = 0;
@@ -3415,7 +3458,7 @@ export default function NotesExplorer() {
       className={`${styles.shell} ${isDesktopSidebarHidden ? styles.shellSidebarHidden : ""} ${
         mobileSidebarOpen ? styles.shellMobileSidebarOpen : ""
       } ${
-        mobileAssistantSheet === 'expanded' ? styles.shellMobileAssistantPanelOpen : ""
+        mobileAssistantSheet !== 'closed' ? styles.shellMobileAssistantPanelOpen : ""
       } ${
         isDesktopAssistantPanelHidden ? styles.shellAssistantPanelHidden : ""
       } ${isResizingAssistantPanel || isResizingSidebar ? styles.shellResizing : ""}`}
@@ -4542,7 +4585,7 @@ export default function NotesExplorer() {
 
       <aside
         ref={assistantPanelRef}
-        className={`${styles.assistantPanel} ${!isAssistantPanelOpen ? styles.assistantPanelHidden : ""} ${isDashboardChatMode ? styles.assistantPanelCenter : ""} ${isMobileDashboardChat ? styles.assistantPanelFullscreen : ""}`}
+        className={`${styles.assistantPanel} ${!isAssistantPanelOpen ? styles.assistantPanelHidden : ""} ${mobileAssistantSheet === 'full' ? styles.assistantPanelFull : ""} ${isDashboardChatMode ? styles.assistantPanelCenter : ""} ${isMobileDashboardChat ? styles.assistantPanelFullscreen : ""}`}
         aria-label="辅助面板"
         aria-hidden={isMobileViewport ? mobileAssistantSheet === 'closed' : !isAssistantPanelOpen}
         inert={isMobileViewport ? mobileAssistantSheet === 'closed' : !isAssistantPanelOpen}
@@ -4550,12 +4593,15 @@ export default function NotesExplorer() {
         {isMobileViewport && !isMobileDashboardChat && (
           <button
             type="button"
-            className={styles.mobileSheetHandle}
+            className={`${styles.mobileSheetHandle} ${isChildOverlayOpen ? styles.mobileSheetHandleHidden : ""}`}
             onPointerDown={handleSheetPointerDown}
             onPointerMove={handleSheetPointerMove}
             onPointerUp={handleSheetPointerUp}
             onPointerCancel={handleSheetPointerUp}
-            aria-label={mobileAssistantSheet === 'expanded' ? '收起对话面板' : '展开对话面板'}
+            tabIndex={isChildOverlayOpen ? -1 : 0}
+            aria-hidden={isChildOverlayOpen}
+            aria-label={mobileAssistantSheet === 'full' ? '收起到半屏' : '收起对话面板'}
+            title="上滑全屏，下滑收起"
           >
             <span className={styles.mobileSheetHandlePill} />
           </button>
@@ -4634,12 +4680,14 @@ export default function NotesExplorer() {
           ref={claudeFrameRef}
           className={styles.assistantPanelFrame}
           title="Claude Chat"
-          src={`/notes-claude/?v=10${process.env.NEXT_PUBLIC_CLAUDE_CHAT_PORT ? `&wsPort=${process.env.NEXT_PUBLIC_CLAUDE_CHAT_PORT}` : ""}`}
+          src={`/notes-claude/?v=11${process.env.NEXT_PUBLIC_CLAUDE_CHAT_PORT ? `&wsPort=${process.env.NEXT_PUBLIC_CLAUDE_CHAT_PORT}` : ""}`}
           allow="clipboard-read; clipboard-write"
           referrerPolicy="same-origin"
           tabIndex={isAssistantPanelOpen ? 0 : -1}
           onLoad={() => {
             claudeFrameReadyRef.current = true;
+            // 新文档里没有任何子面板，清掉可能残留的覆盖态
+            setIsChildOverlayOpen(false);
             // Re-send the current note context once the iframe is ready.
             // The useEffect fires when activePath changes, but the iframe may
             // still be loading at that point and miss the message.
