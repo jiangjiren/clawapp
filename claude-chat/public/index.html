@@ -2151,6 +2151,35 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
   }
 }
 
+/* ── 触控设备的阅读字阶 ────────────────────────────────────
+   全局基准 13px 是给桌面侧栏的密度（面板宽 min(520px, 42vw)），
+   手机上 AI 回复是主要阅读物，13px 约合 9.75pt，远低于 iOS 的正文基准。
+   这里只抬「阅读面」——正文、标题、代码、表格；工具块 / 思考 / 胶囊
+   等次要信息维持原尺寸，正文一抬，主次对比反而更清楚。
+   判据用 hover: none 而非宽度：桌面侧栏本来就窄于 768px，按宽度会误伤。 */
+@media (hover: none) {
+  .msg-body { font-size: 16px; }
+  .msg-body p { margin: 8px 0; }
+  .msg-body h1 { font-size: 20px; }
+  .msg-body h2 { font-size: 18px; }
+  .msg-body h3, .msg-body h4 { font-size: 16px; }
+  .msg-body h1, .msg-body h2, .msg-body h3, .msg-body h4 { margin: 16px 0 6px; }
+  .msg-body ul, .msg-body ol { margin: 8px 0; padding-left: 22px; }
+  .msg-body li { margin: 4px 0; }
+  .msg-body table { font-size: 14px; }
+  .msg-body code { font-size: 14px; }
+  .msg-body pre code { font-size: 14px; }
+  .msg-body blockquote { margin: 10px 0; padding-left: 12px; }
+  .msg-user .msg-body { padding: 10px 14px; }
+  /* 思考过程展开后是给人读的散文，抬一档；工具块维持 11px —— 那是扫读的
+     标签不是阅读物，抬上去只会跟正文抢注意力 */
+  .thinking-content { font-size: 13px; }
+  /* iOS Safari 会把 font-size < 16px 的输入框在聚焦时连页面一起放大。
+     父页面的 viewport 没有 maximum-scale（也不该有，禁缩放伤无障碍），
+     所以只能让输入框自己达标。 */
+  #prompt { font-size: 16px; }
+}
+
 /* 触控设备（手机）：隐藏 hover 按钮，改用 ··· 菜单 */
 @media (hover: none) {
   .history-item-actions { display: none !important; }
