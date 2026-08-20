@@ -3,7 +3,7 @@ import { chmodSync, readFileSync, existsSync, writeFileSync, mkdirSync, renameSy
 import { extname } from "node:path";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import crypto from "node:crypto";
 
@@ -165,11 +165,25 @@ const CODEX_DEFAULT_MODELS = {
   haikuModel: "gpt-5.6-luna",
 };
 
+// Antigravity CLI（agy）没有 Node SDK，只能起子进程读 stream-json。
+// `agy models` 列出来的 slug 都带推理档位后缀（gemini-3.7-flash-high/low），
+// 但那是「模型 × 档位」的组合，拿它填三档会让下拉里出现两个同名模型。
+// 不带后缀的名字同样可用且能配 --effort，所以三档只放三个真模型，
+// 推理档位交回界面上的 effort 选择器。
+// 界面上的模型菜单由前端的 AGY_MODELS 决定（四个：两个 Gemini + 两个 Claude），
+// 这三档只剩两个用处：账号卡片上显示这个通道主要跑什么，以及派发时的默认模型。
+const AGY_DEFAULT_MODELS = {
+  opusModel: "gemini-3.1-pro",
+  sonnetModel: "gemini-3.7-flash",
+  haikuModel: "gemini-3.7-flash",
+};
+
 const PROVIDER_PRESETS = {
   anthropic:  { baseUrl: "",                                    opusModel: "claude-opus-5",                   sonnetModel: "claude-sonnet-5",                  haikuModel: "claude-haiku-4-5-20251001" },
   deepseek:   { baseUrl: "https://api.deepseek.com/anthropic", opusModel: "deepseek-v4-pro[1m]",            sonnetModel: "deepseek-v4-pro[1m]",             haikuModel: "deepseek-v4-flash" },
   openrouter: { baseUrl: "https://openrouter.ai/api",          opusModel: "~anthropic/claude-opus-latest",   sonnetModel: "~anthropic/claude-sonnet-latest",  haikuModel: "~anthropic/claude-haiku-latest" },
   codex:      { baseUrl: "",                                    ...CODEX_DEFAULT_MODELS },
+  antigravity:{ baseUrl: "",                                    ...AGY_DEFAULT_MODELS },
 };
 const PROVIDER_GOOD_AT = {
   claude: "综合能力强，写代码和长文本理解均衡",
@@ -177,8 +191,14 @@ const PROVIDER_GOOD_AT = {
   deepseek: "长链条推理、算法与数学、疑难 bug 根因分析",
   openrouter: "按所配置模型处理通用推理、写作与代码任务",
   codex: "大范围重构、需要反复跑测试收敛的任务、复杂多文件实现",
+  antigravity: "超长上下文通读、跨文档梳理与第二视角复核",
   custom: "按所配置模型处理专项任务",
 };
+// 靠各自 CLI 的登录跑，不需要用户填 API Key 的那几家
+const SUBSCRIPTION_PROVIDERS = new Set(["claude", "codex", "antigravity"]);
+function isSubscriptionProvider(provider) {
+  return SUBSCRIPTION_PROVIDERS.has(provider);
+}
 const CLAUDE_COMPAT_ENV_KEYS = [
   "ANTHROPIC_API_KEY",
   "ANTHROPIC_AUTH_TOKEN",
@@ -339,6 +359,554 @@ function sendCodexItemEvent(send, eventType, item) {
   }
 }
 
+// ── Antigravity CLI（agy）────────────────────────────────
+// 官方没出 Node SDK（只有 Python 版，而且那个不认 CLI 的登录、只认 API key），
+// 所以这里走官方文档化的 headless 模式：起子进程，读 stream-json。
+const AGY_CONV_FILE = join(DATA_DIR, `agy-conversation-${PORT}.json`);
+let agyConversationId = null;
+try {
+  if (existsSync(AGY_CONV_FILE)) {
+    agyConversationId = JSON.parse(readFileSync(AGY_CONV_FILE, "utf8")).conversationId ?? null;
+    if (agyConversationId) console.log(`Restored agy conversation: ${agyConversationId}`);
+  }
+} catch { }
+
+function saveAgyConversation(id) {
+  agyConversationId = id;
+  try { writeFileSync(AGY_CONV_FILE, JSON.stringify({ conversationId: id }), "utf8"); } catch { }
+}
+
+function clearAgyConversation() {
+  agyConversationId = null;
+  try { writeFileSync(AGY_CONV_FILE, JSON.stringify({ conversationId: null }), "utf8"); } catch { }
+}
+
+let _agyBinaryCache;
+function findAgyBinary() {
+  if (_agyBinaryCache !== undefined) return _agyBinaryCache;
+  const candidates = [];
+  if (process.env.AGY_BIN) candidates.push(process.env.AGY_BIN);
+  if (process.platform === "win32") {
+    const localAppData = process.env.LOCALAPPDATA || join(homedir(), "AppData", "Local");
+    candidates.push(join(localAppData, "agy", "bin", "agy.exe"));
+  } else {
+    candidates.push(join(homedir(), ".local", "bin", "agy"));
+    candidates.push("/usr/local/bin/agy");
+  }
+  _agyBinaryCache = candidates.find(p => { try { return existsSync(p); } catch { return false; } }) ?? null;
+  return _agyBinaryCache;
+}
+
+// 登录状态没有可读的凭证文件（agy 把 token 收在自己的 store 里），只能退一步：
+// 装了二进制 + 建过配置目录，就认为登录过。真没登录时第一轮会由 CLI 自己报错。
+function isAgyAuthAvailable() {
+  if (!findAgyBinary()) return false;
+  return existsSync(join(homedir(), ".gemini", "antigravity-cli"));
+}
+
+function agyModeFlag(permissionMode) {
+  if (permissionMode === "plan") return "plan";
+  return "accept-edits";
+}
+
+// agy 只认三档，界面上的 xhigh/max 都压到 high
+const AGY_EFFORT = { low: "low", medium: "medium", high: "high", xhigh: "high", max: "high" };
+
+// 每个模型支持的档位并不一样，给错了 agy 直接拒绝启动：
+//   gemini-3.1-pro   —— 只有 low / high，没有 medium
+//   gemini-*-flash   —— 三档齐全，而且不带档位后缀时**必须**传 --effort
+//   claude-*         —— 压根不吃 --effort，传了报 "effort is not supported"
+//   gpt-oss-120b     —— 只有 medium
+// 本想开机跑 `agy models` 现推一份，但那条命令在管道里会挂住不退出（实测 >2min），
+// 不能放在启动路径上。所以写死一张表，再靠下面的 learn 函数按 agy 的报错自我修正。
+const AGY_MODEL_EFFORTS = new Map([
+  ["gemini-3.7-flash", new Set(["low", "medium", "high"])],
+  ["gemini-3.6-flash", new Set(["low", "medium", "high"])],
+  ["gemini-3.5-flash", new Set(["low", "medium", "high"])],
+  ["gemini-3.1-pro", new Set(["low", "high"])],
+  ["gpt-oss-120b", new Set(["medium"])],
+  ["claude-opus-4-6-thinking", new Set()],
+  ["claude-sonnet-4-6", new Set()],
+]);
+
+// agy 拒绝启动时会把真实档位写进错误里，例如
+//   `--model gemini-3.1-pro requires --effort (available: low, high)`
+//   `effort is not supported for model "claude-opus-4-6-thinking"`
+// 上面那张表哪天过期了，就按它说的改，然后重试一次。
+function learnAgyEffortsFromError(model, message) {
+  if (!model || !message) return false;
+  const before = AGY_MODEL_EFFORTS.get(model);
+  if (/effort is not supported for model/i.test(message)) {
+    if (before && before.size === 0) return false;
+    AGY_MODEL_EFFORTS.set(model, new Set());
+    return true;
+  }
+  const available = /available:\s*([a-z,\s]+)\)/i.exec(message);
+  if (available) {
+    const levels = new Set(available[1].split(",").map(part => part.trim()).filter(Boolean));
+    if (!levels.size) return false;
+    if (before && before.size === levels.size && [...levels].every(level => before.has(level))) return false;
+    AGY_MODEL_EFFORTS.set(model, levels);
+    return true;
+  }
+  return false;
+}
+
+/**
+ * 这个模型这一轮该传什么 --effort，返回 null 表示这一项整个别传。
+ */
+function agyEffortForModel(model, effort) {
+  const wanted = AGY_EFFORT[effort] || "medium";
+  if (!model) return wanted;
+  // 档位已经写死在模型名里，再传 --effort 会冲突
+  if (/-(high|medium|low)$/.test(model)) return null;
+  const supported = AGY_MODEL_EFFORTS.get(model);
+  if (!supported) return wanted;        // 没见过的模型，照传让 agy 自己判
+  if (supported.size === 0) return null; // claude-* 这类不接受档位
+  if (supported.has(wanted)) return wanted;
+  // 就近取。medium 缺失时优先往下走：high 更慢更费额度，不该由我们替用户升上去
+  const order = wanted === "high"
+    ? ["high", "medium", "low"]
+    : wanted === "low"
+    ? ["low", "medium", "high"]
+    : ["low", "high", "medium"];
+  return order.find(level => supported.has(level)) ?? null;
+}
+
+// agy 的参数名是 PascalCase 的一套（AbsolutePath / TargetFile / …），
+// 前端工具卡片取的是 file_path / command / query 这几个键，对不上就只能
+// 把整个 JSON 摊在卡片上。这里补一份小写别名，原字段保留不动。
+const AGY_PARAM_ALIAS = {
+  AbsolutePath: "file_path",
+  TargetFile: "file_path",
+  DirectoryPath: "file_path",
+  FilePath: "file_path",
+  NotebookPath: "file_path",
+  Command: "command",
+  CommandLine: "command",
+  Query: "query",
+  SearchQuery: "query",
+  SearchTerm: "query",
+  Url: "url",
+  URL: "url",
+};
+
+function agyToolInput(info) {
+  if (!info || typeof info !== "object") return {};
+  const params = info.parameters;
+  if (!params || typeof params !== "object") return {};
+  const out = { ...params };
+  for (const [from, to] of Object.entries(AGY_PARAM_ALIAS)) {
+    if (out[to] === undefined && typeof params[from] === "string") out[to] = params[from];
+  }
+  return out;
+}
+
+function agyToolOutput(info) {
+  if (!info || typeof info !== "object") return "";
+  const out = info.output;
+  if (typeof out === "string") return out;
+  if (out == null) return "";
+  try { return JSON.stringify(out); } catch { return String(out); }
+}
+
+// agy 的工具名是自己一套（view_file / run_command / …），前端的工具卡片按名字
+// 认图标和中文名，所以映射到已有的那套名字，让 Gemini 的步骤流和另外两家长一样。
+const AGY_TOOL_ALIAS = {
+  view_file: "Read",
+  read_url_content: "WebFetch",
+  search_web: "WebSearch",
+  grep_search: "Grep",
+  find_by_name: "Glob",
+  list_dir: "Glob",
+  run_command: "Bash",
+  write_to_file: "Write",
+  replace_file_content: "Edit",
+  multi_replace_file_content: "Edit",
+  sed_file: "Edit",
+  notebook_edit: "NotebookEdit",
+};
+
+function agyToolName(step) {
+  const raw = step?.tool_name || step?.tool_info?.name || "tool";
+  return AGY_TOOL_ALIAS[raw] || raw;
+}
+
+// agy 抛上来的原文有些对用户毫无意义（"Agent execution terminated due to error."），
+// 真正的线索在它自己的 cli.log 里。已知的几种翻译成人话，并给出下一步该干什么。
+function explainAgyFailure(raw) {
+  const text = String(raw || "");
+  if (/invalid UTF-8/i.test(text)) {
+    // 实测过：坏内容不会留在会话历史里连累后面几轮，重发一次通常就好了
+    return "Antigravity 请求失败：这轮读到的内容里有不是 UTF-8 编码的文本，模型侧拒收了。"
+      + "多半是 agent 翻到了非 UTF-8 的文件（打包产物、老编码的文档都可能）。"
+      + "重发一次通常就好；如果反复撞上，让它绕开那个目录。";
+  }
+  if (/Agent execution terminated/i.test(text)) {
+    return `Antigravity 中止了这一轮：${text} `
+      + "具体原因在 ~/.gemini/antigravity-cli/cli.log 的末尾；如果反复出现，先重置对话试试。";
+  }
+  if (/quota|rate limit|resource exhausted/i.test(text)) {
+    // Antigravity 的额度按模型家族分开算：Claude 那档用完时 Gemini 往往还能跑
+    return `Antigravity 额度或频率受限：${text} `
+      + "这个额度是按模型分别计的，换成另一档模型（Gemini ↔ Claude）通常还能继续。";
+  }
+  return `Antigravity 请求失败：${text}`;
+}
+
+// 前端的模型选择器按 profile 切换，但对话历史里可能残留另一家的模型名。
+// 把不属于 agy 的名字直接丢掉——传过去它只会报 unknown model。
+function resolveAgyModel(requested, profile) {
+  const fallback = profile?.opusModel || AGY_DEFAULT_MODELS.opusModel;
+  if (typeof requested !== "string" || !requested.trim()) return fallback;
+  return /^(gemini-\d|claude-(opus|sonnet)-4-6|gpt-oss-)/.test(requested.trim()) ? requested.trim() : fallback;
+}
+
+// 工具输出原样进历史会把 view_file 整个文件塞进去，截一刀
+const AGY_TOOL_OUTPUT_LIMIT = 20000;
+
+/**
+ * 把 agy 的 step_update 翻成前端认识的事件。
+ *
+ * 文本走 stream_event（agy 给的是真增量，打字机效果和 Claude 那条路一致），
+ * 工具沿用 Codex 那套顶层事件形态——它已经跑通过，前端不用改。
+ * 每段文本收尾时再补一条完整的 assistant 消息，历史是从那条积累的
+ * （persistOutboundAgentEvent 不认 stream_event）。
+ */
+function createAgyEventSender(send) {
+  const texts = new Map();        // step_index → 累积的文本
+  const openedText = new Set();   // 已经发过 content_block_start 的文本 step
+  const toolIds = new Map();      // step_index → 前端用来配对的工具 id
+  let streamed = false;           // 本轮是否已经开过流式块
+
+  const openTextBlock = (idx) => {
+    if (openedText.has(idx)) return;
+    // 工具跑完后的新一段回复：先 message_start，前端据此清掉 spinner 并重置块表
+    if (streamed) send({ type: "stream_event", event: { type: "message_start" } });
+    send({
+      type: "stream_event",
+      event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+    });
+    openedText.add(idx);
+    streamed = true;
+  };
+
+  return function handleAgyEvent(ev) {
+    if (!ev || typeof ev !== "object") return;
+    if (ev.event === "step_update") {
+      const step = ev.step_update;
+      if (!step) return;
+      const idx = step.step_index ?? 0;
+
+      if (step.step_type === "agent_response") {
+        const delta = typeof step.text_delta === "string" ? step.text_delta : "";
+        if (delta) {
+          openTextBlock(idx);
+          texts.set(idx, (texts.get(idx) || "") + delta);
+          send({
+            type: "stream_event",
+            event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: delta } },
+          });
+        }
+        if (step.state === "DONE") {
+          const text = (texts.get(idx) || "").trim();
+          if (openedText.has(idx)) {
+            send({ type: "stream_event", event: { type: "content_block_stop", index: 0 } });
+          }
+          // 定稿：前端拿这条重渲染，历史也只认这条
+          if (text) send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text }] } });
+          texts.delete(idx);
+          openedText.delete(idx);
+        }
+        return;
+      }
+
+      if (step.step_type === "tool") {
+        if (step.state === "DONE") {
+          const id = toolIds.get(idx) || `agy_${idx}`;
+          toolIds.delete(idx);
+          const output = agyToolOutput(step.tool_info);
+          const content = output.length > AGY_TOOL_OUTPUT_LIMIT
+            ? `${output.slice(0, AGY_TOOL_OUTPUT_LIMIT)}\n…（输出已截断）`
+            : output;
+          send({
+            type: "assistant",
+            message: {
+              role: "assistant",
+              content: [{ type: "tool_result", tool_use_id: id, content, raw: step }],
+            },
+          });
+          // 这条不进历史，只用来让前端把工具卡片从"执行中"落定
+          send({
+            type: "user",
+            message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content: "", is_error: false }] },
+          });
+          return;
+        }
+        if (toolIds.has(idx)) return;   // ACTIVE 可能来多次
+        const id = `agy_${idx}`;
+        toolIds.set(idx, id);
+        send({
+          type: "server_tool_use",
+          id,
+          name: agyToolName(step),
+          server_name: null,
+          input: agyToolInput(step.tool_info),
+          provider: "antigravity",
+          raw: step,
+        });
+        streamed = true;
+        return;
+      }
+      return;
+    }
+  };
+}
+
+// print 模式默认 5 分钟就把 agent 掐了。桌面端这条链路本来就不设静默超时
+// （见文件顶部 STREAM_STALL_MS 的注释），一律等用户自己点停止，所以这里给一个
+// 实质无限的值——注意不能写 0，agy 把 0 当成「立刻超时」而不是「不限」。
+const AGY_PRINT_TIMEOUT = process.env.AGY_PRINT_TIMEOUT || "8760h";
+// agy 只能从命令行参数收 prompt（试过管道和 `-p -`，都被当字面量），
+// 而 Windows 的命令行有 32767 字符上限，长输入必须先落盘再让它自己读
+const AGY_INLINE_PROMPT_LIMIT = 12000;
+
+function writeAgyTempFile(prefix, buffer, ext) {
+  const path = join(DATA_DIR, `${prefix}-${Date.now()}-${crypto.randomBytes(3).toString("hex")}.${ext}`);
+  writeFileSync(path, buffer);
+  return path;
+}
+
+// 图片和超长文本都落成临时文件，让 agy 用自己的 view_file 去读——
+// 它读图是走工具而不是走多模态入参，实测能正确描述图片内容
+function composeAgyPrompt({ prompt, images = [] }) {
+  const temps = [];
+  let text = typeof prompt === "string" ? prompt : String(prompt ?? "");
+  if (images.length > 0) {
+    const paths = [];
+    for (const img of images) {
+      const ext = (img.mediaType || "image/png").split("/")[1] || "png";
+      const path = writeAgyTempFile("agy-img", Buffer.from(img.data, "base64"), ext);
+      temps.push(path);
+      paths.push(path);
+    }
+    text = `用户随这条消息附了 ${paths.length} 张图片，请先用 view_file 逐个读取，再回答：\n`
+      + paths.map(p => `- ${p}`).join("\n")
+      + `\n\n${text}`;
+  }
+  if (text.length > AGY_INLINE_PROMPT_LIMIT) {
+    const path = writeAgyTempFile("agy-prompt", Buffer.from(text, "utf8"), "md");
+    temps.push(path);
+    text = `用户这轮的完整输入较长，已存到 ${path}。请先用 view_file 读完整个文件，再按文件里的指令回答。`;
+  }
+  return { text, temps };
+}
+
+// 不再有超时兜底，进程只能靠停止按钮或本进程退出来收。sidecar 被杀时
+// 子进程会变孤儿挂在后台继续烧额度，所以登记下来统一清。
+const ACTIVE_AGY_PROCESSES = new Set();
+
+// 走的是 process.on("exit")，回调必须同步做完——异步 spawn 的 taskkill
+// 在父进程退出时不一定还来得及跑，所以这里用 spawnSync
+function killAllAgyProcesses() {
+  for (const proc of [...ACTIVE_AGY_PROCESSES]) {
+    try {
+      if (proc.exitCode !== null || proc.signalCode !== null) continue;
+      if (process.platform === "win32") {
+        spawnSync("taskkill", ["/pid", String(proc.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
+      } else {
+        proc.kill("SIGTERM");
+      }
+    } catch { /* 退出路径上尽力而为 */ }
+  }
+  ACTIVE_AGY_PROCESSES.clear();
+}
+
+function killAgyProcess(proc) {
+  if (!proc || proc.exitCode !== null || proc.signalCode !== null) return;
+  // Windows 上 proc.kill() 只杀 agy 自己，它 run_command 起的 shell 会留下来
+  if (process.platform === "win32") {
+    try {
+      spawn("taskkill", ["/pid", String(proc.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
+      return;
+    } catch { /* taskkill 不在就退回普通 kill */ }
+  }
+  try { proc.kill("SIGTERM"); } catch { /* 已经退了 */ }
+}
+
+/**
+ * 起一个 agy 子进程跑完一轮，把 stream-json 逐行喂给 onEvent。
+ * 主对话和跨厂商派发共用这一个入口，区别只在各自怎么翻译事件。
+ *
+ * 档位表过期时 agy 会在启动阶段就拒绝（还没产生任何输出），这种失败按它给的
+ * 提示改表后重跑一次——对用户来说只是慢了一拍，不会看到一条莫名其妙的报错。
+ */
+async function runAgy(options) {
+  try {
+    return await runAgyOnce(options);
+  } catch (err) {
+    if (err?.name === "AbortError") throw err;
+    if (!learnAgyEffortsFromError(options?.model, String(err?.message || err))) throw err;
+    console.log(`Antigravity effort table corrected for ${options.model}, retrying once`);
+    return await runAgyOnce(options);
+  }
+}
+
+function runAgyOnce({
+  prompt,
+  images = [],
+  cwd,
+  model,
+  effort = "medium",
+  permissionMode = DEFAULT_PERMISSION_MODE,
+  resumeConversationId = null,
+  signal = null,
+  onEvent = null,
+  onSession = null,
+}) {
+  return new Promise((resolve, reject) => {
+    const bin = findAgyBinary();
+    if (!bin) {
+      reject(new Error("没有找到 Antigravity CLI（agy），请先安装并登录，或用 AGY_BIN 指定可执行文件路径。"));
+      return;
+    }
+
+    let composed;
+    try {
+      composed = composeAgyPrompt({ prompt, images });
+    } catch (err) {
+      reject(new Error(`准备 Antigravity 输入失败：${String(err?.message || err)}`));
+      return;
+    }
+    const { text: finalPrompt, temps } = composed;
+
+    const args = [
+      "-p", finalPrompt,
+      "--output-format", "stream-json",
+      "--print-timeout", AGY_PRINT_TIMEOUT,
+      "--mode", agyModeFlag(permissionMode),
+      // headless 下没人能点授权弹窗，不放行的话工具会一直等到 print-timeout。
+      // plan 模式靠上面的 --mode 限制它别动文件，而不是靠权限拦。
+      "--dangerously-skip-permissions",
+    ];
+    if (model) args.push("--model", model);
+    const effortFlag = agyEffortForModel(model, effort);
+    if (effortFlag) args.push("--effort", effortFlag);
+    if (cwd) args.push("--add-dir", cwd);
+    // 不传 --add-dir 时它会跑到 ~/.gemini/antigravity-cli/scratch 里操作文件，
+    // 而不是我们给的 cwd——这点官方文档没写，是实测出来的
+    if (resumeConversationId) args.push("--conversation", resumeConversationId);
+
+    let proc;
+    try {
+      proc = spawn(bin, args, { cwd: cwd || undefined, windowsHide: true });
+    } catch (err) {
+      reject(new Error(`启动 Antigravity CLI 失败：${String(err?.message || err)}`));
+      return;
+    }
+
+    ACTIVE_AGY_PROCESSES.add(proc);
+    let aborted = false;
+    let settled = false;
+    let conversationId = resumeConversationId || null;
+    let resultPayload = null;
+    let stderr = "";
+    const answerParts = [];
+
+    const cleanupTemps = () => {
+      for (const path of temps) {
+        try { unlinkSync(path); } catch { /* 已经不在就算了 */ }
+      }
+    };
+    const onAbort = () => {
+      aborted = true;
+      killAgyProcess(proc);
+    };
+    if (signal) {
+      if (signal.aborted) onAbort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+    }
+    const detachSignal = () => {
+      if (signal) { try { signal.removeEventListener("abort", onAbort); } catch { /* 老版本没有 */ } }
+    };
+    const noteConversation = (id) => {
+      if (!id || id === conversationId) return;
+      conversationId = id;
+      if (onSession) { try { onSession(id); } catch { /* 记录失败不该影响本轮 */ } }
+    };
+
+    proc.stdout.setEncoding("utf8");
+    let buffered = "";
+    proc.stdout.on("data", (chunk) => {
+      buffered += chunk;
+      let idx;
+      while ((idx = buffered.indexOf("\n")) >= 0) {
+        const line = buffered.slice(0, idx).trim();
+        buffered = buffered.slice(idx + 1);
+        if (!line) continue;
+        let ev;
+        try { ev = JSON.parse(line); } catch { continue; }
+        if (ev.event === "init") noteConversation(ev.init?.conversation_id || ev.conversation_id);
+        if (ev.event === "result") {
+          resultPayload = ev.result ?? null;
+          noteConversation(resultPayload?.conversation_id);
+        }
+        if (ev.event === "step_update") {
+          const step = ev.step_update;
+          noteConversation(step?.conversation_id);
+          if (step?.step_type === "agent_response" && typeof step.text_delta === "string") {
+            answerParts.push(step.text_delta);
+          }
+        }
+        if (onEvent) { try { onEvent(ev); } catch { /* 单条事件翻译失败不该中断整轮 */ } }
+      }
+    });
+    proc.stderr.setEncoding("utf8");
+    proc.stderr.on("data", (chunk) => { stderr += chunk; });
+
+    proc.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      ACTIVE_AGY_PROCESSES.delete(proc);
+      detachSignal();
+      cleanupTemps();
+      reject(new Error(`Antigravity CLI 启动失败：${String(err?.message || err)}`));
+    });
+
+    proc.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      ACTIVE_AGY_PROCESSES.delete(proc);
+      detachSignal();
+      cleanupTemps();
+      if (aborted) {
+        const err = new Error("Antigravity 请求已取消");
+        err.name = "AbortError";
+        reject(err);
+        return;
+      }
+      if (resultPayload && resultPayload.status && resultPayload.status !== "SUCCESS") {
+        const raw = resultPayload.error || resultPayload.response || `Antigravity 请求失败（${resultPayload.status}）`;
+        // 失败原样记一条，不然出了问题只能翻 agy 自己的 cli.log
+        console.error(`[agy] ${resultPayload.status}: ${String(raw).slice(0, 300)}`);
+        reject(new Error(explainAgyFailure(raw)));
+        return;
+      }
+      if (!resultPayload && code !== 0) {
+        const raw = stderr.trim() || `Antigravity CLI 退出码 ${code}`;
+        console.error(`[agy] exit ${code}: ${raw.slice(0, 300)}`);
+        reject(new Error(explainAgyFailure(raw)));
+        return;
+      }
+      resolve({
+        conversationId,
+        text: (resultPayload?.response ?? answerParts.join("")).trim(),
+        usage: resultPayload?.usage ?? null,
+      });
+    });
+  });
+}
+
 // Locate the Claude Code session JSONL for a given session id. The file lives under
 // ~/.claude/projects/<encoded-cwd>/<sessionId>.jsonl; we glob across project dirs
 // rather than re-deriving the cwd encoding, so we stay robust to path-encoding quirks.
@@ -463,6 +1031,9 @@ function migrateOldFormat(old) {
   if (isCodexAuthAvailable()) {
     profiles.push({ id: "p_codex", name: "Codex（GPT 会员）", provider: "codex", apiKey: "", baseUrl: "", goodAt: PROVIDER_GOOD_AT.codex, ...CODEX_DEFAULT_MODELS });
   }
+  if (isAgyAuthAvailable()) {
+    profiles.push({ id: "p_agy", name: "Gemini（Antigravity）", provider: "antigravity", apiKey: "", baseUrl: "", goodAt: PROVIDER_GOOD_AT.antigravity, ...AGY_DEFAULT_MODELS });
+  }
   let activeProfileId = "p_claude";
   if (old.provider === "deepseek") {
     const match = profiles.find(p => p.provider === "deepseek" &&
@@ -481,7 +1052,7 @@ function normalizeProfiles(raw) {
   if (!Array.isArray(data.profiles)) return migrateOldFormat(data);
 
   const profiles = data.profiles.map(normalizeProfile).filter(p =>
-    p.provider === "claude" || p.provider === "codex" || p.apiKey
+    isSubscriptionProvider(p.provider) || p.apiKey
   );
   if (!profiles.some(p => p.provider === "claude")) {
     profiles.unshift({ id: "p_claude", name: "Claude 会员", provider: "claude", apiKey: "", opusModel: "", sonnetModel: "", haikuModel: "", baseUrl: "", goodAt: PROVIDER_GOOD_AT.claude });
@@ -493,6 +1064,15 @@ function normalizeProfiles(raw) {
       Object.assign(existingCodex, CODEX_DEFAULT_MODELS);
     } else {
       profiles.push({ id: "p_codex", name: "Codex（GPT 会员）", provider: "codex", apiKey: "", baseUrl: "", goodAt: PROVIDER_GOOD_AT.codex, ...CODEX_DEFAULT_MODELS });
+    }
+  }
+  // Antigravity 同理：装了并登录过就注入，模型字段同样强制对齐
+  const existingAgy = profiles.find(p => p.provider === "antigravity");
+  if (isAgyAuthAvailable()) {
+    if (existingAgy) {
+      Object.assign(existingAgy, AGY_DEFAULT_MODELS);
+    } else {
+      profiles.push({ id: "p_agy", name: "Gemini（Antigravity）", provider: "antigravity", apiKey: "", baseUrl: "", goodAt: PROVIDER_GOOD_AT.antigravity, ...AGY_DEFAULT_MODELS });
     }
   }
   const activeProfileId = typeof data.activeProfileId === "string" && profiles.some(p => p.id === data.activeProfileId)
@@ -934,12 +1514,15 @@ function writeHistory(arr, options = {}) {
 }
 
 process.on("beforeExit", flushHistoryNow);
+process.on("exit", killAllAgyProcesses);
 process.on("SIGINT", () => {
   flushHistoryNow();
+  killAllAgyProcesses();
   process.exit(130);
 });
 process.on("SIGTERM", () => {
   flushHistoryNow();
+  killAllAgyProcesses();
   process.exit(143);
 });
 
@@ -1374,6 +1957,14 @@ function addSkillSlugsFromDir(slugs, dir) {
 }
 
 function skillDirsForProvider(provider) {
+  if (provider === "antigravity") {
+    return [
+      join(homedir(), ".gemini", "antigravity-cli", "builtin", "skills"),
+      join(homedir(), ".gemini", "config", "skills"),
+      join(homedir(), ".agents", "skills"),
+      join(DEFAULT_CWD, ".agents", "skills"),
+    ];
+  }
   if (provider === "codex") {
     return [
       join(homedir(), ".codex", "skills"),
@@ -1391,7 +1982,9 @@ function skillDirsForProvider(provider) {
 }
 
 function normalizeSkillProvider(provider) {
-  return provider === "codex" ? "codex" : "claude";
+  if (provider === "codex") return "codex";
+  if (provider === "antigravity") return "antigravity";
+  return "claude";
 }
 
 function loadSkillsFromDisk(provider = "claude") {
@@ -1405,8 +1998,9 @@ function loadSkillsFromDisk(provider = "claude") {
 const cachedSkillsByProvider = {
   claude: loadSkillsFromDisk("claude"),
   codex: loadSkillsFromDisk("codex"),
+  antigravity: loadSkillsFromDisk("antigravity"),
 };
-console.log(`Loaded ${cachedSkillsByProvider.claude.length} Claude skills and ${cachedSkillsByProvider.codex.length} Codex skills from disk`);
+console.log(`Loaded ${cachedSkillsByProvider.claude.length} Claude, ${cachedSkillsByProvider.codex.length} Codex and ${cachedSkillsByProvider.antigravity.length} Antigravity skills from disk`);
 
 function skillsForProvider(provider) {
   const key = normalizeSkillProvider(provider);
@@ -2023,13 +2617,24 @@ function normalizeProviderSelector(value) {
   return String(value || "").trim().toLocaleLowerCase();
 }
 
+// 用户嘴上说的名字和 provider 字段对不上：会打 ">gemini"，但那家的 provider
+// 叫 antigravity。别名只在 id/provider/name 都没命中时兜底。
+const DISPATCH_ALIASES = {
+  gemini: "antigravity",
+  agy: "antigravity",
+  gpt: "codex",
+  chatgpt: "codex",
+};
+
 export function resolveDispatchProfile(profileData, selector) {
   const wanted = normalizeProviderSelector(selector);
   if (!wanted) return null;
   const profiles = Array.isArray(profileData?.profiles) ? profileData.profiles : [];
+  const aliased = DISPATCH_ALIASES[wanted];
   return profiles.find(profile => normalizeProviderSelector(profile.id) === wanted)
     ?? profiles.find(profile => normalizeProviderSelector(profile.provider) === wanted)
     ?? profiles.find(profile => normalizeProviderSelector(profile.name) === wanted)
+    ?? (aliased ? profiles.find(profile => normalizeProviderSelector(profile.provider) === aliased) : null)
     ?? null;
 }
 
@@ -2037,6 +2642,9 @@ function dispatchModelForProfile(profile) {
   if (!profile) return "";
   if (profile.provider === "codex") {
     return profile.opusModel || profile.sonnetModel || profile.haikuModel || CODEX_DEFAULT_MODELS.opusModel;
+  }
+  if (profile.provider === "antigravity") {
+    return profile.opusModel || profile.sonnetModel || profile.haikuModel || AGY_DEFAULT_MODELS.opusModel;
   }
   if (profile.provider === "claude") {
     return profile.sonnetModel || profile.opusModel || "claude-sonnet-5";
@@ -2237,7 +2845,10 @@ async function executeProviderDispatch({
   if (targetProfile.provider === "codex" && !isCodexAuthAvailable()) {
     throw new Error(`${targetProfile.name} 尚未登录，请先打开 Codex 客户端或运行 codex login。`);
   }
-  if (targetProfile.provider !== "claude" && targetProfile.provider !== "codex" && !targetProfile.apiKey) {
+  if (targetProfile.provider === "antigravity" && !isAgyAuthAvailable()) {
+    throw new Error(`${targetProfile.name} 尚未就绪，请先安装 Antigravity CLI 并运行 agy 登录 Google 账号。`);
+  }
+  if (!isSubscriptionProvider(targetProfile.provider) && !targetProfile.apiKey) {
     throw new Error(`${targetProfile.name} 的 API Key 还没有配置。`);
   }
 
@@ -2305,6 +2916,30 @@ async function executeProviderDispatch({
     }
     output = answerParts.join("\n\n").trim();
     noteSession(thread.id || resumeSessionId || null);
+  } else if (targetProfile.provider === "antigravity") {
+    const reportedSteps = new Set();   // 同一个 step 的 ACTIVE 会来多次
+    const run = await runAgy({
+      prompt: task,
+      cwd,
+      model,
+      effort: "medium",
+      permissionMode,
+      resumeConversationId: resumeSessionId,
+      signal: controller.signal,
+      // init 事件里就有 conversation_id，说明对方已经认了这条会话
+      onSession: (id) => noteSession(id, { fromVendor: true }),
+      onEvent: (ev) => {
+        if (!onStep) return;
+        const step = ev?.step_update;
+        if (ev.event !== "step_update" || step?.step_type !== "tool" || step.state !== "ACTIVE") return;
+        const key = step.step_index ?? -1;
+        if (reportedSteps.has(key)) return;
+        reportedSteps.add(key);
+        try { onStep(agyToolName(step), agyToolInput(step.tool_info)); } catch { /* 步骤上报失败不该影响主流程 */ }
+      },
+    });
+    output = run.text;
+    noteSession(run.conversationId || resumeSessionId || null);
   } else {
     const env = buildAgentEnv(profileData, "medium", null, targetProfile);
     env.PWD = cwd;
@@ -3051,6 +3686,12 @@ const http = createServer((req, res) => {
     return;
   }
 
+  if (url === "/api/health/agy-auth" && method === "GET") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ authenticated: isAgyAuthAvailable(), binary: findAgyBinary() }));
+    return;
+  }
+
   if (url === "/api/usage-limits" && method === "GET") {
     (async () => {
       const [claude, codex] = await Promise.all([
@@ -3093,12 +3734,12 @@ const http = createServer((req, res) => {
         } else if (payload.action === "add") {
           // 新增账号
           const profile = normalizeProfile(payload.profile ?? {});
-          if (profile.provider !== "claude" && profile.provider !== "codex" && !profile.apiKey) {
+          if (!isSubscriptionProvider(profile.provider) && !profile.apiKey) {
             res.writeHead(400, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ error: "API Key 不能为空" }));
             return;
           }
-          if (!profile.baseUrl && profile.provider !== "claude" && profile.provider !== "anthropic" && profile.provider !== "codex") {
+          if (!profile.baseUrl && profile.provider !== "anthropic" && !isSubscriptionProvider(profile.provider)) {
             res.writeHead(400, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ error: "Base URL 不能为空" }));
             return;
@@ -3115,12 +3756,12 @@ const http = createServer((req, res) => {
             return;
           }
           const updated = normalizeProfile({ ...target, ...payload.profile, id: target.id, provider: target.provider });
-          if (updated.provider !== "claude" && updated.provider !== "codex" && !updated.apiKey) {
+          if (!isSubscriptionProvider(updated.provider) && !updated.apiKey) {
             res.writeHead(400, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ error: "API Key 不能为空" }));
             return;
           }
-          if (!updated.baseUrl && updated.provider !== "claude" && updated.provider !== "anthropic" && updated.provider !== "codex") {
+          if (!updated.baseUrl && updated.provider !== "anthropic" && !isSubscriptionProvider(updated.provider)) {
             res.writeHead(400, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ error: "Base URL 不能为空" }));
             return;
@@ -4140,6 +4781,7 @@ wss.on("connection", (ws) => {
       clearActiveHistoryConversation();
       clearSession();
       clearCodexThread();
+      clearAgyConversation();
       if (abortCtrl) { abortCtrl.abort(); abortCtrl = null; }
       claudeRuntime.close();
       claudeRuntimeSignature = null;
@@ -4312,7 +4954,8 @@ wss.on("connection", (ws) => {
       incomingProvider,
       incomingDispatchProfile ?? incomingActiveProfile,
     );
-    const crossesActiveClaudeTasks = incomingProvider === "codex" && claudeRuntime.taskIds.size > 0;
+    const crossesActiveClaudeTasks = (incomingProvider === "codex" || incomingProvider === "antigravity")
+      && claudeRuntime.taskIds.size > 0;
     const clientPromptBusy = shouldQueueClientPrompt() || crossesActiveClaudeTasks;
     if (!fromQueue && msg.deliveryMode === "steer" && clientPromptBusy) {
       const steeringConversationId = msg.conversationId
@@ -4431,7 +5074,7 @@ wss.on("connection", (ws) => {
     }
     const activeProfile = getActiveProfile(profileData);
 
-    if (!msg.dispatchProvider && activeProfile && activeProfile.provider !== "claude" && activeProfile.provider !== "codex" && !activeProfile.apiKey) {
+    if (!msg.dispatchProvider && activeProfile && !isSubscriptionProvider(activeProfile.provider) && !activeProfile.apiKey) {
       send({ type: "error", text: `${activeProfile.name} 的 API Key 还没有配置，请先在账号设置里保存。` });
       send({ type: "done" });
       completeClientRequest("error", requestId);
@@ -4447,7 +5090,16 @@ wss.on("connection", (ws) => {
       scheduleQueuedClientPromptDrain();
       return;
     }
-    if (!msg.dispatchProvider && activeProfile?.provider === "codex" && schedulerRequest) {
+    if (!msg.dispatchProvider && activeProfile?.provider === "antigravity" && !isAgyAuthAvailable()) {
+      send({ type: "error", text: "Antigravity CLI 还没准备好，请先安装 agy 并运行一次 agy 完成 Google 账号登录。" });
+      send({ type: "done" });
+      completeClientRequest("error", requestId);
+      abortCtrl = null;
+      scheduleQueuedClientPromptDrain();
+      return;
+    }
+    // scheduler 是通过 agent-sdk 进程内注入的 MCP 工具，另外两家都够不着
+    if (!msg.dispatchProvider && (activeProfile?.provider === "codex" || activeProfile?.provider === "antigravity") && schedulerRequest) {
       send({ type: "error", text: "定时任务目前需要 Claude 会员通道的 scheduler 工具。请切换到 Claude 会员后再创建、查看或修改提醒任务。" });
       send({ type: "done" });
       completeClientRequest("error", requestId);
@@ -4659,6 +5311,64 @@ wss.on("connection", (ws) => {
     if (sessionId) options.resume = sessionId;
     if (!activeProfile || activeProfile.provider === "claude") {
       if (msg.model) options.model = msg.model;
+    }
+
+    // ── Antigravity CLI（agy）路径 ─────────────────────────────
+    if (activeProfile?.provider === "antigravity") {
+      // 和 Codex 那条一样：三家共用一套 UI/历史/停止状态，Claude 那边空了就先关掉，
+      // 免得它的自动续跑再开一条流出来
+      if (claudeRuntime.started) {
+        claudeRuntime.close();
+        claudeRuntimeSignature = null;
+        claudeRuntimeConversationId = null;
+      }
+      const agyTurnEpoch = ++claudeTurnEpoch;
+      abortCtrl = ac;
+      const isCurrentAgyTurn = () => (
+        agyTurnEpoch === claudeTurnEpoch
+        && abortCtrl === ac
+        && activeForegroundRequestId === requestId
+      );
+      (async () => {
+        try {
+          const emit = createAgyEventSender((ev) => { if (isCurrentAgyTurn()) send(ev); });
+          send({ type: "system", subtype: "status", status: "requesting" });
+          const run = await runAgy({
+            prompt: msg.prompt,
+            images: msg.images ?? (msg.image ? [msg.image] : []),
+            cwd: resolvedCwd,
+            model: resolveAgyModel(msg.model, activeProfile),
+            effort,
+            permissionMode,
+            resumeConversationId: agyConversationId,
+            signal: ac.signal,
+            // id 在 init 事件里就有，先记下来——中断时这条会话仍然有效
+            onSession: (id) => {
+              saveAgyConversation(id);
+              if (isCurrentAgyTurn()) send({ type: "session", sessionId: id });
+            },
+            onEvent: emit,
+          });
+          if (!isCurrentAgyTurn()) return;
+          send({ type: "result", subtype: "success", usage: run.usage ?? null, provider: "antigravity" });
+          send({ type: "done" });
+          completeClientRequest("complete", requestId);
+        } catch (err) {
+          if (!isCurrentAgyTurn()) return;
+          if (err?.name === "AbortError") {
+            send({ type: "stopped" });
+            completeClientRequest("stopped", requestId);
+          } else {
+            send({ type: "error", text: String(err?.message || err) });
+            send({ type: "done" });
+            completeClientRequest("error", requestId);
+          }
+        } finally {
+          if (abortCtrl === ac) abortCtrl = null;
+          scheduleQueuedClientPromptDrain();
+        }
+      })();
+      return;
     }
 
     // ── Codex SDK 路径 ────────────────────────────────────────

@@ -1568,6 +1568,9 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
   transition: background 0.1s;
   border-bottom: 1px solid var(--border);
 }
+/* 上面那条 display:flex 的优先级高于浏览器自带的 [hidden]{display:none}，
+   不显式写这一条，JS 里设了 hidden 的选项照样会显示出来 */
+.picker-option[hidden] { display: none; }
 .picker-option:last-child { border-bottom: none; }
 .picker-option:hover { background: var(--bg2); }
 .picker-option.active { background: color-mix(in srgb, var(--accent) 7%, var(--bg)); }
@@ -2574,7 +2577,7 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
         <div id="model-picker">
           <button id="model-btn" class="toolbar-picker-btn" aria-label="选择模型" aria-haspopup="listbox">
             <span id="model-label">Sonnet 5</span>
-            <span id="effort-label-inline" class="effort-inline">标准</span>
+            <span id="effort-label-inline" class="effort-inline">中</span>
             <svg width="7" height="7" viewBox="0 0 8 8" fill="none" aria-hidden="true"><path d="M1.5 5.3L4 2.8l2.5 2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
           </button>
           <div id="model-dropdown" class="picker-dropdown" role="listbox" aria-label="模型列表">
@@ -2587,40 +2590,44 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
                 <span class="picker-option-name">Opus 5</span>
                 <span class="picker-option-desc">最强推理</span>
               </button>
+              <button class="picker-option model-option" data-model="claude-opus-4-6" data-label="Opus 4.6" role="option" aria-selected="false">
+                <span class="picker-option-name">Opus 4.6</span>
+                <span class="picker-option-desc">经典旧版</span>
+              </button>
               <button class="picker-option model-option" data-model="claude-fable-5" data-label="Fable 5" role="option" aria-selected="false">
                 <span class="picker-option-name">Fable 5</span>
                 <span class="picker-option-desc">旗舰最强</span>
               </button>
               <div class="picker-divider"></div>
               <button id="effort-nav-btn" class="picker-option picker-option-nav">
-                <span class="picker-option-name">思考深度</span>
+                <span class="picker-option-name">推理强度</span>
                 <svg width="6" height="10" viewBox="0 0 6 10" fill="none" style="opacity:0.4;flex-shrink:0"><path d="M1 1l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
               </button>
             </div>
             <div id="effort-view" class="effort-view" hidden>
               <button id="effort-back-btn" class="picker-back-btn">
                 <svg width="7" height="11" viewBox="0 0 7 11" fill="none" aria-hidden="true"><path d="M6 1L1.5 5.5L6 10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
-                思考深度
+                推理强度
               </button>
               <button class="picker-option effort-option" data-effort="low" data-label="轻" role="option" aria-selected="false">
                 <span class="picker-option-name">轻 <span class="picker-option-code">low</span></span>
-                <span class="picker-option-desc">少想一点，更快回复</span>
+                <span class="picker-option-desc">降低推理强度，更快回复</span>
               </button>
-              <button class="picker-option effort-option active" data-effort="medium" data-label="标准" role="option" aria-selected="true">
-                <span class="picker-option-name">标准 <span class="picker-option-code">medium</span></span>
-                <span class="picker-option-desc">日常思考强度</span>
+              <button class="picker-option effort-option active" data-effort="medium" data-label="中" role="option" aria-selected="true">
+                <span class="picker-option-name">中 <span class="picker-option-code">medium</span></span>
+                <span class="picker-option-desc">日常推理强度</span>
               </button>
-              <button class="picker-option effort-option" data-effort="high" data-label="深" role="option" aria-selected="false">
-                <span class="picker-option-name">深 <span class="picker-option-code">high</span></span>
-                <span class="picker-option-desc">多想一些，适合复杂问题</span>
+              <button class="picker-option effort-option" data-effort="high" data-label="高" role="option" aria-selected="false">
+                <span class="picker-option-name">高 <span class="picker-option-code">high</span></span>
+                <span class="picker-option-desc">提高推理强度，适合复杂问题</span>
               </button>
-              <button class="picker-option effort-option" data-effort="xhigh" data-label="更深" role="option" aria-selected="false">
-                <span class="picker-option-name">更深 <span class="picker-option-code">xhigh</span></span>
-                <span class="picker-option-desc">更充分地推理</span>
+              <button class="picker-option effort-option" data-effort="xhigh" data-label="极高" role="option" aria-selected="false">
+                <span class="picker-option-name">极高 <span class="picker-option-code">xhigh</span></span>
+                <span class="picker-option-desc">充分推理，适合高难任务</span>
               </button>
-              <button class="picker-option effort-option" data-effort="max" data-label="最深" role="option" aria-selected="false">
-                <span class="picker-option-name">最深 <span class="picker-option-code">max</span></span>
-                <span class="picker-option-desc">尽可能深入思考</span>
+              <button class="picker-option effort-option" data-effort="max" data-label="最高" role="option" aria-selected="false">
+                <span class="picker-option-name">最高 <span class="picker-option-code">max</span></span>
+                <span class="picker-option-desc">使用最高推理强度</span>
               </button>
             </div>
           </div>
@@ -2885,8 +2892,52 @@ async function fetchHistory() {
 const CLAUDE_MODELS = [
   { model: "claude-sonnet-5",            label: "Sonnet 5",   name: "Sonnet 5",   desc: "快速均衡" },
   { model: "claude-opus-5",              label: "Opus 5",     name: "Opus 5",     desc: "最强推理" },
+  { model: "claude-opus-4-6",            label: "Opus 4.6",   name: "Opus 4.6",   desc: "经典旧版" },
   { model: "claude-fable-5",             label: "Fable 5",    name: "Fable 5",    desc: "旗舰最强" },
 ];
+
+// Antigravity 通道能选的模型。名字都不带 -high/-medium/-low 后缀：
+// 那是「模型 × 推理档位」的组合，档位交给 effort 选择器。
+// 注意 Claude 那两个不接受 effort，agy 会自己忽略界面上的档位。
+const AGY_MODELS = [
+  { model: "gemini-3.1-pro",            label: "Gemini 3.1 Pro",   name: "Gemini 3.1 Pro",   desc: "旗舰最强" },
+  { model: "gemini-3.7-flash",          label: "Gemini 3.7 Flash", name: "Gemini 3.7 Flash", desc: "快速通用" },
+  { model: "claude-opus-4-6-thinking",  label: "Opus 4.6",         name: "Opus 4.6",         desc: "Claude 旗舰" },
+  { model: "claude-sonnet-4-6",         label: "Sonnet 4.6",       name: "Sonnet 4.6",       desc: "Claude 均衡" },
+];
+
+// 每个 Antigravity 模型认哪些推理档位（要和 server.js 的 AGY_MODEL_EFFORTS 保持一致）。
+// agy 只有 low/medium/high 三档，界面上的 xhigh/max 对它一律不存在；Claude 那两个
+// 干脆不吃 --effort。选了不生效的档位比不给选更让人困惑，所以这里直接藏掉。
+const AGY_EFFORT_LEVELS = {
+  "gemini-3.7-flash": ["low", "medium", "high"],
+  "gemini-3.6-flash": ["low", "medium", "high"],
+  "gemini-3.5-flash": ["low", "medium", "high"],
+  "gemini-3.1-pro": ["low", "high"],
+  "gpt-oss-120b": ["medium"],
+  "claude-opus-4-6-thinking": [],
+  "claude-sonnet-4-6": [],
+};
+
+// null = 这家不限制，五档随便选
+function effortLevelsForCurrentModel() {
+  if ((getActiveProfile()?.provider || "claude") !== "antigravity") return null;
+  return AGY_EFFORT_LEVELS[selectedModel] ?? ["low", "medium", "high"];
+}
+
+// 用户选的档位这个模型不认时，实际会落到哪一档。
+// 这段就近逻辑必须和 server.js 的 agyEffortForModel 一致，否则界面显示的和真跑的对不上。
+function effectiveEffort(levels) {
+  if (!levels) return selectedEffort;
+  if (!levels.length) return null;
+  if (levels.includes(selectedEffort)) return selectedEffort;
+  const wanted = (selectedEffort === "xhigh" || selectedEffort === "max") ? "high" : selectedEffort;
+  if (levels.includes(wanted)) return wanted;
+  const order = wanted === "high" ? ["high", "medium", "low"]
+    : wanted === "low" ? ["low", "medium", "high"]
+    : ["low", "high", "medium"];
+  return order.find(level => levels.includes(level)) ?? levels[0];
+}
 
 // 旧模型 ID → 新模型 ID，保留用户此前选中的档位
 const MODEL_MIGRATIONS = { "claude-opus-4-8": "claude-opus-5" };
@@ -2895,6 +2946,7 @@ let _profileData = { activeProfileId: localStorage.getItem("activeProfileId") ||
 let _dispatchProviders = [];
 let _claudeAuthStatus = null; // null=checking, true=ok, false=not logged in
 let _codexAuthStatus  = null;
+let _agyAuthStatus    = null;
 
 let _dispatchProvidersLoaded = false;
 
@@ -2958,8 +3010,20 @@ async function checkCodexAuth() {
   renderProfileList(_profileData);
 }
 
+async function checkAgyAuth() {
+  try {
+    const res = await fetch("api/health/agy-auth");
+    const d = await res.json().catch(() => ({}));
+    _agyAuthStatus = !!d.authenticated;
+  } catch {
+    _agyAuthStatus = false;
+  }
+  renderProfileList(_profileData);
+}
+
 checkClaudeAuth();
 checkCodexAuth();
+checkAgyAuth();
 void fetchDispatchProviders();
 
 function getActiveProfile() {
@@ -2971,6 +3035,11 @@ function renderModelOptions(activeProfile) {
   let options;
   if (provider === "claude") {
     options = CLAUDE_MODELS;
+  } else if (provider === "antigravity") {
+    // Antigravity 通道能开的不止 Gemini，Claude 那两个也算 Google 那边的额度。
+    // 这里不走 opus/sonnet/haiku 三档——那三个槽位装不下四个模型，而且推理
+    // 档位由界面上的 effort 选择器控制，不该再挤进模型名里。
+    options = AGY_MODELS;
   } else {
     // 收集三档模型，相同模型合并显示 tier 标签
     const tierEntries = [
@@ -3015,12 +3084,14 @@ function renderModelOptions(activeProfile) {
   const effortNavHtml = `
     <div class="picker-divider"></div>
     <button id="effort-nav-btn" class="picker-option picker-option-nav">
-      <span class="picker-option-name">思考深度</span>
+      <span class="picker-option-name">推理强度</span>
       <svg width="6" height="10" viewBox="0 0 6 10" fill="none" style="opacity:0.4;flex-shrink:0"><path d="M1 1l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
     </button>
   `;
   modelView.innerHTML = modelBtnsHtml + effortNavHtml;
   modelLabel.textContent = options.find(o => o.model === selectedModel)?.label ?? options[0].label;
+  // 换账号可能连模型一起换了，档位可选项跟着重算（effort-nav-btn 刚被重建，要现查）
+  updateEffortDisplay();
 }
 
 // ── Escape helpers ─────────────────────────────────────────
@@ -3245,11 +3316,11 @@ function setAuthStatus(type, text, isForm = false) {
 // ── Provider display metadata ─────────────────────────────
 const PROVIDER_COLOR = {
   claude: "#d97757", anthropic: "#c96442", deepseek: "#0071e3", openrouter: "#8b5cf6", minimax: "#ff6b35", custom: "#6b7280",
-  codex: "#10a37f",
+  codex: "#10a37f", antigravity: "#4285f4",
 };
 const PROVIDER_LABEL = {
   claude: "Claude", anthropic: "Anthropic", deepseek: "DeepSeek", openrouter: "OpenRouter", minimax: "MiniMax", custom: "自定义",
-  codex: "GPT",
+  codex: "GPT", antigravity: "Gemini",
 };
 
 function providerBadge(provider) {
@@ -3394,6 +3465,10 @@ function renderProfileList(data) {
       : p.provider === "codex"
       ? (_codexAuthStatus === true  ? "✅ 已登录 ChatGPT Plus"
        : _codexAuthStatus === false ? "⚠️ 未登录 — 请打开 Codex 客户端完成登录"
+       : "正在检测登录状态…")
+      : p.provider === "antigravity"
+      ? (_agyAuthStatus === true  ? "✅ Antigravity CLI 已就绪"
+       : _agyAuthStatus === false ? "⚠️ 未就绪 — 请安装 agy 并运行一次完成 Google 账号登录"
        : "正在检测登录状态…")
       : metaParts.join("  ");
     const canEdit   = p.provider !== "claude";
@@ -4590,12 +4665,17 @@ function toolResultText(content) {
     : String(content ?? "");
 }
 
+// 和后端 DISPATCH_ALIASES 保持一致：">gemini" 要能找到 provider 为 antigravity 的账号
+const DISPATCH_ALIASES = { gemini: "antigravity", agy: "antigravity", gpt: "codex", chatgpt: "codex" };
+
 function findDispatchProvider(selector) {
   const wanted = String(selector || "").trim().toLocaleLowerCase();
   if (!wanted) return null;
+  const aliased = DISPATCH_ALIASES[wanted];
   return _dispatchProviders.find((item) => String(item.id || "").toLocaleLowerCase() === wanted)
     ?? _dispatchProviders.find((item) => String(item.provider || "").toLocaleLowerCase() === wanted)
     ?? _dispatchProviders.find((item) => String(item.name || "").toLocaleLowerCase() === wanted)
+    ?? (aliased ? _dispatchProviders.find((item) => String(item.provider || "").toLocaleLowerCase() === aliased) : null)
     ?? null;
 }
 
@@ -5833,7 +5913,7 @@ function handleEvent(ev) {
       if (isToolUseType(b?.type)) {
         try {
           const raw = JSON.parse(b.accumulated || "{}");
-          const preview = raw.command ?? raw.file_path ?? raw.path ?? raw.query ?? JSON.stringify(raw);
+          const preview = raw.command ?? raw.file_path ?? raw.path ?? raw.query ?? raw.url ?? JSON.stringify(raw);
           const inp = b.el?.querySelector(".tool-input");
           if (inp) { inp.textContent = String(preview).slice(0, 120); inp.title = JSON.stringify(raw, null, 2); }
         } catch { }
@@ -6006,7 +6086,7 @@ function makeToolEl(tool) {
   const inp = document.createElement("span");
   inp.className = "tool-input";
   const raw = tool.input ?? {};
-  const preview = raw.command ?? raw.file_path ?? raw.path ?? raw.query ?? JSON.stringify(raw);
+  const preview = raw.command ?? raw.file_path ?? raw.path ?? raw.query ?? raw.url ?? JSON.stringify(raw);
   inp.textContent = String(preview).slice(0, 120);
   inp.title = JSON.stringify(raw, null, 2);
   el.appendChild(name); el.appendChild(inp);
@@ -7483,12 +7563,33 @@ const permissionDropdown = document.getElementById("permission-dropdown");
 const permissionLabel    = document.getElementById("permission-label");
 
 function updateEffortDisplay() {
-  const opt = effortView.querySelector(`.effort-option[data-effort="${selectedEffort}"]`);
-  const label = opt ? opt.dataset.label : selectedEffort;
-  if (effortLabelInline) effortLabelInline.textContent = label;
+  const levels = effortLevelsForCurrentModel();
+  // 落到实处的那一档。selectedEffort 本身不改也不写回 localStorage——
+  // 那是用户跨账号的偏好，不该被某个不支持它的模型抹掉。
+  const shown = effectiveEffort(levels);
+  const navBtn = document.getElementById("effort-nav-btn");
+
+  if (levels && !levels.length) {
+    // 这个模型压根没有推理档位，整个入口收起来，里面也别留着上一个模型的选中态
+    if (navBtn) navBtn.hidden = true;
+    if (effortLabelInline) effortLabelInline.textContent = "";
+    effortView.querySelectorAll(".effort-option").forEach(el => {
+      el.hidden = true;
+      el.classList.remove("active");
+      el.setAttribute("aria-selected", "false");
+    });
+    if (!effortView.hidden) showModelView();
+    return;
+  }
+  if (navBtn) navBtn.hidden = false;
+
+  const opt = shown ? effortView.querySelector(`.effort-option[data-effort="${shown}"]`) : null;
+  if (effortLabelInline) effortLabelInline.textContent = opt ? opt.dataset.label : (shown ?? "");
   effortView.querySelectorAll(".effort-option").forEach(el => {
-    el.classList.toggle("active", el.dataset.effort === selectedEffort);
-    el.setAttribute("aria-selected", el.dataset.effort === selectedEffort ? "true" : "false");
+    const usable = !levels || levels.includes(el.dataset.effort);
+    el.hidden = !usable;
+    el.classList.toggle("active", el.dataset.effort === shown);
+    el.setAttribute("aria-selected", el.dataset.effort === shown ? "true" : "false");
   });
 }
 
@@ -7572,6 +7673,8 @@ modelDropdown.addEventListener("mousedown", (e) => {
   const _provider = _activeProfile?.provider || "claude";
   const _modelKey = `model:${_provider === "claude" ? "claude" : _activeProfile?.id || _provider}`;
   localStorage.setItem(_modelKey, selectedModel);
+  // 不同模型认的档位不一样（Pro 没有 medium、Claude 完全不吃档位）
+  updateEffortDisplay();
   closeHeaderPickers();
 });
 
