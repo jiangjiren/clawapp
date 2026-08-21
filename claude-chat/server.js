@@ -533,7 +533,10 @@ function agyToolName(step) {
 }
 
 // agy 抛上来的原文有些对用户毫无意义（"Agent execution terminated due to error."），
-// 真正的线索在它自己的 cli.log 里。已知的几种翻译成人话，并给出下一步该干什么。
+// 真正的线索有时在它自己的 cli.log 里，有时只在会话库
+// ~/.gemini/antigravity-cli/conversations/<id>.db 的 steps.error_details 里
+//（cli.log 只是启动/网络层的 info 日志，工具调用失败细节不进这份日志）。
+// 已知的几种翻译成人话，并给出下一步该干什么。
 function explainAgyFailure(raw) {
   const text = String(raw || "");
   if (/invalid UTF-8/i.test(text)) {
@@ -550,6 +553,15 @@ function explainAgyFailure(raw) {
     // Antigravity 的额度按模型家族分开算：Claude 那档用完时 Gemini 往往还能跑
     return `Antigravity 额度或频率受限：${text} `
       + "这个额度是按模型分别计的，换成另一档模型（Gemini ↔ Claude）通常还能继续。";
+  }
+  if (/not a valid artifact path/i.test(text)) {
+    // 实锤过（翻会话库 steps.error_details 查到的）：模型自己给 write_to_file
+    // 调用附加了 ArtifactMetadata（UserFacing: true），agy 就把这次写文件当成
+    // "artifact 产物"校验，要求路径必须在 brain/<conversation-id>/ 下，跟
+    // TargetFile 给的真实 vault 路径打架，不是我们传的 cwd/--add-dir 有问题。
+    return "Antigravity 中止了这一轮：模型想把这次写文件标成「artifact 产物」，"
+      + "但目标路径是 vault 里的真实文件，跟 agy 只认 brain 目录的 artifact 规则冲突，整轮请求被拒。"
+      + "重新问一遍，明确告诉它「直接写文件，不是做 artifact/画布」，通常能避开。";
   }
   return `Antigravity 请求失败：${text}`;
 }
@@ -799,7 +811,16 @@ function runAgyOnce({
 
     let proc;
     try {
-      proc = spawn(bin, args, { cwd: cwd || undefined, windowsHide: true });
+      proc = spawn(bin, args, {
+        cwd: cwd || undefined,
+        windowsHide: true,
+        // windowsHide 只挡得住 Windows 在建进程时自动开控制台，挡不住 agy.exe
+        // 自己后面主动调 AllocConsole——已经用进程树的父子关系实锤过，那才是
+        // 发消息时黑框一闪的真实来源。这两个变量是常见的"我不是交互式终端"
+        // 信号，赌它内部探测逻辑看到就不去申请控制台了；agy 内部逻辑不透明，
+        // 不保证根治，无效也无副作用。
+        env: { ...process.env, NO_COLOR: "1", TERM: "dumb" },
+      });
     } catch (err) {
       reject(new Error(`启动 Antigravity CLI 失败：${String(err?.message || err)}`));
       return;
@@ -3692,6 +3713,51 @@ const http = createServer((req, res) => {
     return;
   }
 
+  // AI 回复里提到的本地文件路径会被 marked 渲染成 <a>，但那从来不是能在
+  // webview 里跳转的 URL——前端拦下点击后转发到这里，用系统默认程序打开，
+  // 跟双击文件一个效果。
+  if (url === "/api/open-file" && method === "POST") {
+    let body = "";
+    req.on("data", (chunk) => { body += chunk; });
+    req.on("end", () => {
+      let payload;
+      try { payload = JSON.parse(body || "{}"); } catch { payload = {}; }
+      const raw = String(payload.path || "").trim().replace(/^["'](.+)["']$/, "$1");
+      // file:// URI 在 Windows 上是 file:///D:/foo，去掉协议头后会多带一个
+      // 前导斜杠（/D:/foo），得单独摘掉；posix 下 file:///Users/x 去掉协议头
+      // 正好就是 /Users/x，不用再处理。
+      let cleaned = raw.replace(/^file:\/\//i, "");
+      if (/^\/[a-zA-Z]:/.test(cleaned)) cleaned = cleaned.slice(1);
+      try { cleaned = decodeURIComponent(cleaned); } catch { /* 不是合法的 % 编码就原样用 */ }
+      const target = cleaned ? (isAbsolute(cleaned) ? resolve(cleaned) : resolve(DEFAULT_CWD, cleaned)) : "";
+      if (!target || !existsSync(target)) {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "文件不存在，可能已经被移动或删除" }));
+        return;
+      }
+      const opener = process.platform === "win32" ? "explorer.exe"
+        : process.platform === "darwin" ? "open"
+        : "xdg-open";
+      try {
+        // 不加 detached——实测过 Windows 上 detached:true 会额外带出一个
+        // conhost 窗口一闪；explorer.exe 本来就是转发给已经在跑的 shell 就退出，
+        // 不需要靠 detached 活过父进程。
+        const child = spawn(opener, [target], { windowsHide: true, stdio: "ignore" });
+        // explorer.exe 打开文件这个用法在 Windows 上无条件返回 1，不代表失败，
+        // 所以这里只接住 error 事件防止把进程带崩，不拿退出码判断成败。
+        child.on("error", () => { });
+        child.unref();
+      } catch (err) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: `打开失败：${String(err?.message || err)}` }));
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+    });
+    return;
+  }
+
   if (url === "/api/usage-limits" && method === "GET") {
     (async () => {
       const [claude, codex] = await Promise.all([
@@ -3866,12 +3932,15 @@ const http = createServer((req, res) => {
     const filePath = resolvePublicFile(url);
     if (filePath && existsSync(filePath)) {
       const mime = MIME[extname(filePath)] ?? "application/octet-stream";
-      res.writeHead(200, { "Content-Type": mime });
+      res.writeHead(200, { "Content-Type": mime, "Cache-Control": "no-store" });
       res.end(readFileSync(filePath));
       return;
     }
   }
-  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+  // index.html 里内联了全部前端逻辑，没有 Cache-Control 时 WebView2 会把它当可缓存
+  // 资源留在磁盘缓存里——桌面端重启进程不会清这个缓存，改完代码重启 app 还在跑旧版本，
+  // 排查起来极容易误判成别的 bug。强制 no-store，保证每次加载都从 server 现读现给。
+  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
   res.end(readFileSync(htmlPath, "utf8"));
 });
 

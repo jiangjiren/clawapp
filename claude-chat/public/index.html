@@ -3374,6 +3374,26 @@ function renderLimitTooltipWindow(label, win) {
   return `${label} used ${win.usedPercent}%${reset ? `, resets ${reset}` : ""}`;
 }
 
+const CODEX_PLAN_LABEL = { free: "Free", plus: "Plus", pro: "Pro", team: "Team", business: "Business", enterprise: "Enterprise" };
+
+function codexPlanSuffix() {
+  const limit = _providerUsageLimits.codex;
+  const planType = limit?.planType;
+  if (!planType) return "";
+  const label = CODEX_PLAN_LABEL[String(planType).toLowerCase()] || planType;
+  return ` · ${label}`;
+}
+
+const CLAUDE_PLAN_LABEL = { free: "Free", pro: "Pro", max_5x: "Max 5x", max_20x: "Max 20x", team: "Team", enterprise: "Enterprise" };
+
+function claudePlanSuffix() {
+  const limit = _providerUsageLimits.claude;
+  const planType = limit?.subscriptionType;
+  if (!planType) return "";
+  const label = CLAUDE_PLAN_LABEL[String(planType).toLowerCase()] || planType;
+  return ` · ${label}`;
+}
+
 function renderProviderUsageLimit(provider) {
   if (provider !== "claude" && provider !== "codex") return "";
   const limit = _providerUsageLimits[provider];
@@ -3459,13 +3479,16 @@ function renderProfileList(data) {
     const uniqueModels = [...new Set(allModels)];
     if (uniqueModels.length) metaParts.push(uniqueModels.map(m => m.split("/").pop() || m).join(" · "));
     const meta = p.provider === "claude"
-      ? (_claudeAuthStatus === true  ? "✅ 会员已登录"
+      ? (_claudeAuthStatus === true  ? `✅ 已登录${claudePlanSuffix()}`
        : _claudeAuthStatus === false ? "⚠️ 未登录 — 请在服务器运行 claude 命令完成登录"
        : "正在检测登录状态…")
       : p.provider === "codex"
-      ? (_codexAuthStatus === true  ? "✅ 已登录 ChatGPT Plus"
-       : _codexAuthStatus === false ? "⚠️ 未登录 — 请打开 Codex 客户端完成登录"
-       : "正在检测登录状态…")
+      ? (_codexAuthStatus === true
+          ? (_providerUsageLimits.codex?.status === "expired"
+              ? "⚠️ 登录已失效 — 请重新登录 ChatGPT 账号"
+              : `✅ 已登录${codexPlanSuffix()}`)
+         : _codexAuthStatus === false ? "⚠️ 未登录 — 请打开 Codex 客户端完成登录"
+         : "正在检测登录状态…")
       : p.provider === "antigravity"
       ? (_agyAuthStatus === true  ? "✅ Antigravity CLI 已就绪"
        : _agyAuthStatus === false ? "⚠️ 未就绪 — 请安装 agy 并运行一次完成 Google 账号登录"
@@ -7517,10 +7540,39 @@ sendBtn.addEventListener("click", () => {
 /* typing / gen-chip 里的停止按钮是随消息流动态生成的，走委托 */
 messagesEl.addEventListener("click", (e) => {
   const btn = e.target.closest?.(".inline-stop");
-  if (!btn || btn.disabled) return;
-  if (stopRequested && !stopResendPending) return;
-  sendStopRequest();
+  if (btn && !btn.disabled) {
+    if (stopRequested && !stopResendPending) return;
+    sendStopRequest();
+    return;
+  }
+  // AI 提到本地文件时会写成 markdown 链接，marked 原样把路径塞进 href——
+  // 那从来不是能在 webview 里跳转的 URL，http(s)/mailto/tel 之外一律当本地路径拦下来，
+  // 转发到后端用系统默认程序打开（等价于双击这个文件）。
+  const link = e.target.closest?.(".msg-body a[href]");
+  if (link) {
+    const href = link.getAttribute("href") || "";
+    if (href && !/^(https?|mailto|tel):/i.test(href) && !href.startsWith("#")) {
+      e.preventDefault();
+      openLocalFileLink(href);
+    }
+  }
 });
+
+async function openLocalFileLink(href) {
+  try {
+    const res = await fetch("api/open-file", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: href }),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      alert(data.error || "打开失败");
+    }
+  } catch {
+    alert("打开失败：连不上本地服务");
+  }
+}
 
 /* Esc = 取消当前这一轮。只有在没有更近的东西可关、焦点也不在别的输入框里时才生效。 */
 document.addEventListener("keydown", (e) => {
