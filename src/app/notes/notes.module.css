@@ -5125,6 +5125,18 @@
   color: var(--notes-text);
 }
 
+/* 专注聊天头部右侧的上下文标题（正在讨论：xxx） */
+.chatFocusTitle {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--notes-text-muted);
+  padding-right: 12px;
+}
+
 .dashboardContainer * {
   box-sizing: border-box;
 }

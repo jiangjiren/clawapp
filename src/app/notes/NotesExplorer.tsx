@@ -944,6 +944,11 @@ export default function NotesExplorer() {
   const [tocSectionOpen, setTocSectionOpen] = useState(true);
   const [mobileTocOpen, setMobileTocOpen] = useState(false);
   const [gitPanelOpen, setGitPanelOpen] = useState(false);
+  // 专注聊天（仅桌面端）：聊天占满中央、隐藏中间预览区，与是否打开笔记无关。
+  // 刻意不持久化——冷启动一律回到分栏，专注是"这一程"的选择，不是应用的默认形态
+  const [chatFocusActive, setChatFocusActive] = useState(false);
+  // iframe 每次 load 后 document 会换新，用它触发快捷键监听重挂
+  const [claudeFrameTick, setClaudeFrameTick] = useState(0);
   const [assistantPanelWidth, setAssistantPanelWidth] = useState(DEFAULT_ASSISTANT_PANEL_WIDTH);
   const [isResizingAssistantPanel, setIsResizingAssistantPanel] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
@@ -1564,6 +1569,11 @@ export default function NotesExplorer() {
   const getReaderScrollSnapshot = useCallback((): ScrollSnapshot | null => {
     const reader = readerRef.current;
     if (!reader) {
+      return null;
+    }
+    // 专注聊天模式下 reader 是 display:none，scrollTop 被钳到 0；
+    // 此时产出快照会把真实阅读位置覆盖成顶部，直接视为无快照
+    if (reader.clientHeight === 0) {
       return null;
     }
 
@@ -2568,6 +2578,7 @@ export default function NotesExplorer() {
     (path: string) => {
       setTreeMenuTarget(null);
       setGlobalCreateMenuOpen(false);
+      setChatFocusActive(false); // 专注模式下中间区是隐藏的，否则点了文件像没反应
       void flushEditBeforeSwitch().then(() => loadNote(path));
       if (isMobileViewport) {
         setMobileSidebarOpen(false);
@@ -2578,6 +2589,7 @@ export default function NotesExplorer() {
 
   const handleTabSelect = useCallback((path: string) => {
     if (path === activePathRef.current) return;
+    setChatFocusActive(false);
     // 标签切换恢复上次阅读位置（与文件树点击不同，这是标签的核心价值）
     void flushEditBeforeSwitch().then(() => loadNote(path, null, { restoreStoredScroll: true }));
   }, [flushEditBeforeSwitch, loadNote]);
@@ -2924,9 +2936,32 @@ export default function NotesExplorer() {
       setMobileSidebarOpen(false);
       setMobileAssistantSheet((s) => s === 'expanded' ? 'closed' : 'expanded');
     } else {
-      setAssistantPanelVisible((visible) => !visible);
+      const next = !assistantPanelVisible;
+      setAssistantPanelVisible(next);
+      // 关面板时顺带退出专注，避免下次打开面板直接跳回专注模式
+      if (!next) {
+        setChatFocusActive(false);
+      }
     }
-  }, [isMobileViewport]);
+  }, [isMobileViewport, assistantPanelVisible]);
+
+  /** 进入专注聊天：面板未开则一并打开；先钉住阅读位置再隐藏中间区 */
+  const enterChatFocus = useCallback(() => {
+    saveCurrentScrollSnapshot(); // reader 即将 display:none，scrollTop 会被钳到 0
+    setAssistantPanelVisible(true);
+    setChatFocusActive(true);
+  }, [saveCurrentScrollSnapshot]);
+
+  /** 退出专注聊天：恢复分栏布局，并把阅读位置还原到进入专注前的快照 */
+  const handleExitChatFocus = useCallback(() => {
+    // 先取快照再退（reader 可见后 scroll 事件可能把存储快照覆盖成 0）
+    const path = activePathRef.current;
+    const snapshot = path ? readStoredScrollSnapshot(path) : null;
+    setChatFocusActive(false);
+    if (snapshot) {
+      window.requestAnimationFrame(() => restoreReaderScroll(snapshot));
+    }
+  }, [restoreReaderScroll]);
 
   // ── 移动端底部 sheet：跟手拖拽 + 速度吸附 ─────────────────
   // 两个吸附点（translateY，单位 px）：expanded=0, closed=H。
@@ -3224,14 +3259,65 @@ export default function NotesExplorer() {
   const isDesktopSidebarHidden = !isMobileViewport && !sidebarVisible;
   const isSidebarOpen = isMobileViewport ? mobileSidebarOpen : sidebarVisible;
   const isAssistantPanelOpen = isMobileViewport ? mobileAssistantPanelOpen : assistantPanelVisible;
-  const [isDashboardChatActive, setIsDashboardChatActive] = useState(false);
-  const isDashboardChatMode = !note && isAssistantPanelOpen && !isMobileViewport && isDashboardChatActive;
+  // 专注聊天：桌面端、面板打开且用户点了专注（与是否打开笔记无关）
+  const isChatFocusMode = !isMobileViewport && isAssistantPanelOpen && chatFocusActive;
+  const focusNoteTitle = isDraft
+    ? "记录灵感"
+    : activePath?.split("/").pop()?.replace(/\.[^.]+$/i, "") ?? "";
   const isDesktopAssistantPanelHidden = !isMobileViewport && !assistantPanelVisible;
   const isDesktopGitView = !isMobileViewport && gitPanelOpen;
   const hasMobileOverlayOpen = isMobileViewport && (mobileSidebarOpen || mobileAssistantSheet === 'expanded' || gitPanelOpen || mobileTocOpen || treeSheetTarget !== null);
   // track when overlay opens to prevent ghost-click closing it immediately (Android touch issue)
   if (hasMobileOverlayOpen) mobileOverlayOpenTime.current = mobileOverlayOpenTime.current || Date.now();
   if (!hasMobileOverlayOpen) mobileOverlayOpenTime.current = 0;
+
+  // 专注聊天快捷键：Ctrl/⌘ + \ 双向切换，Esc 仅用于退出。
+  // 聊天在同源 iframe 里，专注时键盘焦点几乎总在其中，所以组合键也挂到 iframe 文档上；
+  // Esc 不往 iframe 里挂——它在聊天输入框里另有含义（停止生成 / 清空输入），不抢。
+  useEffect(() => {
+    if (isMobileViewport) return;
+
+    const toggleFocus = () => {
+      if (chatFocusActive) {
+        handleExitChatFocus();
+      } else {
+        enterChatFocus();
+      }
+    };
+    const isToggleChord = (event: KeyboardEvent) =>
+      (event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key === "\\";
+
+    const handleParentKeyDown = (event: KeyboardEvent) => {
+      if (isToggleChord(event)) {
+        event.preventDefault();
+        toggleFocus();
+        return;
+      }
+      if (event.key === "Escape" && chatFocusActive) {
+        handleExitChatFocus();
+      }
+    };
+    const handleFrameKeyDown = (event: KeyboardEvent) => {
+      if (isToggleChord(event)) {
+        event.preventDefault();
+        toggleFocus();
+      }
+    };
+
+    window.addEventListener("keydown", handleParentKeyDown);
+    let frameDoc: Document | null = null;
+    try {
+      frameDoc = claudeFrameRef.current?.contentDocument ?? null;
+    } catch {
+      frameDoc = null; // 理论上同源，跨源时静默降级为「仅父窗口生效」
+    }
+    frameDoc?.addEventListener("keydown", handleFrameKeyDown);
+
+    return () => {
+      window.removeEventListener("keydown", handleParentKeyDown);
+      frameDoc?.removeEventListener("keydown", handleFrameKeyDown);
+    };
+  }, [isMobileViewport, chatFocusActive, enterChatFocus, handleExitChatFocus, claudeFrameTick]);
 
   return (
     <main
@@ -3598,6 +3684,7 @@ export default function NotesExplorer() {
                 className={styles.sidebarGitStatus}
                 onClick={() => {
                   if (isMobileViewport) setMobileSidebarOpen(false);
+                  setChatFocusActive(false); // 专注模式下中间区是隐藏的，先退出再打开同步面板
                   setGitPanelOpen(true);
                 }}
                 tabIndex={isSidebarOpen ? 0 : -1}
@@ -3666,7 +3753,7 @@ export default function NotesExplorer() {
         </div>
       </div>
 
-      <section className={`${styles.reader} ${isDashboardChatMode ? styles.readerHidden : ""} ${isDesktopGitView ? styles.readerGitMode : ""}`} ref={readerRef}>
+      <section className={`${styles.reader} ${isChatFocusMode ? styles.readerHidden : ""} ${isDesktopGitView ? styles.readerGitMode : ""}`} ref={readerRef}>
         <header className={`${styles.readerHeader} ${isScrolled ? styles.readerHeaderScrolled : ""}`}>
           <div className={styles.readerActions}>
             <button
@@ -3870,6 +3957,23 @@ export default function NotesExplorer() {
                     )}
                   </div>
                 ) : null}
+                {/* 专注聊天：面板打开时（桌面端）可一键隐藏中间预览区，只留对话 */}
+                {!isMobileViewport && isAssistantPanelOpen ? (
+                  <button
+                    type="button"
+                    className={styles.iconButton}
+                    onClick={enterChatFocus}
+                    aria-label="专注聊天"
+                    title="专注聊天 — 隐藏中间预览区，只留对话（Ctrl/⌘ + \）"
+                  >
+                    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <path d="M15 3h6v6" />
+                      <path d="M9 21H3v-6" />
+                      <path d="M21 3l-7 7" />
+                      <path d="M3 21l7-7" />
+                    </svg>
+                  </button>
+                ) : null}
                 <button
                   type="button"
                   className={`${styles.fellowPill} ${isAssistantPanelOpen ? styles.fellowPillActive : ""} ${aiStatus === "thinking" ? styles.fellowPillThinking : ""} ${aiStatus === "done" ? styles.fellowPillDone : ""}`}
@@ -4031,7 +4135,7 @@ export default function NotesExplorer() {
                 files={files} 
                 onSelectNote={handleSelect} 
                 onAskAI={(query?: string) => {
-                  setIsDashboardChatActive(true);
+                  setChatFocusActive(true);
                   if (isMobileViewport) {
                     setMobileSidebarOpen(false);
                     setMobileAssistantSheet('expanded');
@@ -4299,7 +4403,7 @@ export default function NotesExplorer() {
 
       <aside
         ref={assistantPanelRef}
-        className={`${styles.assistantPanel} ${!isAssistantPanelOpen ? styles.assistantPanelHidden : ""} ${isDashboardChatMode ? styles.assistantPanelCenter : ""}`}
+        className={`${styles.assistantPanel} ${!isAssistantPanelOpen ? styles.assistantPanelHidden : ""} ${isChatFocusMode ? styles.assistantPanelCenter : ""}`}
         aria-label="辅助面板"
         aria-hidden={isMobileViewport ? mobileAssistantSheet === 'closed' : !isAssistantPanelOpen}
         inert={isMobileViewport ? mobileAssistantSheet === 'closed' : !isAssistantPanelOpen}
@@ -4317,7 +4421,7 @@ export default function NotesExplorer() {
             <span className={styles.mobileSheetHandlePill} />
           </button>
         )}
-        {!isDashboardChatMode && (
+        {!isChatFocusMode && (
           <>
             <button
               type="button"
@@ -4345,21 +4449,25 @@ export default function NotesExplorer() {
           </>
         )}
 
-        {isDashboardChatMode && (
+        {isChatFocusMode && (
           <header className={styles.dashboardChatHeader}>
             <button
               className={styles.dashboardChatBackBtn}
-              onClick={() => {
-                setAssistantPanelVisible(false);
-                setIsDashboardChatActive(false);
-              }}
+              onClick={handleExitChatFocus}
+              aria-label="退出专注聊天"
+              title="退出专注聊天（Ctrl/⌘ + \ 或 Esc）"
             >
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ width: "18px", height: "18px" }}>
-                <line x1="19" y1="12" x2="5" y2="12" />
-                <polyline points="12 19 5 12 12 5" />
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ width: "16px", height: "16px" }}>
+                <polyline points="4 14 9 14 9 19" />
+                <polyline points="20 10 15 10 15 5" />
+                <line x1="15" y1="10" x2="21" y2="4" />
+                <line x1="3" y1="20" x2="9" y2="14" />
               </svg>
-              <span>返回仪表盘</span>
+              <span>退出专注</span>
             </button>
+            <span className={styles.chatFocusTitle}>
+              {activePath || isDraft ? `正在讨论：${focusNoteTitle}` : "Fellow"}
+            </span>
           </header>
         )}
         <iframe
@@ -4382,6 +4490,7 @@ export default function NotesExplorer() {
               );
             }
             postVaultNotesToClaude();
+            setClaudeFrameTick((tick) => tick + 1);
           }}
         />
       </aside>
@@ -4659,7 +4768,7 @@ export default function NotesExplorer() {
               setAssistantPanelVisible(true);
             }
             setSelectionRect(null);
-            // We do not set setIsDashboardChatActive(true) because they are reading a note.
+            // 划词提问保持分栏布局，不进入专注模式：用户还在阅读上下文里
           }}
           aria-label="Ask AI about selection"
         >
