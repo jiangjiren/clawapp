@@ -18,10 +18,17 @@ import * as codexProvider from "./providers/codex.js";
 import * as agyProvider from "./providers/antigravity.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHistoryStore } from "./history-store.js";
+import { ConversationSession } from "./conversation-session.js";
 import { hasSchedulerIntent, hasSchedulerIntentForMessage } from "./scheduler-intent.js";
 import { z } from "zod";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+/* 当前对话的运行时状态。原本是散在这个文件里的 23 个模块级 let——单会话时
+   「当前对话」只有一个，全局变量就是它；要同时跑多个对话就必须先收进一个能有
+   多份的对象。现在仍然只有一个实例，行为与改造前一致；多开时这里换成
+   Map<conversationId, ConversationSession>。 */
+const session = new ConversationSession();
 const PORT = Number.parseInt(process.env.PORT || "8082", 10);
 const HOST = process.env.HOST || "127.0.0.1";
 const DESKTOP_AGENT_TOKEN = process.env.DESKTOP_AGENT_TOKEN || "";
@@ -220,41 +227,39 @@ const CLAUDE_COMPAT_ENV_KEYS = [
 ];
 
 // ── Session persistence ───────────────────────────────────
-let sessionId = null;
 try {
   if (existsSync(SESSION_FILE)) {
-    sessionId = JSON.parse(readFileSync(SESSION_FILE, "utf8")).sessionId ?? null;
-    if (sessionId) console.log(`Restored session: ${sessionId}`);
+    session.sessionId = JSON.parse(readFileSync(SESSION_FILE, "utf8")).sessionId ?? null;
+    if (session.sessionId) console.log(`Restored session: ${session.sessionId}`);
   }
 } catch { }
 
 function saveSession(id) {
-  sessionId = id;
-  try { writeFileSync(SESSION_FILE, JSON.stringify({ sessionId }), "utf8"); } catch { }
+  session.sessionId = id;
+  try { writeFileSync(SESSION_FILE, JSON.stringify({ sessionId: session.sessionId }), "utf8"); } catch { }
 }
 
 function clearSession() {
-  sessionId = null;
+  session.sessionId = null;
   try { writeFileSync(SESSION_FILE, JSON.stringify({ sessionId: null }), "utf8"); } catch { }
 }
 
 // ── Codex thread persistence ───────────────────────────────
 const CODEX_THREAD_FILE = join(DATA_DIR, `codex-thread-${PORT}.json`);
-let codexThreadId = null;
 try {
   if (existsSync(CODEX_THREAD_FILE)) {
-    codexThreadId = JSON.parse(readFileSync(CODEX_THREAD_FILE, "utf8")).threadId ?? null;
-    if (codexThreadId) console.log(`Restored codex thread: ${codexThreadId}`);
+    session.codexThreadId = JSON.parse(readFileSync(CODEX_THREAD_FILE, "utf8")).threadId ?? null;
+    if (session.codexThreadId) console.log(`Restored codex thread: ${session.codexThreadId}`);
   }
 } catch { }
 
 function saveCodexThread(id) {
-  codexThreadId = id;
+  session.codexThreadId = id;
   try { writeFileSync(CODEX_THREAD_FILE, JSON.stringify({ threadId: id }), "utf8"); } catch { }
 }
 
 function clearCodexThread() {
-  codexThreadId = null;
+  session.codexThreadId = null;
   try { writeFileSync(CODEX_THREAD_FILE, JSON.stringify({ threadId: null }), "utf8"); } catch { }
 }
 
@@ -298,21 +303,20 @@ function createAgyEventSender(send) {
 // 官方没出 Node SDK（只有 Python 版，而且那个不认 CLI 的登录、只认 API key），
 // 所以这里走官方文档化的 headless 模式：起子进程，读 stream-json。
 const AGY_CONV_FILE = join(DATA_DIR, `agy-conversation-${PORT}.json`);
-let agyConversationId = null;
 try {
   if (existsSync(AGY_CONV_FILE)) {
-    agyConversationId = JSON.parse(readFileSync(AGY_CONV_FILE, "utf8")).conversationId ?? null;
-    if (agyConversationId) console.log(`Restored agy conversation: ${agyConversationId}`);
+    session.agyConversationId = JSON.parse(readFileSync(AGY_CONV_FILE, "utf8")).conversationId ?? null;
+    if (session.agyConversationId) console.log(`Restored agy conversation: ${session.agyConversationId}`);
   }
 } catch { }
 
 function saveAgyConversation(id) {
-  agyConversationId = id;
+  session.agyConversationId = id;
   try { writeFileSync(AGY_CONV_FILE, JSON.stringify({ conversationId: id }), "utf8"); } catch { }
 }
 
 function clearAgyConversation() {
-  agyConversationId = null;
+  session.agyConversationId = null;
   try { writeFileSync(AGY_CONV_FILE, JSON.stringify({ conversationId: null }), "utf8"); } catch { }
 }
 
@@ -1479,10 +1483,6 @@ function normalizeAssistantHistoryBlocks(content, fallbackText = "") {
   return blocks;
 }
 
-let activeHistoryConversationId = null;
-let activeAssistantHistoryMessage = null;
-let activeHistoryTurnOpen = false;
-let activeHistoryTurnConversationId = null;
 const taskHistoryTargets = new Map();
 const taskHistoryTargetTimers = new Map();
 
@@ -1502,10 +1502,10 @@ function beginServerConversationFromClient(msg) {
     ? msg.displayText.trim()
     : String(msg.prompt || "").trim();
   const userMessageId = normalizeHistoryId(msg.userMessageId || makeHistoryMessageId("user"));
-  activeHistoryConversationId = conversationId;
-  activeAssistantHistoryMessage = null;
-  activeHistoryTurnOpen = true;
-  activeHistoryTurnConversationId = conversationId;
+  session.activeHistoryConversationId = conversationId;
+  session.activeAssistantHistoryMessage = null;
+  session.activeHistoryTurnOpen = true;
+  session.activeHistoryTurnConversationId = conversationId;
 
   const conv = ensureHistoryConversation(conversationId, { userText: displayText });
   if (!conv.messages.some(m => m.id === userMessageId)) {
@@ -1523,23 +1523,23 @@ function beginServerConversationFromClient(msg) {
 }
 
 function clearActiveHistoryConversation() {
-  activeHistoryConversationId = null;
-  activeAssistantHistoryMessage = null;
-  activeHistoryTurnOpen = false;
-  activeHistoryTurnConversationId = null;
+  session.activeHistoryConversationId = null;
+  session.activeAssistantHistoryMessage = null;
+  session.activeHistoryTurnOpen = false;
+  session.activeHistoryTurnConversationId = null;
   for (const timer of taskHistoryTargetTimers.values()) clearTimeout(timer);
   taskHistoryTargetTimers.clear();
   taskHistoryTargets.clear();
 }
 
 function ensureActiveAssistantHistoryMessage() {
-  if (!activeHistoryConversationId) return null;
-  const conv = ensureHistoryConversation(activeHistoryConversationId);
+  if (!session.activeHistoryConversationId) return null;
+  const conv = ensureHistoryConversation(session.activeHistoryConversationId);
   if (
-    activeAssistantHistoryMessage
-    && conv.messages.includes(activeAssistantHistoryMessage)
+    session.activeAssistantHistoryMessage
+    && conv.messages.includes(session.activeAssistantHistoryMessage)
   ) {
-    return activeAssistantHistoryMessage;
+    return session.activeAssistantHistoryMessage;
   }
   const msg = {
     id: makeHistoryMessageId("assistant"),
@@ -1555,7 +1555,7 @@ function ensureActiveAssistantHistoryMessage() {
   };
   conv.messages.push(msg);
   conv.date = new Date().toISOString();
-  activeAssistantHistoryMessage = msg;
+  session.activeAssistantHistoryMessage = msg;
   return msg;
 }
 
@@ -1583,34 +1583,34 @@ function appendAssistantHistoryBlocks(blocks, rawEvent = null, { rawMessage = nu
   if (rawEvent) msg.events.push(cloneHistoryJson(rawEvent));
   msg.text = textFromHistoryBlocks(msg.blocks);
   msg.updatedAt = new Date().toISOString();
-  const conv = ensureHistoryConversation(activeHistoryConversationId);
+  const conv = ensureHistoryConversation(session.activeHistoryConversationId);
   conv.date = msg.updatedAt;
   persistHistoryDeferred();
 }
 
 function finalizeActiveAssistantHistory(status = "complete", cost = null) {
-  if (activeHistoryTurnConversationId) activeHistoryConversationId = activeHistoryTurnConversationId;
-  activeHistoryTurnOpen = false;
-  activeHistoryTurnConversationId = null;
-  if (!activeAssistantHistoryMessage) return;
-  activeAssistantHistoryMessage.status = status;
-  activeAssistantHistoryMessage.updatedAt = new Date().toISOString();
-  if (cost != null) activeAssistantHistoryMessage.cost = cost;
-  activeAssistantHistoryMessage.text = textFromHistoryBlocks(activeAssistantHistoryMessage.blocks);
-  const conv = ensureHistoryConversation(activeHistoryConversationId);
-  conv.date = activeAssistantHistoryMessage.updatedAt;
+  if (session.activeHistoryTurnConversationId) session.activeHistoryConversationId = session.activeHistoryTurnConversationId;
+  session.activeHistoryTurnOpen = false;
+  session.activeHistoryTurnConversationId = null;
+  if (!session.activeAssistantHistoryMessage) return;
+  session.activeAssistantHistoryMessage.status = status;
+  session.activeAssistantHistoryMessage.updatedAt = new Date().toISOString();
+  if (cost != null) session.activeAssistantHistoryMessage.cost = cost;
+  session.activeAssistantHistoryMessage.text = textFromHistoryBlocks(session.activeAssistantHistoryMessage.blocks);
+  const conv = ensureHistoryConversation(session.activeHistoryConversationId);
+  conv.date = session.activeAssistantHistoryMessage.updatedAt;
   persistHistoryImmediate();
-  activeAssistantHistoryMessage = null;
+  session.activeAssistantHistoryMessage = null;
 }
 
 function appendTaskLifecycleHistoryEvent(ev) {
-  if (!activeHistoryConversationId || !isTaskLifecycleEvent(ev)) return;
+  if (!session.activeHistoryConversationId || !isTaskLifecycleEvent(ev)) return;
   const existingTarget = ev.task_id ? taskHistoryTargets.get(ev.task_id) : null;
-  const conversationId = existingTarget?.conversationId ?? activeHistoryConversationId;
+  const conversationId = existingTarget?.conversationId ?? session.activeHistoryConversationId;
   const conv = ensureHistoryConversation(conversationId);
   let target = existingTarget?.message;
   if (!target || !conv.messages.includes(target)) {
-    target = activeHistoryTurnOpen && conversationId === activeHistoryConversationId
+    target = session.activeHistoryTurnOpen && conversationId === session.activeHistoryConversationId
       ? ensureActiveAssistantHistoryMessage()
       : [...conv.messages].reverse().find(message => message.role === "assistant");
   }
@@ -1641,8 +1641,8 @@ function appendTaskLifecycleHistoryEvent(ev) {
 }
 
 function updateActiveConversationSession(nextSessionId) {
-  if (!activeHistoryConversationId || !nextSessionId) return;
-  const conv = ensureHistoryConversation(activeHistoryConversationId, { sessionId: nextSessionId });
+  if (!session.activeHistoryConversationId || !nextSessionId) return;
+  const conv = ensureHistoryConversation(session.activeHistoryConversationId, { sessionId: nextSessionId });
   conv.sessionId = nextSessionId;
   conv.date = new Date().toISOString();
   persistHistoryDeferred();
@@ -1657,7 +1657,7 @@ function isOutboundToolResult(type) {
 }
 
 function persistOutboundAgentEvent(ev) {
-  if (!activeHistoryConversationId || !ev?.type) return;
+  if (!session.activeHistoryConversationId || !ev?.type) return;
   if (ev.type === "session" && ev.sessionId) {
     updateActiveConversationSession(ev.sessionId);
     return;
@@ -3742,31 +3742,24 @@ function makeAbortError(message) {
   return err;
 }
 
-// ── Background-run state (module scope) ──────────────────
-// The desktop app is a single-user client, and runs must survive WebSocket drops
-// (sleep/wake, webview reloads, proxy switches). So the abort controller, the
-// pending clarification question, and the outbound channel live at module scope
-// instead of per-connection: a dropped socket detaches the client but leaves the
-// run alive; events are buffered and flushed when the client reconnects.
+// ── Background-run state ─────────────────────────────────
+// Runs must survive WebSocket drops (sleep/wake, webview reloads, proxy switches),
+// so run state never lives on the connection: a dropped socket detaches the client
+// but leaves the run alive; events are buffered and flushed when it reconnects.
+// The per-conversation half of that state (abort controller, pending clarification
+// question, turn bookkeeping) now sits on `session`; what stays here is what belongs
+// to the connection or the process, not to any one conversation.
 let activeWs = null;
-let abortCtrl = null;
-let pendingAskUserQuestion = null;
 const DETACHED_BUFFER_MAX = 2000;
 let detachedBuffer = [];
 const RESTART_LEASE_MS = 15_000;
 let restartLease = null;
-let activeForegroundRequestId = null;
-let activeForegroundConversationId = null;
-let activeForegroundDeliveryContext = null;
-let claudeRuntimeConversationId = null;
-let claudeAutoWakeOwner = null;
-let claudeAutoWakeOwnerTimer = null;
 
 /**
  * 事件泵绑定的会话上下文。
  *
- * claudeRuntimeConversationId 这类模块级变量记的是「此刻」哪个会话在跑，
- * 而 SDK 的子任务事件可能隔几秒才回来——那时全局早被下一个会话改写了。
+ * session.claudeRuntimeConversationId 这类字段记的是「此刻」哪个会话在跑，
+ * 而 SDK 的子任务事件可能隔几秒才回来——那时它早被下一个会话改写了。
  * 把 context 绑在 runtime 的事件泵上，事件走到哪它跟到哪，不用回头猜。
  * 单会话下两者取值相同；同时跑多个会话时，只有这个是对的。
  * 传播行为见 agent-context.test.js。
@@ -3795,8 +3788,8 @@ function acquireRestartLease() {
   // continuation from starting between the lease grant and process restart.
   if (claudeRuntime.started) {
     claudeRuntime.close();
-    claudeRuntimeSignature = null;
-    claudeRuntimeConversationId = null;
+    session.claudeRuntimeSignature = null;
+    session.claudeRuntimeConversationId = null;
   }
   return restartLease;
 }
@@ -3808,24 +3801,24 @@ function currentAgentEventOwner() {
   // 确实属于同一个会话时才认，否则宁可留空，也不能把别的会话的 id 贴上来。
   const bound = agentContext.getStore();
   if (bound?.conversationId) {
-    if (activeForegroundRequestId && activeForegroundConversationId === bound.conversationId) {
-      return { requestId: activeForegroundRequestId, conversationId: bound.conversationId };
+    if (session.activeForegroundRequestId && session.activeForegroundConversationId === bound.conversationId) {
+      return { requestId: session.activeForegroundRequestId, conversationId: bound.conversationId };
     }
-    if (claudeAutoWakeOwner?.conversationId === bound.conversationId) return claudeAutoWakeOwner;
+    if (session.claudeAutoWakeOwner?.conversationId === bound.conversationId) return session.claudeAutoWakeOwner;
     return { requestId: null, conversationId: bound.conversationId };
   }
 
   // 没有绑定 context 的路径（微信通道、一次性 dispatch 等）维持原来的判断
-  if (activeForegroundRequestId || activeForegroundConversationId) {
+  if (session.activeForegroundRequestId || session.activeForegroundConversationId) {
     return {
-      requestId: activeForegroundRequestId,
-      conversationId: activeForegroundConversationId,
+      requestId: session.activeForegroundRequestId,
+      conversationId: session.activeForegroundConversationId,
     };
   }
-  if (claudeAutoWakeOwner) return claudeAutoWakeOwner;
+  if (session.claudeAutoWakeOwner) return session.claudeAutoWakeOwner;
   return {
     requestId: null,
-    conversationId: claudeRuntimeConversationId,
+    conversationId: session.claudeRuntimeConversationId,
   };
 }
 
@@ -3856,13 +3849,13 @@ function ensureTaskEventOwner(event) {
 
 function setClaudeAutoWakeOwner(owner) {
   if (!owner) return;
-  claudeAutoWakeOwner = owner;
-  clearTimeout(claudeAutoWakeOwnerTimer);
-  claudeAutoWakeOwnerTimer = setTimeout(() => {
-    claudeAutoWakeOwner = null;
-    claudeAutoWakeOwnerTimer = null;
+  session.claudeAutoWakeOwner = owner;
+  clearTimeout(session.claudeAutoWakeOwnerTimer);
+  session.claudeAutoWakeOwnerTimer = setTimeout(() => {
+    session.claudeAutoWakeOwner = null;
+    session.claudeAutoWakeOwnerTimer = null;
   }, 30_000);
-  claudeAutoWakeOwnerTimer.unref?.();
+  session.claudeAutoWakeOwnerTimer.unref?.();
 }
 
 function tagAgentEvent(obj) {
@@ -3915,7 +3908,7 @@ function rememberClientRequest(requestId, state) {
   clientRequestStates.set(requestId, { state, updatedAt: Date.now() });
   if (clientRequestStates.size <= CLIENT_REQUEST_STATE_MAX) return;
   for (const [id, entry] of clientRequestStates) {
-    if (id === activeForegroundRequestId || entry.state === "queued" || entry.state === "running") continue;
+    if (id === session.activeForegroundRequestId || entry.state === "queued" || entry.state === "running") continue;
     clientRequestStates.delete(id);
     if (clientRequestStates.size <= CLIENT_REQUEST_STATE_MAX) break;
   }
@@ -3927,21 +3920,21 @@ function acknowledgeClientRequest(requestId, state) {
 }
 
 function startClientRequest(requestId, conversationId) {
-  activeForegroundRequestId = requestId;
-  activeForegroundConversationId = conversationId;
+  session.activeForegroundRequestId = requestId;
+  session.activeForegroundConversationId = conversationId;
   rememberClientRequest(requestId, "running");
   acknowledgeClientRequest(requestId, "running");
   deliver({ type: "request_started", userMessageId: requestId, conversationId });
 }
 
-function completeClientRequest(state, requestId = activeForegroundRequestId) {
+function completeClientRequest(state, requestId = session.activeForegroundRequestId) {
   if (requestId) rememberClientRequest(requestId, state);
-  if (activeForegroundRequestId === requestId) {
-    activeForegroundRequestId = null;
-    activeForegroundConversationId = null;
+  if (session.activeForegroundRequestId === requestId) {
+    session.activeForegroundRequestId = null;
+    session.activeForegroundConversationId = null;
   }
-  if (activeForegroundDeliveryContext?.requestId === requestId) {
-    activeForegroundDeliveryContext = null;
+  if (session.activeForegroundDeliveryContext?.requestId === requestId) {
+    session.activeForegroundDeliveryContext = null;
   }
 }
 
@@ -3955,18 +3948,7 @@ const FORWARDED_CLAUDE_SYSTEM_EVENTS = new Set([
   "task_notification",
 ]);
 
-let claudeRuntimeSignature = null;
-let claudeTurnCompletionPending = false;
-let claudeStopRequested = false;
-let claudeRecoveryContext = null;
-let claudePendingRecovery = null;
-let claudeErrorHandled = false;
-let claudeTaskWakeGraceUntil = 0;
-let claudeTurnEpoch = 0;
-const queuedClientPrompts = [];
 const steeringQueue = new SteeringQueue();
-let queuedClientPromptDrain = null;
-let queuedClientPromptDrainTimer = null;
 
 function steeringEventItem(item) {
   const ownerItems = steeringQueue.snapshot(item.ownerToken);
@@ -3987,10 +3969,10 @@ function deliverSteeringQueued(item) {
 }
 
 function removeFallbackPrompt(item) {
-  const index = queuedClientPrompts.findIndex(prompt => (
+  const index = session.queuedClientPrompts.findIndex(prompt => (
     prompt === item.msg || getClientRequestId(prompt) === item.userMessageId
   ));
-  if (index >= 0) queuedClientPrompts.splice(index, 1);
+  if (index >= 0) session.queuedClientPrompts.splice(index, 1);
 }
 
 function syncFallbackPromptOrder(ownerToken) {
@@ -3999,10 +3981,10 @@ function syncFallbackPromptOrder(ownerToken) {
     .map(item => item.msg);
   if (ordered.length === 0) return;
   let cursor = 0;
-  for (let index = 0; index < queuedClientPrompts.length; index += 1) {
-    const item = steeringQueue.get(getClientRequestId(queuedClientPrompts[index]));
+  for (let index = 0; index < session.queuedClientPrompts.length; index += 1) {
+    const item = steeringQueue.get(getClientRequestId(session.queuedClientPrompts[index]));
     if (item?.ownerToken !== ownerToken || item.delivery !== "next_turn") continue;
-    queuedClientPrompts[index] = ordered[cursor++];
+    session.queuedClientPrompts[index] = ordered[cursor++];
   }
 }
 
@@ -4026,7 +4008,7 @@ function fallbackUnappliedSteering(ownerToken, reason) {
   for (const item of steeringQueue.snapshot(ownerToken)) {
     if (item.state !== "queued" || item.paused || item.delivery !== "steer") continue;
     steeringQueue.update(item.userMessageId, { delivery: "next_turn", reason }, ownerToken);
-    if (!queuedClientPrompts.includes(item.msg)) queuedClientPrompts.push(item.msg);
+    if (!session.queuedClientPrompts.includes(item.msg)) session.queuedClientPrompts.push(item.msg);
     deliver({ type: "steering_updated", ...steeringEventItem(item) });
   }
 }
@@ -4075,14 +4057,14 @@ function isClaudeToolResultEvent(event) {
 }
 
 function applyNextClaudeSteering(safePoint) {
-  const context = activeForegroundDeliveryContext;
+  const context = session.activeForegroundDeliveryContext;
   if (
     !context
     || context.provider !== "claude"
-    || claudeStopRequested
-    || !claudeTurnCompletionPending
+    || session.claudeStopRequested
+    || !session.claudeTurnCompletionPending
     || !claudeRuntime.started
-    || claudeRuntimeConversationId !== context.conversationId
+    || session.claudeRuntimeConversationId !== context.conversationId
   ) {
     return false;
   }
@@ -4143,12 +4125,12 @@ function clearAllSteering(reason) {
 function scheduleQueuedClientPromptDrain(delayMs = 0) {
   // Never replace the task-wake grace timer with an earlier callback that can
   // only return. This used to strand queued prompts forever after auto-wake.
-  const graceDelay = Math.max(0, claudeTaskWakeGraceUntil - Date.now() + 10);
+  const graceDelay = Math.max(0, session.claudeTaskWakeGraceUntil - Date.now() + 10);
   const effectiveDelay = Math.max(delayMs, graceDelay);
-  clearTimeout(queuedClientPromptDrainTimer);
-  queuedClientPromptDrainTimer = setTimeout(() => {
-    queuedClientPromptDrainTimer = null;
-    queuedClientPromptDrain?.();
+  clearTimeout(session.queuedClientPromptDrainTimer);
+  session.queuedClientPromptDrainTimer = setTimeout(() => {
+    session.queuedClientPromptDrainTimer = null;
+    session.queuedClientPromptDrain?.();
   }, effectiveDelay);
 }
 
@@ -4162,36 +4144,35 @@ function isThinkingSignatureError(error) {
 // 手动发第二条消息才暴露。看门狗把这种失效变成可见信号：result 之后短时间内
 // 没等到 idle 就告警。纯观察，不改变回合行为。
 const TURN_IDLE_WATCHDOG_MS = 3_000;
-let turnIdleWatchdog = null;
 
 function clearTurnIdleWatchdog() {
-  clearTimeout(turnIdleWatchdog);
-  turnIdleWatchdog = null;
+  clearTimeout(session.turnIdleWatchdog);
+  session.turnIdleWatchdog = null;
 }
 
 function armTurnIdleWatchdog() {
   clearTurnIdleWatchdog();
-  if (!claudeTurnCompletionPending) return;
-  const epoch = claudeTurnEpoch;
-  turnIdleWatchdog = setTimeout(() => {
-    turnIdleWatchdog = null;
+  if (!session.claudeTurnCompletionPending) return;
+  const epoch = session.claudeTurnEpoch;
+  session.turnIdleWatchdog = setTimeout(() => {
+    session.turnIdleWatchdog = null;
     // 回合已经换代或已结束 → 不是失效，是正常时序
-    if (epoch !== claudeTurnEpoch || !claudeTurnCompletionPending) return;
+    if (epoch !== session.claudeTurnEpoch || !session.claudeTurnCompletionPending) return;
     console.warn(
       `[Web Agent] result 后 ${TURN_IDLE_WATCHDOG_MS}ms 未收到 session_state_changed/idle：`
       + "本轮无法结束，后续消息将被排队。检查 SDK 是否仍支持 "
       + "CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS=1（见 buildAgentEnv）。"
     );
   }, TURN_IDLE_WATCHDOG_MS);
-  turnIdleWatchdog.unref?.();
+  session.turnIdleWatchdog.unref?.();
 }
 
 function finishClaudeTurn() {
   clearTurnIdleWatchdog();
-  if (!claudeTurnCompletionPending) return;
-  const wasStopped = claudeStopRequested;
-  const completedRequestId = activeForegroundRequestId;
-  const completedOwnerToken = activeForegroundDeliveryContext?.ownerToken ?? null;
+  if (!session.claudeTurnCompletionPending) return;
+  const wasStopped = session.claudeStopRequested;
+  const completedRequestId = session.activeForegroundRequestId;
+  const completedOwnerToken = session.activeForegroundDeliveryContext?.ownerToken ?? null;
   if (wasStopped) pauseSteeringOwner(completedOwnerToken);
   else fallbackUnappliedSteering(completedOwnerToken, "runtime_finished_before_safe_point");
   // Emit the terminal event while the run is still marked active so a detached
@@ -4199,10 +4180,10 @@ function finishClaudeTurn() {
   clearPendingAskUserQuestion("request finished");
   send({ type: wasStopped ? "stopped" : "done" });
   completeClientRequest(wasStopped ? "stopped" : "complete", completedRequestId);
-  claudeTurnCompletionPending = false;
-  claudeStopRequested = false;
-  claudeRecoveryContext = null;
-  claudeErrorHandled = false;
+  session.claudeTurnCompletionPending = false;
+  session.claudeStopRequested = false;
+  session.claudeRecoveryContext = null;
+  session.claudeErrorHandled = false;
   scheduleQueuedClientPromptDrain();
 }
 
@@ -4215,7 +4196,7 @@ async function handlePersistentClaudeEvent(ev) {
     setClaudeAutoWakeOwner(taskOwner);
   }
   if (ev.type === "system" && ev.subtype === "init") {
-    if (claudeRuntimeConversationId) activeHistoryConversationId = claudeRuntimeConversationId;
+    if (session.claudeRuntimeConversationId) session.activeHistoryConversationId = session.claudeRuntimeConversationId;
     saveSession(ev.session_id);
     send({ type: "session", sessionId: ev.session_id });
     const skillsFromSdk = Array.isArray(ev.skills) && ev.skills.length > 0
@@ -4235,21 +4216,21 @@ async function handlePersistentClaudeEvent(ev) {
     if (ev.subtype === "task_notification" || terminalTaskUpdate) {
       // A completed background task can immediately inject a synthetic message
       // and wake the model. Keep restart deferral active across that tiny gap.
-      claudeTaskWakeGraceUntil = Date.now() + 5_000;
+      session.claudeTaskWakeGraceUntil = Date.now() + 5_000;
       scheduleQueuedClientPromptDrain(5_050);
     }
     if (
       ev.subtype === "session_state_changed"
       && ev.state !== "idle"
-      && !claudeTurnCompletionPending
+      && !session.claudeTurnCompletionPending
     ) {
-      if (claudeRuntimeConversationId) activeHistoryConversationId = claudeRuntimeConversationId;
-      claudeTurnCompletionPending = true;
-      claudeStopRequested = false;
-      claudeErrorHandled = false;
-      activeHistoryTurnOpen = true;
-      activeHistoryTurnConversationId = claudeRuntimeConversationId;
-      activeAssistantHistoryMessage = null;
+      if (session.claudeRuntimeConversationId) session.activeHistoryConversationId = session.claudeRuntimeConversationId;
+      session.claudeTurnCompletionPending = true;
+      session.claudeStopRequested = false;
+      session.claudeErrorHandled = false;
+      session.activeHistoryTurnOpen = true;
+      session.activeHistoryTurnConversationId = session.claudeRuntimeConversationId;
+      session.activeAssistantHistoryMessage = null;
     }
     if (FORWARDED_CLAUDE_SYSTEM_EVENTS.has(ev.subtype)) send(ev);
     if (ev.subtype === "session_state_changed" && ev.state === "idle") {
@@ -4266,10 +4247,10 @@ async function handlePersistentClaudeEvent(ev) {
 }
 
 async function handlePersistentClaudeError(error) {
-  const recovery = claudeRecoveryContext;
+  const recovery = session.claudeRecoveryContext;
   if (
-    claudeTurnCompletionPending
-    && !claudeStopRequested
+    session.claudeTurnCompletionPending
+    && !session.claudeStopRequested
     && recovery
     && !recovery.attempted
     && isThinkingSignatureError(error)
@@ -4280,15 +4261,15 @@ async function handlePersistentClaudeError(error) {
       clearSession();
       const options = { ...recovery.options };
       delete options.resume;
-      claudePendingRecovery = { message, options, signature: recovery.signature, conversationId: recovery.conversationId };
+      session.claudePendingRecovery = { message, options, signature: recovery.signature, conversationId: recovery.conversationId };
       console.warn("[Web Agent] Thinking-signature error; recovering with text-injected history.");
       return;
     }
   }
 
-  claudeErrorHandled = true;
-  if (claudeStopRequested || error?.name === "AbortError") {
-    claudeStopRequested = true;
+  session.claudeErrorHandled = true;
+  if (session.claudeStopRequested || error?.name === "AbortError") {
+    session.claudeStopRequested = true;
   } else {
     send({ type: "error", text: String(error) });
   }
@@ -4296,21 +4277,21 @@ async function handlePersistentClaudeError(error) {
 }
 
 async function handlePersistentClaudeClose() {
-  const recovery = claudePendingRecovery;
-  claudePendingRecovery = null;
+  const recovery = session.claudePendingRecovery;
+  session.claudePendingRecovery = null;
   if (recovery) {
     try {
-      claudeRuntime.start(recovery.options, { conversationId: recovery.conversationId ?? claudeRuntimeConversationId });
-      claudeRuntimeSignature = recovery.signature;
+      claudeRuntime.start(recovery.options, { conversationId: recovery.conversationId ?? session.claudeRuntimeConversationId });
+      session.claudeRuntimeSignature = recovery.signature;
       claudeRuntime.send(recovery.message);
       return;
     } catch (error) {
       send({ type: "error", text: String(error) });
     }
   }
-  claudeRuntimeSignature = null;
-  claudeRuntimeConversationId = null;
-  if (claudeTurnCompletionPending && !claudeErrorHandled) finishClaudeTurn();
+  session.claudeRuntimeSignature = null;
+  session.claudeRuntimeConversationId = null;
+  if (session.claudeTurnCompletionPending && !session.claudeErrorHandled) finishClaudeTurn();
 }
 
 const claudeRuntime = new PersistentQueryRuntime({
@@ -4325,23 +4306,23 @@ const claudeRuntime = new PersistentQueryRuntime({
 });
 
 function isForegroundRunActive() {
-  return Boolean(abortCtrl || claudeTurnCompletionPending || claudeRuntime.foregroundRunning || pendingAskUserQuestion);
+  return Boolean(session.abortCtrl || session.claudeTurnCompletionPending || claudeRuntime.foregroundRunning || session.pendingAskUserQuestion);
 }
 
 function shouldQueueClientPrompt() {
-  return isForegroundRunActive() || Date.now() < claudeTaskWakeGraceUntil;
+  return isForegroundRunActive() || Date.now() < session.claudeTaskWakeGraceUntil;
 }
 
 function isAgentWorkActive() {
   return Boolean(
-    abortCtrl
-    || activeForegroundRequestId
-    || claudeTurnCompletionPending
+    session.abortCtrl
+    || session.activeForegroundRequestId
+    || session.claudeTurnCompletionPending
     || claudeRuntime.running
-    || pendingAskUserQuestion
-    || queuedClientPrompts.length > 0
+    || session.pendingAskUserQuestion
+    || session.queuedClientPrompts.length > 0
     || steeringQueue.hasUnpaused()
-    || Date.now() < claudeTaskWakeGraceUntil
+    || Date.now() < session.claudeTaskWakeGraceUntil
   );
 }
 
@@ -4350,9 +4331,9 @@ function isAgentRunActive() {
 }
 
 const clearPendingAskUserQuestion = (reason = "cancelled") => {
-    if (!pendingAskUserQuestion) return;
-    const pending = pendingAskUserQuestion;
-    pendingAskUserQuestion = null;
+    if (!session.pendingAskUserQuestion) return;
+    const pending = session.pendingAskUserQuestion;
+    session.pendingAskUserQuestion = null;
     pending.cleanup?.();
     pending.reject(makeAbortError(reason));
     send({ type: "ask_user_question_cancelled", requestId: pending.requestId, reason });
@@ -4375,8 +4356,8 @@ const clearPendingAskUserQuestion = (reason = "cancelled") => {
 
     return new Promise((resolve, reject) => {
       const onAbort = () => {
-        if (pendingAskUserQuestion?.requestId !== requestId) return;
-        pendingAskUserQuestion = null;
+        if (session.pendingAskUserQuestion?.requestId !== requestId) return;
+        session.pendingAskUserQuestion = null;
         reject(makeAbortError("user input cancelled"));
         send({ type: "ask_user_question_cancelled", requestId, reason: "aborted" });
       };
@@ -4386,15 +4367,15 @@ const clearPendingAskUserQuestion = (reason = "cancelled") => {
         return;
       }
       signal?.addEventListener("abort", onAbort, { once: true });
-      pendingAskUserQuestion = {
+      session.pendingAskUserQuestion = {
         requestId,
         questions,
         toolUseID: context.toolUseID ?? null,
         cleanup: () => signal?.removeEventListener("abort", onAbort),
         reject,
         resolve: (payload = {}) => {
-          if (pendingAskUserQuestion?.requestId !== requestId) return;
-          pendingAskUserQuestion = null;
+          if (session.pendingAskUserQuestion?.requestId !== requestId) return;
+          session.pendingAskUserQuestion = null;
           signal?.removeEventListener("abort", onAbort);
           const rawAnswers = payload && typeof payload.answers === "object" && payload.answers !== null
             ? payload.answers
@@ -4438,29 +4419,29 @@ wss.on("connection", (ws) => {
 
   // Reattach to an in-flight run: restore the generating UI, replay whatever
   // happened while detached, and re-show a still-unanswered question.
-  const queuedAttachRequestId = getClientRequestId(queuedClientPrompts[0]);
-  const attachedRequestId = activeForegroundRequestId || queuedAttachRequestId;
-  const queuedAttachConversationId = queuedClientPrompts[0]?.conversationId
-    ? normalizeHistoryId(queuedClientPrompts[0].conversationId)
+  const queuedAttachRequestId = getClientRequestId(session.queuedClientPrompts[0]);
+  const attachedRequestId = session.activeForegroundRequestId || queuedAttachRequestId;
+  const queuedAttachConversationId = session.queuedClientPrompts[0]?.conversationId
+    ? normalizeHistoryId(session.queuedClientPrompts[0].conversationId)
     : null;
-  const attachedConversationId = activeForegroundConversationId || queuedAttachConversationId;
+  const attachedConversationId = session.activeForegroundConversationId || queuedAttachConversationId;
   const reattachRunning = isForegroundRunActive() || Boolean(attachedRequestId);
   if (isAgentRunActive() || detachedBuffer.length > 0) {
     const backlog = detachedBuffer;
     detachedBuffer = [];
     let questionInBacklog = false;
     for (const obj of backlog) {
-      if (obj?.type === "ask_user_question" && obj.requestId === pendingAskUserQuestion?.requestId) {
+      if (obj?.type === "ask_user_question" && obj.requestId === session.pendingAskUserQuestion?.requestId) {
         questionInBacklog = true;
       }
       deliver(obj);
     }
-    if (pendingAskUserQuestion && !questionInBacklog) {
+    if (session.pendingAskUserQuestion && !questionInBacklog) {
       deliver({
         type: "ask_user_question",
-        requestId: pendingAskUserQuestion.requestId,
-        toolUseID: pendingAskUserQuestion.toolUseID ?? null,
-        questions: pendingAskUserQuestion.questions,
+        requestId: session.pendingAskUserQuestion.requestId,
+        toolUseID: session.pendingAskUserQuestion.toolUseID ?? null,
+        questions: session.pendingAskUserQuestion.questions,
       });
     }
   }
@@ -4480,11 +4461,11 @@ wss.on("connection", (ws) => {
 
   let handleClientMessage;
   const drainThisConnection = () => {
-    if (activeWs !== ws || shouldQueueClientPrompt() || queuedClientPrompts.length === 0) return;
-    const next = queuedClientPrompts.shift();
+    if (activeWs !== ws || shouldQueueClientPrompt() || session.queuedClientPrompts.length === 0) return;
+    const next = session.queuedClientPrompts.shift();
     handleClientMessage(JSON.stringify(next), true);
   };
-  queuedClientPromptDrain = drainThisConnection;
+  session.queuedClientPromptDrain = drainThisConnection;
   handleClientMessage = (raw, fromQueue = false) => {
     if (activeWs !== ws) return;
     let msg;
@@ -4501,11 +4482,11 @@ wss.on("connection", (ws) => {
     }
 
     if (msg.type === "ask_user_question_response") {
-      if (!pendingAskUserQuestion || msg.requestId !== pendingAskUserQuestion.requestId) {
+      if (!session.pendingAskUserQuestion || msg.requestId !== session.pendingAskUserQuestion.requestId) {
         send({ type: "ask_user_question_error", requestId: msg.requestId ?? null, text: "This question has expired. Please retry the request." });
         return;
       }
-      pendingAskUserQuestion.resolve(msg);
+      session.pendingAskUserQuestion.resolve(msg);
       return;
     }
 
@@ -4543,8 +4524,8 @@ wss.on("connection", (ws) => {
         deliver({ type: "steering_command_error", command: msg.type, userMessageId: steeringId });
         return;
       }
-      const fallbackIndex = queuedClientPrompts.findIndex(prompt => getClientRequestId(prompt) === steeringId);
-      if (fallbackIndex >= 0) queuedClientPrompts[fallbackIndex] = updated.msg;
+      const fallbackIndex = session.queuedClientPrompts.findIndex(prompt => getClientRequestId(prompt) === steeringId);
+      if (fallbackIndex >= 0) session.queuedClientPrompts[fallbackIndex] = updated.msg;
       deliver({ type: "steering_updated", ...steeringEventItem(updated) });
       return;
     }
@@ -4594,10 +4575,10 @@ wss.on("connection", (ws) => {
         return;
       }
       const resumed = steeringQueue.resumeOwner(item.ownerToken);
-      const canStillSteer = activeForegroundDeliveryContext?.ownerToken === item.ownerToken
-        && activeForegroundDeliveryContext.provider === "claude"
-        && claudeTurnCompletionPending
-        && !claudeStopRequested;
+      const canStillSteer = session.activeForegroundDeliveryContext?.ownerToken === item.ownerToken
+        && session.activeForegroundDeliveryContext.provider === "claude"
+        && session.claudeTurnCompletionPending
+        && !session.claudeStopRequested;
       for (const resumedItem of resumed) {
         let effectiveItem = resumedItem;
         if (!canStillSteer && resumedItem.delivery === "steer") {
@@ -4606,8 +4587,8 @@ wss.on("connection", (ws) => {
             reason: "resumed_after_stop",
           }, resumedItem.ownerToken) ?? resumedItem;
         }
-        if (effectiveItem.delivery === "next_turn" && !queuedClientPrompts.includes(effectiveItem.msg)) {
-          queuedClientPrompts.push(effectiveItem.msg);
+        if (effectiveItem.delivery === "next_turn" && !session.queuedClientPrompts.includes(effectiveItem.msg)) {
+          session.queuedClientPrompts.push(effectiveItem.msg);
         }
         deliver({ type: "steering_updated", ...steeringEventItem(effectiveItem) });
       }
@@ -4616,7 +4597,7 @@ wss.on("connection", (ws) => {
     }
 
     if (msg.reset) {
-      claudeTurnEpoch += 1;
+      session.claudeTurnEpoch += 1;
       clearPendingAskUserQuestion("session reset");
       finalizeActiveAssistantHistory("stopped");
       clearAllSteering("reset");
@@ -4624,34 +4605,34 @@ wss.on("connection", (ws) => {
       // 必须赶在 clearActiveHistoryConversation() 把 id 置空之前取。
       // 这里不能用 normalizeHistoryId：它拿不到合法值时会造一个新 id，
       // 而前端多数 reset 只发 {reset:true}，那样清掉的是个随机键，等于没清。
-      forgetDispatchSessions(historyIdOrNull(msg.conversationId) || activeHistoryConversationId);
+      forgetDispatchSessions(historyIdOrNull(msg.conversationId) || session.activeHistoryConversationId);
       clearActiveHistoryConversation();
       clearSession();
       clearCodexThread();
       clearAgyConversation();
-      if (abortCtrl) { abortCtrl.abort(); abortCtrl = null; }
+      if (session.abortCtrl) { session.abortCtrl.abort(); session.abortCtrl = null; }
       claudeRuntime.close();
-      claudeRuntimeSignature = null;
-      claudeRuntimeConversationId = null;
-      claudeTurnCompletionPending = false;
-      claudeStopRequested = false;
-      claudeRecoveryContext = null;
-      claudePendingRecovery = null;
-      claudeTaskWakeGraceUntil = 0;
-      activeForegroundRequestId = null;
-      activeForegroundConversationId = null;
-      activeForegroundDeliveryContext = null;
-      claudeAutoWakeOwner = null;
-      clearTimeout(claudeAutoWakeOwnerTimer);
-      claudeAutoWakeOwnerTimer = null;
+      session.claudeRuntimeSignature = null;
+      session.claudeRuntimeConversationId = null;
+      session.claudeTurnCompletionPending = false;
+      session.claudeStopRequested = false;
+      session.claudeRecoveryContext = null;
+      session.claudePendingRecovery = null;
+      session.claudeTaskWakeGraceUntil = 0;
+      session.activeForegroundRequestId = null;
+      session.activeForegroundConversationId = null;
+      session.activeForegroundDeliveryContext = null;
+      session.claudeAutoWakeOwner = null;
+      clearTimeout(session.claudeAutoWakeOwnerTimer);
+      session.claudeAutoWakeOwnerTimer = null;
       for (const timer of taskEventOwnerTimers.values()) clearTimeout(timer);
       taskEventOwnerTimers.clear();
       taskEventOwners.clear();
-      queuedClientPrompts.length = 0;
+      session.queuedClientPrompts.length = 0;
       clientRequestStates.clear();
       detachedBuffer = [];
-      clearTimeout(queuedClientPromptDrainTimer);
-      queuedClientPromptDrainTimer = null;
+      clearTimeout(session.queuedClientPromptDrainTimer);
+      session.queuedClientPromptDrainTimer = null;
       deliver({ type: "reset_complete" });
       return;
     }
@@ -4663,10 +4644,10 @@ wss.on("connection", (ws) => {
         // A generation still streaming into a different conversation owns
         // activeHistoryConversationId until it finalizes — viewing another
         // conversation must not redirect its in-flight output.
-        const generatingElsewhere = activeHistoryTurnOpen
-          && activeHistoryTurnConversationId !== nextConversationId;
+        const generatingElsewhere = session.activeHistoryTurnOpen
+          && session.activeHistoryTurnConversationId !== nextConversationId;
         if (!generatingElsewhere) {
-          activeHistoryConversationId = nextConversationId;
+          session.activeHistoryConversationId = nextConversationId;
           updateActiveConversationSession(String(msg.setSession));
         }
       }
@@ -4692,23 +4673,23 @@ wss.on("connection", (ws) => {
           deliver({ type: "stopped", userMessageId: requestedStopId });
           return;
         }
-        const queuedIndex = queuedClientPrompts.findIndex(item => getClientRequestId(item) === requestedStopId);
+        const queuedIndex = session.queuedClientPrompts.findIndex(item => getClientRequestId(item) === requestedStopId);
         if (queuedIndex >= 0) {
-          queuedClientPrompts.splice(queuedIndex, 1);
+          session.queuedClientPrompts.splice(queuedIndex, 1);
           rememberClientRequest(requestedStopId, "stopped");
           deliver({ type: "stopped", userMessageId: requestedStopId });
           scheduleQueuedClientPromptDrain();
           return;
         }
-        if (activeForegroundRequestId !== requestedStopId) {
+        if (session.activeForegroundRequestId !== requestedStopId) {
           const known = clientRequestStates.get(requestedStopId);
           if (known) acknowledgeClientRequest(requestedStopId, known.state);
           return;
         }
       }
       clearPendingAskUserQuestion("generation stopped");
-      const claudeTurnWasPending = claudeTurnCompletionPending;
-      const stoppedOwnerToken = activeForegroundDeliveryContext?.ownerToken ?? null;
+      const claudeTurnWasPending = session.claudeTurnCompletionPending;
+      const stoppedOwnerToken = session.activeForegroundDeliveryContext?.ownerToken ?? null;
       if (stoppedOwnerToken) {
         pauseSteeringOwner(stoppedOwnerToken);
       } else if (!requestedStopId) {
@@ -4716,21 +4697,21 @@ wss.on("connection", (ws) => {
           pauseSteeringOwner(ownerToken);
         }
       }
-      claudeTurnEpoch += 1;
+      session.claudeTurnEpoch += 1;
       // 派出去的子进程一律先掐。放在分支之前：Claude 主模型那条路走的是
       // claudeRuntime.interrupt()，它只打断主模型，碰不到派发出去的活。
       abortActiveDispatches();
-      if (abortCtrl) {
-        const stoppedRequestId = activeForegroundRequestId;
-        const activeAbort = abortCtrl;
-        abortCtrl = null;
+      if (session.abortCtrl) {
+        const stoppedRequestId = session.activeForegroundRequestId;
+        const activeAbort = session.abortCtrl;
+        session.abortCtrl = null;
         activeAbort.abort();
         send({ type: "stopped" });
         completeClientRequest("stopped", stoppedRequestId);
         finalizeActiveAssistantHistory("stopped");
         scheduleQueuedClientPromptDrain();
       } else if (claudeTurnWasPending) {
-        claudeStopRequested = true;
+        session.claudeStopRequested = true;
         if (claudeRuntime.foregroundRunning) {
           claudeRuntime.interrupt().catch((error) => {
             send({ type: "error", text: String(error) });
@@ -4762,7 +4743,7 @@ wss.on("connection", (ws) => {
     if (!fromQueue && knownRequest) {
       acknowledgeClientRequest(requestId, knownRequest.state);
       if (knownRequest.state === "queued") {
-        const position = queuedClientPrompts.findIndex(item => getClientRequestId(item) === requestId) + 1;
+        const position = session.queuedClientPrompts.findIndex(item => getClientRequestId(item) === requestId) + 1;
         deliver({ type: "request_queued", reason: "busy", position: position || null, userMessageId: requestId });
       } else if (knownRequest.state === "steering_queued") {
         const item = steeringQueue.get(requestId);
@@ -4807,9 +4788,9 @@ wss.on("connection", (ws) => {
     if (!fromQueue && msg.deliveryMode === "steer" && clientPromptBusy) {
       const steeringConversationId = msg.conversationId
         ? normalizeHistoryId(msg.conversationId)
-        : (activeForegroundConversationId || claudeRuntimeConversationId || normalizeHistoryId(null));
+        : (session.activeForegroundConversationId || session.claudeRuntimeConversationId || normalizeHistoryId(null));
       msg.conversationId = steeringConversationId;
-      const context = activeForegroundDeliveryContext;
+      const context = session.activeForegroundDeliveryContext;
       const canSteerCurrentClaudeTurn = Boolean(
         context
         && context.provider === "claude"
@@ -4818,11 +4799,11 @@ wss.on("connection", (ws) => {
         && context.conversationId === steeringConversationId
         && context.profileId === incomingProfileId
         && context.runtimeKey === incomingRuntimeKey
-        && claudeTurnCompletionPending
-        && !claudeStopRequested
+        && session.claudeTurnCompletionPending
+        && !session.claudeStopRequested
       );
       const ownerToken = context?.ownerToken
-        ?? `fallback:${activeForegroundRequestId ?? "background"}:${claudeTurnEpoch}:${steeringConversationId}`;
+        ?? `fallback:${session.activeForegroundRequestId ?? "background"}:${session.claudeTurnEpoch}:${steeringConversationId}`;
       const displayText = typeof msg.displayText === "string" && msg.displayText.trim()
         ? msg.displayText.trim()
         : String(msg.prompt || "").trim();
@@ -4840,7 +4821,7 @@ wss.on("connection", (ws) => {
         profileId: incomingProfileId,
         msg,
       });
-      if (inserted && item.delivery === "next_turn") queuedClientPrompts.push(msg);
+      if (inserted && item.delivery === "next_turn") session.queuedClientPrompts.push(msg);
       rememberClientRequest(requestId, "steering_queued");
       acknowledgeClientRequest(requestId, "steering_queued");
       deliverSteeringQueued(item);
@@ -4849,21 +4830,21 @@ wss.on("connection", (ws) => {
     if (clientPromptBusy) {
       const fallbackSteeringItem = fromQueue ? steeringQueue.get(requestId) : null;
       if (fallbackSteeringItem?.delivery === "next_turn") {
-        queuedClientPrompts.unshift(msg);
+        session.queuedClientPrompts.unshift(msg);
         rememberClientRequest(requestId, "steering_queued");
         acknowledgeClientRequest(requestId, "steering_queued");
         deliverSteeringQueued(fallbackSteeringItem);
         return;
       }
-      if (fromQueue) queuedClientPrompts.unshift(msg);
-      else queuedClientPrompts.push(msg);
+      if (fromQueue) session.queuedClientPrompts.unshift(msg);
+      else session.queuedClientPrompts.push(msg);
       rememberClientRequest(requestId, "queued");
       acknowledgeClientRequest(requestId, "queued");
-      const position = queuedClientPrompts.findIndex(item => item === msg) + 1;
+      const position = session.queuedClientPrompts.findIndex(item => item === msg) + 1;
       deliver({
         type: "request_queued",
         reason: crossesActiveClaudeTasks ? "provider_switch_wait" : "busy",
-        position: position || queuedClientPrompts.length,
+        position: position || session.queuedClientPrompts.length,
         userMessageId: requestId,
       });
       return;
@@ -4891,7 +4872,7 @@ wss.on("connection", (ws) => {
       }
     }
     startClientRequest(requestId, requestConversationId);
-    activeForegroundDeliveryContext = {
+    session.activeForegroundDeliveryContext = {
       requestId,
       ownerToken: `foreground:${requestId ?? crypto.randomUUID()}:${crypto.randomUUID()}`,
       conversationId: requestConversationId,
@@ -4925,7 +4906,7 @@ wss.on("connection", (ws) => {
       send({ type: "error", text: `${activeProfile.name} 的 API Key 还没有配置，请先在账号设置里保存。` });
       send({ type: "done" });
       completeClientRequest("error", requestId);
-      abortCtrl = null;
+      session.abortCtrl = null;
       scheduleQueuedClientPromptDrain();
       return;
     }
@@ -4933,7 +4914,7 @@ wss.on("connection", (ws) => {
       send({ type: "error", text: "Codex 还没有登录，请先打开 Codex 客户端或运行 codex login 完成 ChatGPT 账号登录。" });
       send({ type: "done" });
       completeClientRequest("error", requestId);
-      abortCtrl = null;
+      session.abortCtrl = null;
       scheduleQueuedClientPromptDrain();
       return;
     }
@@ -4941,7 +4922,7 @@ wss.on("connection", (ws) => {
       send({ type: "error", text: "Antigravity CLI 还没准备好，请先安装 agy 并运行一次 agy 完成 Google 账号登录。" });
       send({ type: "done" });
       completeClientRequest("error", requestId);
-      abortCtrl = null;
+      session.abortCtrl = null;
       scheduleQueuedClientPromptDrain();
       return;
     }
@@ -4950,7 +4931,7 @@ wss.on("connection", (ws) => {
       send({ type: "error", text: "定时任务目前需要 Claude 会员通道的 scheduler 工具。请切换到 Claude 会员后再创建、查看或修改提醒任务。" });
       send({ type: "done" });
       completeClientRequest("error", requestId);
-      abortCtrl = null;
+      session.abortCtrl = null;
       scheduleQueuedClientPromptDrain();
       return;
     }
@@ -4960,7 +4941,7 @@ wss.on("connection", (ws) => {
     // 用户通过 >厂商 明确指定时，不再让主模型二次判断；直接调用同一派发执行器，
     // 同时合成标准的 tool_use/tool_result 事件，复用现有编队卡与历史链路。
     if (msg.dispatchProvider) {
-      const dispatchTurnEpoch = ++claudeTurnEpoch;
+      const dispatchTurnEpoch = ++session.claudeTurnEpoch;
       const dispatchToolUseId = `dispatch_${crypto.randomUUID()}`;
       const dispatchReason = typeof msg.dispatchReason === "string" && msg.dispatchReason.trim()
         ? msg.dispatchReason.trim()
@@ -4971,12 +4952,12 @@ wss.on("connection", (ws) => {
         send({ type: "error", text: "派发给其他厂商时暂不支持图片，请去掉图片后重发，或者把这轮交给当前模型。" });
         send({ type: "done" });
         completeClientRequest("error", requestId);
-        abortCtrl = null;
+        session.abortCtrl = null;
         scheduleQueuedClientPromptDrain();
         return;
       }
       // 同一条对话里再派给同一个厂商，就接着上一轮说
-      const dispatchConvId = historyIdOrNull(msg.conversationId) || activeHistoryConversationId;
+      const dispatchConvId = historyIdOrNull(msg.conversationId) || session.activeHistoryConversationId;
       const dispatchProfile = resolveDispatchProfile(profileData, msg.dispatchProvider);
       const dispatchProfileId = dispatchProfile?.id || null;
       // 同一家正在派发中就不续接：两个进程同时往一条 thread 里写，
@@ -4995,11 +4976,11 @@ wss.on("connection", (ws) => {
         reason: dispatchReason,
         ...(resumeSessionId ? { resumed: true } : {}),
       };
-      abortCtrl = ac;
+      session.abortCtrl = ac;
       const isCurrentDispatchTurn = () => (
-        dispatchTurnEpoch === claudeTurnEpoch
-        && abortCtrl === ac
-        && activeForegroundRequestId === requestId
+        dispatchTurnEpoch === session.claudeTurnEpoch
+        && session.abortCtrl === ac
+        && session.activeForegroundRequestId === requestId
       );
       send({
         type: "assistant",
@@ -5112,7 +5093,7 @@ wss.on("connection", (ws) => {
         } finally {
           ACTIVE_DISPATCH_ABORTS.delete(ac);
           releaseDispatchInflight();
-          if (abortCtrl === ac) abortCtrl = null;
+          if (session.abortCtrl === ac) session.abortCtrl = null;
           scheduleQueuedClientPromptDrain();
         }
       })();
@@ -5135,7 +5116,7 @@ wss.on("connection", (ws) => {
             cwd: resolvedCwd,
             permissionMode,
             profileData,
-            conversationId: historyIdOrNull(msg.conversationId) || activeHistoryConversationId,
+            conversationId: historyIdOrNull(msg.conversationId) || session.activeHistoryConversationId,
             // 用户按停止时，派出去的子进程也要跟着停
             getAbortSignal: () => ac.signal,
             sendStep: (payload) => { try { send({ type: "dispatch_step", ...payload }); } catch { /* 连接已断则忽略 */ } },
@@ -5155,7 +5136,7 @@ wss.on("connection", (ws) => {
       options.systemPrompt = { type: "preset", preset: "claude_code", append: INKFELLOW_SCHEDULER_PROMPT };
       options.disallowedTools = ["Bash"];
     }
-    if (sessionId) options.resume = sessionId;
+    if (session.sessionId) options.resume = session.sessionId;
     if (!activeProfile || activeProfile.provider === "claude") {
       if (msg.model) options.model = msg.model;
     }
@@ -5166,15 +5147,15 @@ wss.on("connection", (ws) => {
       // 免得它的自动续跑再开一条流出来
       if (claudeRuntime.started) {
         claudeRuntime.close();
-        claudeRuntimeSignature = null;
-        claudeRuntimeConversationId = null;
+        session.claudeRuntimeSignature = null;
+        session.claudeRuntimeConversationId = null;
       }
-      const agyTurnEpoch = ++claudeTurnEpoch;
-      abortCtrl = ac;
+      const agyTurnEpoch = ++session.claudeTurnEpoch;
+      session.abortCtrl = ac;
       const isCurrentAgyTurn = () => (
-        agyTurnEpoch === claudeTurnEpoch
-        && abortCtrl === ac
-        && activeForegroundRequestId === requestId
+        agyTurnEpoch === session.claudeTurnEpoch
+        && session.abortCtrl === ac
+        && session.activeForegroundRequestId === requestId
       );
       (async () => {
         try {
@@ -5187,7 +5168,7 @@ wss.on("connection", (ws) => {
             model: resolveAgyModel(msg.model, activeProfile),
             effort,
             permissionMode,
-            resumeConversationId: agyConversationId,
+            resumeConversationId: session.agyConversationId,
             signal: ac.signal,
             // id 在 init 事件里就有，先记下来——中断时这条会话仍然有效
             onSession: (id) => {
@@ -5211,7 +5192,7 @@ wss.on("connection", (ws) => {
             completeClientRequest("error", requestId);
           }
         } finally {
-          if (abortCtrl === ac) abortCtrl = null;
+          if (session.abortCtrl === ac) session.abortCtrl = null;
           scheduleQueuedClientPromptDrain();
         }
       })();
@@ -5225,15 +5206,15 @@ wss.on("connection", (ws) => {
       // starts so a late auto-continuation cannot create a second stream.
       if (claudeRuntime.started) {
         claudeRuntime.close();
-        claudeRuntimeSignature = null;
-        claudeRuntimeConversationId = null;
+        session.claudeRuntimeSignature = null;
+        session.claudeRuntimeConversationId = null;
       }
-      const codexTurnEpoch = ++claudeTurnEpoch;
-      abortCtrl = ac;
+      const codexTurnEpoch = ++session.claudeTurnEpoch;
+      session.abortCtrl = ac;
       const isCurrentCodexTurn = () => (
-        codexTurnEpoch === claudeTurnEpoch
-        && abortCtrl === ac
-        && activeForegroundRequestId === requestId
+        codexTurnEpoch === session.claudeTurnEpoch
+        && session.abortCtrl === ac
+        && session.activeForegroundRequestId === requestId
       );
       (async () => {
         try {
@@ -5246,8 +5227,8 @@ wss.on("connection", (ws) => {
             modelReasoningEffort: EFFORT_TO_REASONING[effort] || "medium",
             ...(msg.model ? { model: msg.model } : {}),
           };
-          const thread = codexThreadId
-            ? codex.resumeThread(codexThreadId, threadOptions)
+          const thread = session.codexThreadId
+            ? codex.resumeThread(session.codexThreadId, threadOptions)
             : codex.startThread(threadOptions);
 
           // 图片：base64 → 临时本地文件（codex-sdk 只支持 local_image）
@@ -5303,7 +5284,7 @@ wss.on("connection", (ws) => {
             completeClientRequest("error", requestId);
           }
         } finally {
-          if (abortCtrl === ac) abortCtrl = null;
+          if (session.abortCtrl === ac) session.abortCtrl = null;
           scheduleQueuedClientPromptDrain();
         }
       })();
@@ -5380,7 +5361,7 @@ wss.on("connection", (ws) => {
     };
 
     const buildRecoveryMsg = () => {
-      const history = extractSessionTextHistory(sessionId);
+      const history = extractSessionTextHistory(session.sessionId);
       if (history.length === 0) return null;
       const historyText = history
         .map(turn => `${turn.role === "user" ? "用户" : "助手"}：${turn.text}`)
@@ -5398,7 +5379,7 @@ wss.on("connection", (ws) => {
     };
 
     const runtimeSignature = crypto.createHash("sha256").update(JSON.stringify({
-      conversationId: activeHistoryConversationId,
+      conversationId: session.activeHistoryConversationId,
       cwd: resolvedCwd,
       effort,
       provider: activeProfile?.provider ?? "claude",
@@ -5411,14 +5392,14 @@ wss.on("connection", (ws) => {
       allowDangerouslySkipPermissions: permissionMode === "bypassPermissions",
       schedulerRequest,
     })).digest("hex");
-    const turnConversationId = activeHistoryConversationId;
-    const turnEpoch = ++claudeTurnEpoch;
-    const isCurrentTurn = () => turnEpoch === claudeTurnEpoch && claudeTurnCompletionPending;
+    const turnConversationId = session.activeHistoryConversationId;
+    const turnEpoch = ++session.claudeTurnEpoch;
+    const isCurrentTurn = () => turnEpoch === session.claudeTurnEpoch && session.claudeTurnCompletionPending;
 
-    claudeTurnCompletionPending = true;
-    claudeStopRequested = false;
-    claudeErrorHandled = false;
-    claudeRecoveryContext = {
+    session.claudeTurnCompletionPending = true;
+    session.claudeStopRequested = false;
+    session.claudeErrorHandled = false;
+    session.claudeRecoveryContext = {
       attempted: false,
       buildMessage: buildRecoveryMsg,
       options,
@@ -5429,7 +5410,7 @@ wss.on("connection", (ws) => {
     (async () => {
       try {
         if (!isCurrentTurn()) return;
-        if (claudeRuntime.started && claudeRuntimeSignature !== runtimeSignature) {
+        if (claudeRuntime.started && session.claudeRuntimeSignature !== runtimeSignature) {
           if (claudeRuntime.taskIds.size > 0) {
             send({
               type: "error",
@@ -5439,15 +5420,15 @@ wss.on("connection", (ws) => {
             return;
           }
           claudeRuntime.close();
-          claudeRuntimeSignature = null;
-          claudeRuntimeConversationId = null;
+          session.claudeRuntimeSignature = null;
+          session.claudeRuntimeConversationId = null;
         }
 
         if (!claudeRuntime.started) {
           if (!isCurrentTurn()) return;
           claudeRuntime.start(options, { conversationId: turnConversationId });
-          claudeRuntimeSignature = runtimeSignature;
-          claudeRuntimeConversationId = turnConversationId;
+          session.claudeRuntimeSignature = runtimeSignature;
+          session.claudeRuntimeConversationId = turnConversationId;
         } else {
           await claudeRuntime.query.setPermissionMode(permissionMode);
           if (!isCurrentTurn()) return;
@@ -5473,7 +5454,7 @@ wss.on("connection", (ws) => {
     clearInterval(pingTimer);
     if (activeWs === ws) {
       activeWs = null;
-      if (queuedClientPromptDrain === drainThisConnection) queuedClientPromptDrain = null;
+      if (session.queuedClientPromptDrain === drainThisConnection) session.queuedClientPromptDrain = null;
       // Do NOT abort or clear the pending question: the run keeps going in the
       // background and reattaches when the client reconnects.
       if (isAgentRunActive()) {
