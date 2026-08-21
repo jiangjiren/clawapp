@@ -233,13 +233,17 @@ export class SteeringQueue {
 }
 
 export class PersistentQueryRuntime {
-  constructor({ queryFactory, onEvent, onError, onClose, onCallbackError } = {}) {
+  constructor({ queryFactory, onEvent, onError, onClose, onCallbackError, contextStore = null } = {}) {
     if (typeof queryFactory !== "function") throw new TypeError("queryFactory is required");
     this.queryFactory = queryFactory;
     this.onEvent = onEvent ?? (() => {});
     this.onError = onError ?? (() => {});
     this.onClose = onClose ?? (() => {});
     this.onCallbackError = onCallbackError ?? (() => {});
+    // AsyncLocalStorage（或任何同形状的东西）。给了就把 start() 的 context
+    // 绑到事件泵上，没给就退回原来的行为。
+    this.contextStore = contextStore;
+    this.context = null;
     this.query = null;
     this.input = null;
     this.pumpPromise = null;
@@ -248,7 +252,17 @@ export class PersistentQueryRuntime {
     this.generation = 0;
   }
 
-  start(options) {
+  /**
+   * 起一轮持久 query。
+   *
+   * context 会被绑在这个 runtime 的事件泵上：pump 里 await 出来的每个事件、
+   * 以及它触发的每个回调，都能通过 contextStore.getStore() 读到它——包括
+   * 异步子任务那些隔了几秒才回来的事件。
+   *
+   * 这是为了替掉「事件发出时回头猜它属于谁」那套做法。猜的代价是两套
+   * owner 追踪 Map 加两套 TTL 定时器，而且一旦同时有多个会话在跑必然猜错。
+   */
+  start(options, context = null) {
     if (this.query) throw new Error("Persistent query is already started");
     const input = new AsyncMessageQueue();
     let activeQuery;
@@ -261,7 +275,11 @@ export class PersistentQueryRuntime {
     const generation = ++this.generation;
     this.input = input;
     this.query = activeQuery;
-    this.pumpPromise = this.pump(activeQuery, input, generation);
+    this.context = context;
+    const runPump = () => this.pump(activeQuery, input, generation);
+    this.pumpPromise = this.contextStore && context
+      ? this.contextStore.run(context, runPump)
+      : runPump();
     return activeQuery;
   }
 
@@ -283,6 +301,7 @@ export class PersistentQueryRuntime {
     this.query = null;
     this.generation += 1;
     this.input = null;
+    this.context = null;
     this.pumpPromise = null;
     this.foregroundRunning = false;
     this.taskIds.clear();

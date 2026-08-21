@@ -14,6 +14,10 @@ import Anthropic from "@anthropic-ai/sdk";
 import { Codex } from "@openai/codex-sdk";
 import * as scheduler from "./scheduler.js";
 import { PersistentQueryRuntime, SteeringQueue, isTaskLifecycleEvent } from "./agent-session.js";
+import * as codexProvider from "./providers/codex.js";
+import * as agyProvider from "./providers/antigravity.js";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { createHistoryStore } from "./history-store.js";
 import { hasSchedulerIntent, hasSchedulerIntentForMessage } from "./scheduler-intent.js";
 import { z } from "zod";
 
@@ -254,109 +258,40 @@ function clearCodexThread() {
   try { writeFileSync(CODEX_THREAD_FILE, JSON.stringify({ threadId: null }), "utf8"); } catch { }
 }
 
-function isCodexAuthAvailable() {
-  const authFile = join(homedir(), ".codex", "auth.json");
-  if (!existsSync(authFile)) return false;
-  try {
-    const auth = JSON.parse(readFileSync(authFile, "utf8"));
-    return !!(auth.tokens?.access_token || auth.OPENAI_API_KEY);
-  } catch { return false; }
-}
-
-function codexSandboxMode(permissionMode) {
-  if (permissionMode === "plan") return "read-only";
-  if (permissionMode === "bypassPermissions") return "danger-full-access";
-  return "workspace-write";
-}
-
-function codexItemText(item) {
-  if (!item) return "";
-  if (typeof item.text === "string") return item.text;
-  if (typeof item.message === "string") return item.message;
-  return "";
-}
-
-function codexToolName(item) {
-  if (!item) return "tool";
-  if (item.type === "command_execution") return "Bash";
-  if (item.type === "mcp_tool_call") return item.tool || "mcp";
-  if (item.type === "web_search") return "web_search";
-  if (item.type === "file_change") return "apply_patch";
-  return item.type || "tool";
-}
-
-function codexToolInput(item) {
-  if (!item) return {};
-  if (item.type === "command_execution") return { command: item.command || "" };
-  if (item.type === "mcp_tool_call") return item.arguments ?? {};
-  if (item.type === "web_search") return { query: item.query || "" };
-  if (item.type === "file_change") return { changes: item.changes || [], status: item.status };
-  if (item.type === "todo_list") return { items: item.items || [] };
-  return item;
-}
-
-function codexContentBlock(item) {
-  if (!item) return null;
-  const raw = item;
-  if (item.type === "agent_message") {
-    const text = codexItemText(item);
-    return text ? { type: "text", text, raw } : null;
-  }
-  if (item.type === "reasoning") {
-    const thinking = codexItemText(item);
-    return thinking ? { type: "thinking", thinking, raw } : null;
-  }
-  if (item.type === "mcp_tool_call") {
-    return {
-      type: "mcp_tool_result",
-      content: item.result?.content ?? item.result ?? item.error ?? null,
-      raw,
-    };
-  }
-  if (item.type === "command_execution") {
-    return {
-      type: "tool_result",
-      content: item.aggregated_output || "",
-      raw,
-    };
-  }
-  if (item.type === "error") {
-    return { type: "codex_error", message: item.message || "Codex item error", raw };
-  }
-  return { type: `codex_${item.type || "item"}`, raw };
-}
+// ── Provider 归一化（Codex / Antigravity）──────────────────
+// 事件翻译已抽到 providers/ 下，协议本身写在 providers/wire.js 里。
+// 这里保留原有函数名做薄包装，调用点一处都不用动。
+const isCodexAuthAvailable = codexProvider.isAuthAvailable;
+const codexSandboxMode = codexProvider.sandboxMode;
+const codexItemText = codexProvider.itemText;
+const codexToolName = codexProvider.toolName;
+const codexToolInput = codexProvider.toolInput;
+const codexContentBlock = codexProvider.contentBlock;
 
 function sendCodexItemEvent(send, eventType, item) {
-  if (!item) return;
-  if (eventType === "item.started") {
-    if (item.type === "command_execution" || item.type === "mcp_tool_call" || item.type === "web_search" || item.type === "file_change") {
-      send({
-        type: item.type === "mcp_tool_call" ? "mcp_tool_use" : "server_tool_use",
-        id: item.id ?? "",
-        name: codexToolName(item),
-        server_name: item.server ?? null,
-        input: codexToolInput(item),
-        provider: "codex",
-        raw: item,
-      });
-      return;
-    }
-    if (item.type === "reasoning") {
-      const block = codexContentBlock(item);
-      if (block) send({ type: "assistant", message: { role: "assistant", content: [block] } });
-      return;
-    }
-  }
-  if (eventType === "item.updated") {
-    if (item.type === "command_execution" || item.type === "mcp_tool_call" || item.type === "todo_list") {
-      send({ type: "tool_progress", provider: "codex", itemType: item.type, raw: item });
-    }
-    return;
-  }
-  if (eventType === "item.completed") {
-    const block = codexContentBlock(item);
-    if (block) send({ type: "assistant", message: { role: "assistant", content: [block] } });
-  }
+  for (const ev of codexProvider.itemEvents(eventType, item)) send(ev);
+}
+
+const findAgyBinary = agyProvider.findBinary;
+const isAgyAuthAvailable = agyProvider.isAuthAvailable;
+const agyModeFlag = agyProvider.modeFlag;
+const learnAgyEffortsFromError = agyProvider.learnEffortsFromError;
+const agyEffortForModel = agyProvider.effortForModel;
+const agyToolInput = agyProvider.toolInput;
+const agyToolOutput = agyProvider.toolOutput;
+const agyToolName = agyProvider.toolName;
+
+/**
+ * 把 agy 的 step_update 翻成前端认识的事件。
+ *
+ * 文本走 stream_event（agy 给的是真增量，打字机效果和 Claude 那条路一致），
+ * 工具沿用 Codex 那套顶层事件形态。每段文本收尾时再补一条完整的 assistant
+ * 消息，历史是从那条积累的（persistOutboundAgentEvent 不认 stream_event）。
+ * 状态机实现见 providers/antigravity.js。
+ */
+function createAgyEventSender(send) {
+  const translate = agyProvider.createTranslator();
+  return (ev) => { for (const out of translate(ev)) send(out); };
 }
 
 // ── Antigravity CLI（agy）────────────────────────────────
@@ -381,156 +316,6 @@ function clearAgyConversation() {
   try { writeFileSync(AGY_CONV_FILE, JSON.stringify({ conversationId: null }), "utf8"); } catch { }
 }
 
-let _agyBinaryCache;
-function findAgyBinary() {
-  if (_agyBinaryCache !== undefined) return _agyBinaryCache;
-  const candidates = [];
-  if (process.env.AGY_BIN) candidates.push(process.env.AGY_BIN);
-  if (process.platform === "win32") {
-    const localAppData = process.env.LOCALAPPDATA || join(homedir(), "AppData", "Local");
-    candidates.push(join(localAppData, "agy", "bin", "agy.exe"));
-  } else {
-    candidates.push(join(homedir(), ".local", "bin", "agy"));
-    candidates.push("/usr/local/bin/agy");
-  }
-  _agyBinaryCache = candidates.find(p => { try { return existsSync(p); } catch { return false; } }) ?? null;
-  return _agyBinaryCache;
-}
-
-// 登录状态没有可读的凭证文件（agy 把 token 收在自己的 store 里），只能退一步：
-// 装了二进制 + 建过配置目录，就认为登录过。真没登录时第一轮会由 CLI 自己报错。
-function isAgyAuthAvailable() {
-  if (!findAgyBinary()) return false;
-  return existsSync(join(homedir(), ".gemini", "antigravity-cli"));
-}
-
-function agyModeFlag(permissionMode) {
-  if (permissionMode === "plan") return "plan";
-  return "accept-edits";
-}
-
-// agy 只认三档，界面上的 xhigh/max 都压到 high
-const AGY_EFFORT = { low: "low", medium: "medium", high: "high", xhigh: "high", max: "high" };
-
-// 每个模型支持的档位并不一样，给错了 agy 直接拒绝启动：
-//   gemini-3.1-pro   —— 只有 low / high，没有 medium
-//   gemini-*-flash   —— 三档齐全，而且不带档位后缀时**必须**传 --effort
-//   claude-*         —— 压根不吃 --effort，传了报 "effort is not supported"
-//   gpt-oss-120b     —— 只有 medium
-// 本想开机跑 `agy models` 现推一份，但那条命令在管道里会挂住不退出（实测 >2min），
-// 不能放在启动路径上。所以写死一张表，再靠下面的 learn 函数按 agy 的报错自我修正。
-const AGY_MODEL_EFFORTS = new Map([
-  ["gemini-3.7-flash", new Set(["low", "medium", "high"])],
-  ["gemini-3.6-flash", new Set(["low", "medium", "high"])],
-  ["gemini-3.5-flash", new Set(["low", "medium", "high"])],
-  ["gemini-3.1-pro", new Set(["low", "high"])],
-  ["gpt-oss-120b", new Set(["medium"])],
-  ["claude-opus-4-6-thinking", new Set()],
-  ["claude-sonnet-4-6", new Set()],
-]);
-
-// agy 拒绝启动时会把真实档位写进错误里，例如
-//   `--model gemini-3.1-pro requires --effort (available: low, high)`
-//   `effort is not supported for model "claude-opus-4-6-thinking"`
-// 上面那张表哪天过期了，就按它说的改，然后重试一次。
-function learnAgyEffortsFromError(model, message) {
-  if (!model || !message) return false;
-  const before = AGY_MODEL_EFFORTS.get(model);
-  if (/effort is not supported for model/i.test(message)) {
-    if (before && before.size === 0) return false;
-    AGY_MODEL_EFFORTS.set(model, new Set());
-    return true;
-  }
-  const available = /available:\s*([a-z,\s]+)\)/i.exec(message);
-  if (available) {
-    const levels = new Set(available[1].split(",").map(part => part.trim()).filter(Boolean));
-    if (!levels.size) return false;
-    if (before && before.size === levels.size && [...levels].every(level => before.has(level))) return false;
-    AGY_MODEL_EFFORTS.set(model, levels);
-    return true;
-  }
-  return false;
-}
-
-/**
- * 这个模型这一轮该传什么 --effort，返回 null 表示这一项整个别传。
- */
-function agyEffortForModel(model, effort) {
-  const wanted = AGY_EFFORT[effort] || "medium";
-  if (!model) return wanted;
-  // 档位已经写死在模型名里，再传 --effort 会冲突
-  if (/-(high|medium|low)$/.test(model)) return null;
-  const supported = AGY_MODEL_EFFORTS.get(model);
-  if (!supported) return wanted;        // 没见过的模型，照传让 agy 自己判
-  if (supported.size === 0) return null; // claude-* 这类不接受档位
-  if (supported.has(wanted)) return wanted;
-  // 就近取。medium 缺失时优先往下走：high 更慢更费额度，不该由我们替用户升上去
-  const order = wanted === "high"
-    ? ["high", "medium", "low"]
-    : wanted === "low"
-    ? ["low", "medium", "high"]
-    : ["low", "high", "medium"];
-  return order.find(level => supported.has(level)) ?? null;
-}
-
-// agy 的参数名是 PascalCase 的一套（AbsolutePath / TargetFile / …），
-// 前端工具卡片取的是 file_path / command / query 这几个键，对不上就只能
-// 把整个 JSON 摊在卡片上。这里补一份小写别名，原字段保留不动。
-const AGY_PARAM_ALIAS = {
-  AbsolutePath: "file_path",
-  TargetFile: "file_path",
-  DirectoryPath: "file_path",
-  FilePath: "file_path",
-  NotebookPath: "file_path",
-  Command: "command",
-  CommandLine: "command",
-  Query: "query",
-  SearchQuery: "query",
-  SearchTerm: "query",
-  Url: "url",
-  URL: "url",
-};
-
-function agyToolInput(info) {
-  if (!info || typeof info !== "object") return {};
-  const params = info.parameters;
-  if (!params || typeof params !== "object") return {};
-  const out = { ...params };
-  for (const [from, to] of Object.entries(AGY_PARAM_ALIAS)) {
-    if (out[to] === undefined && typeof params[from] === "string") out[to] = params[from];
-  }
-  return out;
-}
-
-function agyToolOutput(info) {
-  if (!info || typeof info !== "object") return "";
-  const out = info.output;
-  if (typeof out === "string") return out;
-  if (out == null) return "";
-  try { return JSON.stringify(out); } catch { return String(out); }
-}
-
-// agy 的工具名是自己一套（view_file / run_command / …），前端的工具卡片按名字
-// 认图标和中文名，所以映射到已有的那套名字，让 Gemini 的步骤流和另外两家长一样。
-const AGY_TOOL_ALIAS = {
-  view_file: "Read",
-  read_url_content: "WebFetch",
-  search_web: "WebSearch",
-  grep_search: "Grep",
-  find_by_name: "Glob",
-  list_dir: "Glob",
-  run_command: "Bash",
-  write_to_file: "Write",
-  replace_file_content: "Edit",
-  multi_replace_file_content: "Edit",
-  sed_file: "Edit",
-  notebook_edit: "NotebookEdit",
-};
-
-function agyToolName(step) {
-  const raw = step?.tool_name || step?.tool_info?.name || "tool";
-  return AGY_TOOL_ALIAS[raw] || raw;
-}
 
 // agy 抛上来的原文有些对用户毫无意义（"Agent execution terminated due to error."），
 // 真正的线索有时在它自己的 cli.log 里，有时只在会话库
@@ -563,6 +348,16 @@ function explainAgyFailure(raw) {
       + "但目标路径是 vault 里的真实文件，跟 agy 只认 brain 目录的 artifact 规则冲突，整轮请求被拒。"
       + "重新问一遍，明确告诉它「直接写文件，不是做 artifact/画布」，通常能避开。";
   }
+  const missingFile = /failed to read file: open (.+?): (?:The system cannot find the file specified|no such file or directory)/i.exec(text);
+  if (missingFile) {
+    /* agy 在「声明权限」阶段就会去打开模型点名的文件，文件不在就整轮失败，
+       原始报错是一长串 declaring permissions / convert tool call 的内部链路，
+       真正有用的只有最后那个路径。实测撞到的一次：模型把
+       00-AI破局总结报告.md 记成了 00-总结报告.md。 */
+    return `Antigravity 这一轮想读一个不存在的文件：\n${missingFile[1]}\n`
+      + "路径是模型自己拼的，文件名带中文或者它凭印象补全时最容易错一两个字。"
+      + "把准确路径贴给它，或者让它先列一下目录再读。";
+  }
   return `Antigravity 请求失败：${text}`;
 }
 
@@ -574,106 +369,6 @@ function resolveAgyModel(requested, profile) {
   return /^(gemini-\d|claude-(opus|sonnet)-4-6|gpt-oss-)/.test(requested.trim()) ? requested.trim() : fallback;
 }
 
-// 工具输出原样进历史会把 view_file 整个文件塞进去，截一刀
-const AGY_TOOL_OUTPUT_LIMIT = 20000;
-
-/**
- * 把 agy 的 step_update 翻成前端认识的事件。
- *
- * 文本走 stream_event（agy 给的是真增量，打字机效果和 Claude 那条路一致），
- * 工具沿用 Codex 那套顶层事件形态——它已经跑通过，前端不用改。
- * 每段文本收尾时再补一条完整的 assistant 消息，历史是从那条积累的
- * （persistOutboundAgentEvent 不认 stream_event）。
- */
-function createAgyEventSender(send) {
-  const texts = new Map();        // step_index → 累积的文本
-  const openedText = new Set();   // 已经发过 content_block_start 的文本 step
-  const toolIds = new Map();      // step_index → 前端用来配对的工具 id
-  let streamed = false;           // 本轮是否已经开过流式块
-
-  const openTextBlock = (idx) => {
-    if (openedText.has(idx)) return;
-    // 工具跑完后的新一段回复：先 message_start，前端据此清掉 spinner 并重置块表
-    if (streamed) send({ type: "stream_event", event: { type: "message_start" } });
-    send({
-      type: "stream_event",
-      event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
-    });
-    openedText.add(idx);
-    streamed = true;
-  };
-
-  return function handleAgyEvent(ev) {
-    if (!ev || typeof ev !== "object") return;
-    if (ev.event === "step_update") {
-      const step = ev.step_update;
-      if (!step) return;
-      const idx = step.step_index ?? 0;
-
-      if (step.step_type === "agent_response") {
-        const delta = typeof step.text_delta === "string" ? step.text_delta : "";
-        if (delta) {
-          openTextBlock(idx);
-          texts.set(idx, (texts.get(idx) || "") + delta);
-          send({
-            type: "stream_event",
-            event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: delta } },
-          });
-        }
-        if (step.state === "DONE") {
-          const text = (texts.get(idx) || "").trim();
-          if (openedText.has(idx)) {
-            send({ type: "stream_event", event: { type: "content_block_stop", index: 0 } });
-          }
-          // 定稿：前端拿这条重渲染，历史也只认这条
-          if (text) send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text }] } });
-          texts.delete(idx);
-          openedText.delete(idx);
-        }
-        return;
-      }
-
-      if (step.step_type === "tool") {
-        if (step.state === "DONE") {
-          const id = toolIds.get(idx) || `agy_${idx}`;
-          toolIds.delete(idx);
-          const output = agyToolOutput(step.tool_info);
-          const content = output.length > AGY_TOOL_OUTPUT_LIMIT
-            ? `${output.slice(0, AGY_TOOL_OUTPUT_LIMIT)}\n…（输出已截断）`
-            : output;
-          send({
-            type: "assistant",
-            message: {
-              role: "assistant",
-              content: [{ type: "tool_result", tool_use_id: id, content, raw: step }],
-            },
-          });
-          // 这条不进历史，只用来让前端把工具卡片从"执行中"落定
-          send({
-            type: "user",
-            message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content: "", is_error: false }] },
-          });
-          return;
-        }
-        if (toolIds.has(idx)) return;   // ACTIVE 可能来多次
-        const id = `agy_${idx}`;
-        toolIds.set(idx, id);
-        send({
-          type: "server_tool_use",
-          id,
-          name: agyToolName(step),
-          server_name: null,
-          input: agyToolInput(step.tool_info),
-          provider: "antigravity",
-          raw: step,
-        });
-        streamed = true;
-        return;
-      }
-      return;
-    }
-  };
-}
 
 // print 模式默认 5 分钟就把 agent 掐了。桌面端这条链路本来就不设静默超时
 // （见文件顶部 STREAM_STALL_MS 的注释），一律等用户自己点停止，所以这里给一个
@@ -1391,7 +1086,18 @@ const CUSTOM_HISTORY_FILE = Boolean(process.env.CLAUDE_CHAT_HISTORY_FILE);
 const HISTORY_FILE = process.env.CLAUDE_CHAT_HISTORY_FILE || join(DATA_DIR, "history.json");
 const LEGACY_HISTORY_FILE_RE = /^history-\d+\.json$/;
 const HISTORY_MIGRATION_MARKER = join(DATA_DIR, ".history-port-migration-v2");
-const MAX_SERVER_HISTORY = 100;
+/* 这个上限原本是 100，理由是所有会话挤在一个 history.json 里、每次落盘全量重写，
+   条数一多写盘就顶不住。改成每会话一个分片之后那个理由没了：flush 只碰这一轮
+   变过的会话，开销跟总数无关。
+
+   没写成无上限，是因为启动时 load() 要把全部分片读进内存——实测 144 个会话
+   （63MB）耗时 1.1 秒、堆增长 117MB，这条是随总数线性涨的。1000 留出很多年的
+   余量，同时保证启动时间有界。真到了那一天，该做的是列表只读 meta、消息按需
+   加载，而不是把这个数字继续往上调。 */
+const MAX_SERVER_HISTORY = 1000;
+// 会话分片目录跟着 HISTORY_FILE 走，这样测试用 CLAUDE_CHAT_HISTORY_FILE
+// 指到临时目录时，分片也一起被隔离掉。
+const HISTORY_DIR = join(dirname(HISTORY_FILE), "conversations");
 
 export function resolveAllowedCwd(requestedCwd) {
   const cwd = typeof requestedCwd === "string" && requestedCwd.trim()
@@ -1503,9 +1209,30 @@ function migrateLegacyHistoryFiles() {
 
 migrateLegacyHistoryFiles();
 
-let historyStore = readHistoryFile(HISTORY_FILE);
+// 历史从「一个 history.json 装全部」改成「每会话一个分片日志」。
+// 迁移只在分片目录还空着时做一次，做完把 history.json 改名留底。
+const shardStore = createHistoryStore({ dir: HISTORY_DIR });
+if (shardStore.isEmpty()) {
+  const migrated = shardStore.migrateFrom(HISTORY_FILE);
+  if (migrated > 0) console.log(`History migrated to per-conversation shards: ${migrated} conversation(s)`);
+} else {
+  // migrateLegacyHistoryFiles() 每次启动都会把 history-<PORT>.json 残留重新
+  // 合并成一份 history.json。分片建立之后就没人读那份了，所以这里再捞一次：
+  // 只补分片没见过的会话，已有的不动。
+  const merged = shardStore.mergeFrom(HISTORY_FILE);
+  if (merged > 0) console.log(`History shards picked up ${merged} conversation(s) from legacy file`);
+}
+
+/* 分片按时间倒序读回；内存里仍只留最近 MAX_SERVER_HISTORY 条，跟改造前一致。
+   差别在于超出的那些分片留在磁盘上不动——以前它们会被写回 history.json 时
+   顺手抹掉，现在只是不进内存。要真正删除，得用户点删除。 */
+let historyStore = shardStore.load().slice(0, MAX_SERVER_HISTORY);
 let historyFlushTimer = null;
 let historyDirty = false;
+/* 这一轮被碰过的会话 id。所有改历史的路径都要先经过 ensureHistoryConversation
+   或 upsertHistoryConversation 拿到会话对象，在那两处标记即可覆盖全部写入。
+   宁可多标（多写一个会话没代价），不能漏标。 */
+const dirtyConversationIds = new Set();
 
 function flushHistoryNow() {
   if (historyFlushTimer) {
@@ -1514,7 +1241,27 @@ function flushHistoryNow() {
   }
   if (!historyDirty) return;
   historyDirty = false;
-  writeJsonFile(HISTORY_FILE, historyStore);
+  /* 只把这一轮碰过的会话交给 store。
+     saveAll 要判断「哪条消息变了」，就得把传进去的每条消息序列化一遍再算哈希——
+     实测 144 个会话跑一次 345ms，而流式回答时真正在变的只有一个，其余全是白算。
+     flush 是 500ms debounce 且全程同步，白算会直接卡住事件循环拖慢输出。
+
+     另外绝不按「内存里没有」去删文件：内存那份被 MAX_SERVER_HISTORY 截断过，
+     不是磁盘该有的全集。删除只认一个来源——用户点删除（DELETE /api/history/:id）。 */
+  if (dirtyConversationIds.size === 0) return;
+  const touched = historyStore.filter(conv => conv?.id && dirtyConversationIds.has(conv.id));
+  dirtyConversationIds.clear();
+  shardStore.saveAll(touched);
+}
+
+/* 退出前兜底全量落盘：常规 flush 只写标记过的会话，万一哪条改动路径漏了标记，
+   这里是最后一道防线。慢一点无所谓，一个进程只跑一次。 */
+function flushHistoryOnExit() {
+  clearTimeout(historyFlushTimer);
+  historyFlushTimer = null;
+  historyDirty = false;
+  dirtyConversationIds.clear();
+  shardStore.saveAll(historyStore);
 }
 
 function scheduleHistoryFlush(delayMs = 500) {
@@ -1534,15 +1281,15 @@ function writeHistory(arr, options = {}) {
   else flushHistoryNow();
 }
 
-process.on("beforeExit", flushHistoryNow);
+process.on("beforeExit", flushHistoryOnExit);
 process.on("exit", killAllAgyProcesses);
 process.on("SIGINT", () => {
-  flushHistoryNow();
+  flushHistoryOnExit();
   killAllAgyProcesses();
   process.exit(130);
 });
 process.on("SIGTERM", () => {
-  flushHistoryNow();
+  flushHistoryOnExit();
   killAllAgyProcesses();
   process.exit(143);
 });
@@ -1643,12 +1390,15 @@ function upsertHistoryConversation(conv, options = {}) {
     if (history.length > MAX_SERVER_HISTORY) history.splice(MAX_SERVER_HISTORY);
   }
 
+  dirtyConversationIds.add(next.id);
   writeHistory(history, options);
   return next;
 }
 
 function ensureHistoryConversation(id, { userText = "", sessionId: nextSessionId = null } = {}) {
   const convId = normalizeHistoryId(id);
+  // 调用方拿到会话对象后就会原地改它，所以在这里标记——多标无害，漏标会丢改动
+  dirtyConversationIds.add(convId);
   const history = readHistory();
   let conv = history.find(h => h.id === convId);
   if (!conv) {
@@ -3920,6 +3670,8 @@ const http = createServer((req, res) => {
     }
     if (method === "DELETE") {
       const history = readHistory().filter(h => h.id !== id);
+      // 磁盘上的删除只从这里发生——flush 不再按内存全集去删
+      shardStore.remove(id);
       writeHistory(history);
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
@@ -4009,6 +3761,17 @@ let activeForegroundDeliveryContext = null;
 let claudeRuntimeConversationId = null;
 let claudeAutoWakeOwner = null;
 let claudeAutoWakeOwnerTimer = null;
+
+/**
+ * 事件泵绑定的会话上下文。
+ *
+ * claudeRuntimeConversationId 这类模块级变量记的是「此刻」哪个会话在跑，
+ * 而 SDK 的子任务事件可能隔几秒才回来——那时全局早被下一个会话改写了。
+ * 把 context 绑在 runtime 的事件泵上，事件走到哪它跟到哪，不用回头猜。
+ * 单会话下两者取值相同；同时跑多个会话时，只有这个是对的。
+ * 传播行为见 agent-context.test.js。
+ */
+const agentContext = new AsyncLocalStorage();
 const taskEventOwners = new Map();
 const taskEventOwnerTimers = new Map();
 const TASK_EVENT_OWNER_TTL_MS = 5 * 60_000;
@@ -4039,6 +3802,20 @@ function acquireRestartLease() {
 }
 
 function currentAgentEventOwner() {
+  // 会话归属优先信事件泵绑定的 context：它跟着这条事件流走，异步子任务隔多久
+  // 回来都不会认错人。requestId 仍取当下的前台请求——一轮里 steering 会换
+  // requestId，「正在响应哪条用户消息」本来就该是此刻的值；但只有在前台请求
+  // 确实属于同一个会话时才认，否则宁可留空，也不能把别的会话的 id 贴上来。
+  const bound = agentContext.getStore();
+  if (bound?.conversationId) {
+    if (activeForegroundRequestId && activeForegroundConversationId === bound.conversationId) {
+      return { requestId: activeForegroundRequestId, conversationId: bound.conversationId };
+    }
+    if (claudeAutoWakeOwner?.conversationId === bound.conversationId) return claudeAutoWakeOwner;
+    return { requestId: null, conversationId: bound.conversationId };
+  }
+
+  // 没有绑定 context 的路径（微信通道、一次性 dispatch 等）维持原来的判断
   if (activeForegroundRequestId || activeForegroundConversationId) {
     return {
       requestId: activeForegroundRequestId,
@@ -4503,7 +4280,7 @@ async function handlePersistentClaudeError(error) {
       clearSession();
       const options = { ...recovery.options };
       delete options.resume;
-      claudePendingRecovery = { message, options, signature: recovery.signature };
+      claudePendingRecovery = { message, options, signature: recovery.signature, conversationId: recovery.conversationId };
       console.warn("[Web Agent] Thinking-signature error; recovering with text-injected history.");
       return;
     }
@@ -4523,7 +4300,7 @@ async function handlePersistentClaudeClose() {
   claudePendingRecovery = null;
   if (recovery) {
     try {
-      claudeRuntime.start(recovery.options);
+      claudeRuntime.start(recovery.options, { conversationId: recovery.conversationId ?? claudeRuntimeConversationId });
       claudeRuntimeSignature = recovery.signature;
       claudeRuntime.send(recovery.message);
       return;
@@ -4537,6 +4314,7 @@ async function handlePersistentClaudeClose() {
 }
 
 const claudeRuntime = new PersistentQueryRuntime({
+  contextStore: agentContext,
   queryFactory: query,
   onEvent: handlePersistentClaudeEvent,
   onError: handlePersistentClaudeError,
@@ -5645,6 +5423,7 @@ wss.on("connection", (ws) => {
       buildMessage: buildRecoveryMsg,
       options,
       signature: runtimeSignature,
+      conversationId: turnConversationId,
     };
 
     (async () => {
@@ -5666,7 +5445,7 @@ wss.on("connection", (ws) => {
 
         if (!claudeRuntime.started) {
           if (!isCurrentTurn()) return;
-          claudeRuntime.start(options);
+          claudeRuntime.start(options, { conversationId: turnConversationId });
           claudeRuntimeSignature = runtimeSignature;
           claudeRuntimeConversationId = turnConversationId;
         } else {
