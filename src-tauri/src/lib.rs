@@ -1551,8 +1551,16 @@ fn parse_git_status_entries(root: &Path, entries: &[String]) -> Vec<GitFileStatu
                 return None;
             }
 
+            // 未合并（冲突）路径的两个字符都非空且至少一个是 U，或是 AA/DD——
+            // 必须在普通 added/deleted 判断之前拦截，否则会被误标成"modified"，
+            // 导致带冲突标记的文本被当成正常改动提交推送出去。
+            let is_conflict =
+                code.len() == 2 && (code.contains('U') || code == "AA" || code == "DD");
+
             let (state, path) = if raw_path.contains(" -> ") {
                 ("renamed", raw_path.split(" -> ").last().unwrap_or(raw_path))
+            } else if is_conflict {
+                ("conflict", raw_path)
             } else if code == "??" || code.contains('A') {
                 ("added", raw_path)
             } else if code.contains('D') {
@@ -2304,8 +2312,266 @@ fn compute_git_status(path: &Path) -> Result<GitStatus, String> {
     })
 }
 
+/// 清掉上一次遗留的未完成 rebase/merge（比如老版本卡在 rebase 冲突里、或者上次
+/// 异常退出），保证每次 pull 前仓库处于可操作状态。冲突文件本身已经在
+/// pull 失败时被自动合并保留，这里只是防止仓库卡死，不会丢内容。
+fn abort_stale_merge(path: &Path) {
+    if path.join(".git/rebase-merge").exists() || path.join(".git/rebase-apply").exists() {
+        let _ = run_git(path, &["rebase", "--abort"]);
+    }
+    if path.join(".git/MERGE_HEAD").exists() {
+        let _ = run_git(path, &["merge", "--abort"]);
+    }
+}
+
+/// 冲突路径 + ours（stage 2）blob + theirs（stage 3）blob；某一侧为 None 表示该侧删除了这个文件。
+type ConflictEntry = (String, Option<String>, Option<String>);
+
+/// 列出未合并（冲突）路径及其 ours/theirs blob。
+fn list_conflicted_files(path: &Path) -> Result<Vec<ConflictEntry>, String> {
+    let out = run_git(path, &["ls-files", "-u"])?;
+    let mut result: Vec<ConflictEntry> = Vec::new();
+    for line in out.stdout.lines() {
+        let mut parts = line.splitn(2, '\t');
+        let meta = parts.next().unwrap_or("");
+        let Some(file) = parts.next().filter(|f| !f.is_empty()) else {
+            continue;
+        };
+        let mut cols = meta.split_whitespace();
+        let _mode = cols.next();
+        let blob = cols.next().unwrap_or("").to_string();
+        let stage = cols.next().unwrap_or("");
+        let rel_path = unquote_git_path(file).replace('\\', "/");
+
+        match result.iter_mut().find(|(p, _, _)| *p == rel_path) {
+            Some((_, ours, theirs)) => {
+                if stage == "2" {
+                    *ours = Some(blob);
+                } else if stage == "3" {
+                    *theirs = Some(blob);
+                }
+            }
+            None => {
+                let mut ours = None;
+                let mut theirs = None;
+                if stage == "2" {
+                    ours = Some(blob);
+                } else if stage == "3" {
+                    theirs = Some(blob);
+                }
+                result.push((rel_path, ours, theirs));
+            }
+        }
+    }
+    Ok(result)
+}
+
+/// 读取 git 对象的原始字节（不做 UTF-8 有损转换），保证图片等二进制冲突文件也能安全还原。
+fn run_git_bytes(path: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+    let _guard = GIT_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut command = Command::new("git");
+    command.arg("-C").arg(path);
+    command.arg("-c").arg("core.quotepath=false");
+    for arg in args {
+        command.arg(arg);
+    }
+    hide_command_window(&mut command);
+    let output = command.output().map_err(|err| err.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+    Ok(output.stdout)
+}
+
+/// 生成一个不会覆盖现有文件的冲突备份路径：与原笔记同目录，文件名带时间戳。
+fn conflict_backup_path(root: &Path, relative_path: &str) -> PathBuf {
+    let rel = relative_to_path_buf(relative_path);
+    let parent = rel.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    let stem = rel
+        .file_stem()
+        .and_then(OsStr::to_str)
+        .unwrap_or("笔记")
+        .to_string();
+    let ext = rel
+        .extension()
+        .and_then(OsStr::to_str)
+        .unwrap_or("")
+        .to_string();
+    let ts = format_unix_secs_utc(now_secs());
+
+    let mut counter = 0u32;
+    loop {
+        let suffix = if counter == 0 {
+            String::new()
+        } else {
+            format!(" ({})", counter + 1)
+        };
+        let file_name = if ext.is_empty() {
+            format!("{stem} (本地冲突备份 {ts}){suffix}")
+        } else {
+            format!("{stem} (本地冲突备份 {ts}){suffix}.{ext}")
+        };
+        let candidate_rel = parent.join(&file_name);
+        if !root.join(&candidate_rel).exists() {
+            return candidate_rel;
+        }
+        counter += 1;
+    }
+}
+
+fn write_conflict_backup(root: &Path, backup_rel: &Path, bytes: &[u8]) -> Result<(), String> {
+    let abs = root.join(backup_rel);
+    if let Some(parent) = abs.parent() {
+        fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    }
+    fs::write(abs, bytes).map_err(|err| err.to_string())
+}
+
+/// UTC 日期时间字符串（YYYYMMDD-HHMMSS），只用于生成人类可读的备份文件名，
+/// 没有引入额外的时间处理依赖。算法见 Howard Hinnant 的 civil_from_days。
+fn format_unix_secs_utc(secs: u64) -> String {
+    let days = (secs / 86400) as i64;
+    let rem = secs % 86400;
+    let (h, m, s) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    let (y, mo, d) = civil_from_days(days);
+    format!("{y:04}{mo:02}{d:02}-{h:02}{m:02}{s:02}")
+}
+
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}
+
+/// 云端和本地都改过同一批文件时的自动合并：以云端版本为准写回原路径，
+/// 本地版本（如果内容不同）另存成一份备份笔记，绝不静默丢弃任何一侧的内容。
+/// 这一步只有在 pull 真的产生了未合并路径时才会被调用。
+fn auto_resolve_merge_conflicts(
+    path: &Path,
+    conflicts: Vec<ConflictEntry>,
+) -> Result<String, String> {
+    if conflicts.is_empty() {
+        return Err("未找到冲突文件".to_string());
+    }
+
+    // 两种冲突来源的 ours/theirs 含义正好相反，必须先分清楚是哪一种：
+    //
+    // 1) 真正的分支合并冲突（存在 MERGE_HEAD）：ours=本地、theirs=云端，语义符合直觉。
+    // 2) pull 用的是 `--autostash`：如果 pull 本身是快进（没有需要合并的本地提交），
+    //    HEAD 会先快进到云端，冲突其实发生在"重新套用 autostash"这一步——这时
+    //    ls-files 报的 stage2(ours) 其实是已经快进过去的云端内容，stage3(theirs)
+    //    才是被重新套用、和云端冲突的本地暂存改动。这种情况下没有 MERGE_HEAD，
+    //    但会在 stash 列表里留一条记录，处理完要把它清掉，避免堆积。
+    let merging = path.join(".git").join("MERGE_HEAD").exists();
+    let stash_list = run_git(path, &["stash", "list"]).ok();
+    let has_autostash = stash_list
+        .as_ref()
+        .map(|out| {
+            out.stdout
+                .lines()
+                .next()
+                .unwrap_or("")
+                .to_lowercase()
+                .contains("autostash")
+        })
+        .unwrap_or(false);
+
+    let mut backups: Vec<String> = Vec::new();
+    for (rel_path, ours_blob, theirs_blob) in &conflicts {
+        let abs_path = path.join(relative_to_path_buf(rel_path));
+        let (cloud_blob, local_blob) = if merging {
+            (theirs_blob.clone(), ours_blob.clone())
+        } else {
+            (ours_blob.clone(), theirs_blob.clone())
+        };
+        match cloud_blob {
+            Some(cloud) => {
+                let cloud_bytes = run_git_bytes(path, &["cat-file", "-p", &cloud])?;
+                if let Some(local) = local_blob {
+                    let local_bytes = run_git_bytes(path, &["cat-file", "-p", &local])?;
+                    if local_bytes != cloud_bytes {
+                        let backup_rel = conflict_backup_path(path, rel_path);
+                        write_conflict_backup(path, &backup_rel, &local_bytes)?;
+                        backups.push(to_slash_path(&backup_rel));
+                    }
+                }
+                if let Some(parent) = abs_path.parent() {
+                    fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+                }
+                fs::write(&abs_path, &cloud_bytes).map_err(|err| err.to_string())?;
+            }
+            None => {
+                // 云端删除了这个文件：本地内容（如果还在）另存为备份，原路径跟随云端删除。
+                if let Some(local) = local_blob {
+                    let local_bytes = run_git_bytes(path, &["cat-file", "-p", &local])?;
+                    let backup_rel = conflict_backup_path(path, rel_path);
+                    write_conflict_backup(path, &backup_rel, &local_bytes)?;
+                    backups.push(to_slash_path(&backup_rel));
+                }
+                let _ = fs::remove_file(&abs_path);
+            }
+        }
+    }
+
+    let count = conflicts.len();
+    let commit_message = format!("自动合并：{count} 篇笔记本地与云端同时修改，已自动合并");
+    let commit = do_git_commit(path, &commit_message)?;
+    if !commit.success {
+        return Err(if commit.stderr.trim().is_empty() {
+            commit.stdout
+        } else {
+            commit.stderr
+        });
+    }
+
+    if has_autostash {
+        let _ = run_git(path, &["stash", "drop", "stash@{0}"]);
+    }
+
+    Ok(if backups.is_empty() {
+        format!("云端和本地有 {count} 篇笔记同时修改，内容一致，已自动合并。")
+    } else {
+        format!(
+            "云端和本地有 {count} 篇笔记同时修改，已自动合并并保留本地版本备份：{}",
+            backups.join("、")
+        )
+    })
+}
+
 fn do_git_pull(path: &Path) -> Result<GitOutput, String> {
-    run_git(path, &["pull", "--rebase", "--autostash"])
+    abort_stale_merge(path);
+    let pull = run_git(path, &["pull", "--no-rebase", "--autostash"])?;
+    let conflicts = list_conflicted_files(path)?;
+    if conflicts.is_empty() {
+        return Ok(pull);
+    }
+    match auto_resolve_merge_conflicts(path, conflicts) {
+        Ok(summary) => Ok(GitOutput {
+            success: true,
+            stdout: summary,
+            stderr: String::new(),
+            code: Some(0),
+        }),
+        Err(err) => {
+            abort_stale_merge(path);
+            Ok(GitOutput {
+                success: false,
+                stdout: pull.stdout,
+                stderr: format!("自动合并冲突失败：{err}；请检查磁盘空间或权限后重试"),
+                code: pull.code,
+            })
+        }
+    }
 }
 
 fn do_git_push(path: &Path) -> Result<GitOutput, String> {
@@ -2364,7 +2630,50 @@ struct SyncEvent {
     pulled_changes: bool,
     feedback: Option<String>,
     error: Option<String>,
+    /// network | auth | other，前端据此显示对应的人话文案，不再把原始 git 报错甩给用户
+    error_kind: Option<String>,
     status: Option<GitStatus>,
+}
+
+/// 把 git 的原始英文报错归类成前端能理解的粗粒度错误类型。
+/// 冲突已经在 do_git_pull 里自动合并掉了，这里只覆盖网络/鉴权/其它三类。
+fn classify_git_error(message: &str) -> &'static str {
+    let lower = message.to_lowercase();
+    const NETWORK_PATTERNS: &[&str] = &[
+        "could not resolve host",
+        "could not resolve proxy",
+        "failed to connect",
+        "connection timed out",
+        "connection refused",
+        "network is unreachable",
+        "recv failure",
+        "send failure",
+        "ssl connect error",
+        "operation timed out",
+        "could not connect to server",
+        "the requested url returned error: 5",
+    ];
+    const AUTH_PATTERNS: &[&str] = &[
+        "authentication failed",
+        "permission denied",
+        "could not read username",
+        "could not read password",
+        "invalid username or password",
+        "the requested url returned error: 401",
+        "the requested url returned error: 403",
+        "please make sure you have the correct access rights",
+        "terminal prompts disabled",
+    ];
+    if NETWORK_PATTERNS
+        .iter()
+        .any(|pattern| lower.contains(pattern))
+    {
+        "network"
+    } else if AUTH_PATTERNS.iter().any(|pattern| lower.contains(pattern)) {
+        "auth"
+    } else {
+        "other"
+    }
 }
 
 fn emit_sync(app: &AppHandle, event: SyncEvent) {
@@ -2381,6 +2690,9 @@ fn emit_sync_done(
     let status = persistent_vault_path(app)
         .and_then(|path| compute_git_status(&path))
         .ok();
+    let error_kind = error
+        .as_deref()
+        .map(|msg| classify_git_error(msg).to_string());
     emit_sync(
         app,
         SyncEvent {
@@ -2389,6 +2701,7 @@ fn emit_sync_done(
             pulled_changes: pulled,
             feedback,
             error,
+            error_kind,
             status,
         },
     );
@@ -2403,6 +2716,7 @@ fn emit_sync_phase(app: &AppHandle, phase: &str, kind: &str) {
             pulled_changes: false,
             feedback: None,
             error: None,
+            error_kind: None,
             status: None,
         },
     );
@@ -3026,5 +3340,177 @@ mod pasted_image_tests {
         assert!(directory.join(&second.name).is_file());
 
         fs::remove_dir_all(directory).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod sync_conflict_tests {
+    use super::*;
+
+    fn unique_dir(label: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("inkfellow-{label}-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn configure_identity(repo: &Path, name: &str) {
+        run_git(
+            repo,
+            &["config", "user.email", &format!("{name}@example.com")],
+        )
+        .unwrap();
+        run_git(repo, &["config", "user.name", name]).unwrap();
+        // 关掉本机全局的 autocrlf，避免测试断言被行尾转换干扰（生产逻辑本身不关心行尾）。
+        run_git(repo, &["config", "core.autocrlf", "false"]).unwrap();
+    }
+
+    /// 建一个裸仓库当云端，克隆出两个工作区 a/b，模拟两台设备各自同步。
+    fn setup_remote_pair() -> (PathBuf, PathBuf, PathBuf) {
+        let base = unique_dir("sync-conflict");
+        let remote = base.join("remote");
+        let a = base.join("a");
+        fs::create_dir_all(&remote).unwrap();
+        fs::create_dir_all(&a).unwrap();
+
+        run_git(&remote, &["init", "--bare"]).unwrap();
+        run_git(&a, &["init"]).unwrap();
+        run_git(&a, &["checkout", "-b", "master"]).unwrap();
+        configure_identity(&a, "device-a");
+        run_git(&a, &["remote", "add", "origin", remote.to_str().unwrap()]).unwrap();
+        fs::write(a.join("note.md"), "line1\nline2\n").unwrap();
+        run_git(&a, &["add", "-A"]).unwrap();
+        run_git(&a, &["commit", "-m", "init"]).unwrap();
+        run_git(&a, &["push", "-u", "origin", "master"]).unwrap();
+
+        let b = base.join("b");
+        // 关键：autocrlf=false 必须在 clone 的时候就生效（用 -c 传给 clone 本身），
+        // 不然本机全局 autocrlf=true 会在首次检出时把工作区转成 CRLF，
+        // 而索引里存的还是 LF——两者不一致会被 git 当成"脏改"，
+        // 导致后面的 pull 无中生有触发一次假冲突，干扰测试断言。
+        let clone_output = Command::new("git")
+            .arg("-c")
+            .arg("core.autocrlf=false")
+            .arg("clone")
+            .arg("-b")
+            .arg("master")
+            .arg(&remote)
+            .arg(&b)
+            .output()
+            .unwrap();
+        assert!(clone_output.status.success());
+        configure_identity(&b, "device-b");
+
+        (base, a, b)
+    }
+
+    #[test]
+    fn auto_resolves_dirty_pull_conflict_without_losing_either_side() {
+        // 复现真实场景：本地笔记还没提交就被改动，这时触发同步——commitPush 任务
+        // 会先 pull（工作区是脏的），如果远端也改了同一处，autostash 重新套用时
+        // 会冲突，且 `git pull` 本身可能仍然返回成功退出码。回归前，这种冲突文本
+        // 会被当成正常内容直接 commit + push，污染笔记内容。
+        let (base, a, b) = setup_remote_pair();
+
+        fs::write(a.join("note.md"), "line1 EDITED BY A\nline2\n").unwrap();
+        run_git(&a, &["add", "-A"]).unwrap();
+        run_git(&a, &["commit", "-m", "A edits"]).unwrap();
+        run_git(&a, &["push", "origin", "master"]).unwrap();
+
+        // b 端：脏改（不提交），随后触发同步引擎实际使用的 do_git_pull。
+        fs::write(&b.join("note.md"), "line1\nline2 EDITED BY B UNCOMMITTED\n").unwrap();
+
+        let result = do_git_pull(&b).unwrap();
+        assert!(
+            result.success,
+            "pull should self-heal instead of failing: {:?}",
+            result.stderr
+        );
+
+        // 冲突标记不能出现在最终文件里。
+        let final_content = fs::read_to_string(b.join("note.md")).unwrap();
+        assert!(!final_content.contains("<<<<<<<"));
+        assert!(!final_content.contains(">>>>>>>"));
+        assert_eq!(final_content, "line1 EDITED BY A\nline2\n");
+
+        // 本地版本必须被保留成一份备份笔记，而不是静默丢弃。
+        let backup = fs::read_dir(&b)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .find(|entry| entry.file_name().to_string_lossy().contains("本地冲突备份"))
+            .expect("local version should be preserved as a backup file");
+        let backup_content = fs::read_to_string(backup.path()).unwrap();
+        assert_eq!(backup_content, "line1\nline2 EDITED BY B UNCOMMITTED\n");
+
+        // 仓库必须回到干净、可继续同步的状态：没有残留 stash，没有未合并路径。
+        let conflicts = list_conflicted_files(&b).unwrap();
+        assert!(conflicts.is_empty());
+        let stash = run_git(&b, &["stash", "list"]).unwrap();
+        assert!(stash.stdout.trim().is_empty());
+
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn auto_resolves_true_merge_conflict_between_two_committed_histories() {
+        // 和上一条不同：这里两边都已经提交（分叉历史），pull 走的是真正的
+        // 分支合并（会留下 MERGE_HEAD），ours/theirs 的含义和 autostash 场景相反，
+        // 用来锁定 auto_resolve_merge_conflicts 里那个按 MERGE_HEAD 分支的判断没写反。
+        let (base, a, b) = setup_remote_pair();
+
+        fs::write(a.join("note.md"), "line1 EDITED BY A\nline2\n").unwrap();
+        run_git(&a, &["add", "-A"]).unwrap();
+        run_git(&a, &["commit", "-m", "A edits"]).unwrap();
+        run_git(&a, &["push", "origin", "master"]).unwrap();
+
+        // b 端提交了自己的改动（不是脏改），造成分叉历史 -> 真正的合并冲突。
+        fs::write(b.join("note.md"), "line1\nline2 EDITED BY B COMMITTED\n").unwrap();
+        run_git(&b, &["add", "-A"]).unwrap();
+        run_git(&b, &["commit", "-m", "B edits"]).unwrap();
+
+        let result = do_git_pull(&b).unwrap();
+        assert!(
+            result.success,
+            "pull should self-heal instead of failing: {:?}",
+            result.stderr
+        );
+
+        let final_content = fs::read_to_string(b.join("note.md")).unwrap();
+        assert!(!final_content.contains("<<<<<<<"));
+        assert_eq!(final_content, "line1 EDITED BY A\nline2\n");
+
+        let backup = fs::read_dir(&b)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .find(|entry| entry.file_name().to_string_lossy().contains("本地冲突备份"))
+            .expect("local version should be preserved as a backup file");
+        assert_eq!(
+            fs::read_to_string(backup.path()).unwrap(),
+            "line1\nline2 EDITED BY B COMMITTED\n"
+        );
+
+        assert!(list_conflicted_files(&b).unwrap().is_empty());
+        assert!(!b.join(".git").join("MERGE_HEAD").exists());
+
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn pull_without_conflict_still_succeeds_normally() {
+        let (base, a, b) = setup_remote_pair();
+
+        fs::write(a.join("note.md"), "line1 EDITED BY A\nline2\n").unwrap();
+        run_git(&a, &["add", "-A"]).unwrap();
+        run_git(&a, &["commit", "-m", "A edits"]).unwrap();
+        run_git(&a, &["push", "origin", "master"]).unwrap();
+
+        let result = do_git_pull(&b).unwrap();
+        assert!(result.success);
+        assert_eq!(
+            fs::read_to_string(b.join("note.md")).unwrap(),
+            "line1 EDITED BY A\nline2\n"
+        );
+
+        fs::remove_dir_all(base).unwrap();
     }
 }

@@ -46,6 +46,8 @@ const state = {
   gitPane: "main",
   gitFeedback: null,
   gitFeedbackError: false,
+  // 最近一次同步动作的失败分类（network/auth/other），同步成功后清空；驱动状态点变红与提示文案
+  gitLastErrorKind: null,
   gitMessage: "",
   gitEditingMessage: false,
   gitBusy: false,
@@ -2989,7 +2991,11 @@ async function openMarkdownFromShell(absolutePath) {
     await loadNote(result.path, { note: result.note });
     showToast(`已打开 ${result.path.split("/").pop()}`);
     requestAnimationFrame(() => {
-      void waitForAgent();
+      // 只有 agent iframe 从没起过（比如双击 .md 冷启动整个 app）才需要 waitForAgent
+      // 去设 frame.src。它已经连上时再调，会把 iframe 整个重新加载一遍，正在跑的
+      // 对话直接被清空——单实例复用时（app 已经开着，双击/外部程序打开 .md 走
+      // file association 转发到这个已有窗口）就是这么把 AI 面板炸空的。
+      if (!state.agentReady) void waitForAgent();
       const backgroundTasks = [refreshGitStatus()];
       if (rootChanged) backgroundTasks.push(loadTree(false));
       void Promise.allSettled(backgroundTasks).then((outcomes) => {
@@ -3208,6 +3214,8 @@ function gitStateLabel(value, kind) {
     added: "新笔记",
     deleted: "已删除",
     renamed: "重命名",
+    // 正常情况下冲突已经在同步时自动合并掉了，这里只是极端情况下的兜底提示
+    conflict: "冲突，点击「立即同步」自动合并",
   }[value] || "已修改";
 }
 
@@ -3217,6 +3225,7 @@ function gitStateDotClass(value) {
     added: "gitStateDotAdded",
     deleted: "gitStateDotDeleted",
     renamed: "gitStateDotModified",
+    conflict: "gitStateDotConflict",
   }[value] || "gitStateDotModified";
 }
 
@@ -3256,8 +3265,11 @@ function renderGitStatusUI() {
 
   const files = st.files || [];
   const synced = files.length === 0 && st.ahead === 0 && st.behind === 0;
-  dot.className = "sidebarGitDot" + (synced ? " sidebarGitDotSynced" : "");
-  if (synced) {
+  const errorHint = state.gitLastErrorKind && gitErrorHint(state.gitLastErrorKind);
+  dot.className = "sidebarGitDot" + (errorHint ? " sidebarGitDotError" : synced ? " sidebarGitDotSynced" : "");
+  if (errorHint) {
+    label.textContent = errorHint;
+  } else if (synced) {
     label.textContent = "已同步到云端";
   } else if (files.length === 0 && st.behind > 0) {
     label.textContent = `远端有 ${st.behind} 个新版本`;
@@ -3386,21 +3398,37 @@ async function initSyncEvents() {
     // idle：一次同步动作结束
     dot.classList.remove("sidebarGitDotPulsing");
     state.gitBusy = false;
+
+    // 先落地这次的错误分类，renderGitStatusUI 才能同步显示红点
+    const previousErrorKind = state.gitLastErrorKind;
+    state.gitLastErrorKind = payload.error ? (payload.errorKind || "other") : null;
+
     if (payload.status) {
       state.gitStatus = payload.status;
+      renderGitStatusUI();
+    } else if (payload.error) {
       renderGitStatusUI();
     }
 
     if (payload.kind === "commitPush") {
       if (payload.error) {
-        showGitFeedback(payload.error, true);
+        showGitFeedback(gitErrorFriendlyMessage(state.gitLastErrorKind, payload.error), true);
       } else {
         state.gitMessage = "";
         state.gitEditingMessage = false;
         showGitFeedback(payload.feedback || "已同步。");
       }
     }
-    // 自动 pull 失败保持静默：圆点黄色已经在 renderGitStatusUI 中体现
+    // 自动 pull 失败大多保持静默（网络抖动会自动退避重试）；圆点变红已经在
+    // renderGitStatusUI 中体现。但鉴权失败不会靠重试自愈，这里边缘触发提示一次。
+    if (
+      payload.kind === "pull" &&
+      payload.error &&
+      state.gitLastErrorKind === "auth" &&
+      previousErrorKind !== "auth"
+    ) {
+      showToast("云端鉴权失败，需要重新登录这台设备的 Git");
+    }
 
     if (payload.pulledChanges) {
       showToast("已获取云端更新");
@@ -3408,6 +3436,30 @@ async function initSyncEvents() {
       if (state.gitPane === "history") await openGitHistory();
     }
   });
+}
+
+function gitErrorFriendlyMessage(kind, raw) {
+  switch (kind) {
+    case "network":
+      return "网络不稳定，同步失败了，请检查网络后重试。";
+    case "auth":
+      return "云端仓库鉴权失败，请检查这台设备的 Git 登录状态。";
+    default:
+      return raw || "同步失败，请重试。";
+  }
+}
+
+function gitErrorHint(kind) {
+  switch (kind) {
+    case "network":
+      return "网络不稳定，稍后会自动重试";
+    case "auth":
+      return "云端鉴权失败，需要重新登录";
+    case "other":
+      return "同步遇到问题，可点击重试";
+    default:
+      return null;
+  }
 }
 
 function showGitFeedback(msg, isError = false) {
@@ -3505,17 +3557,20 @@ function renderGitQuickPopover() {
   const files = st?.files || [];
   const initialized = st ? st.initialized !== false : null;
   const synced = initialized === true && files.length === 0 && st.ahead === 0 && st.behind === 0;
+  const errorHint = initialized === true && state.gitLastErrorKind && gitErrorHint(state.gitLastErrorKind);
   const statusLabel = !st
     ? "正在检查..."
     : !initialized
       ? "尚未初始化同步"
-      : synced
-        ? "已同步到云端"
-        : files.length
-          ? `${files.length} 篇待同步`
-          : st.behind > 0
-            ? `远端有 ${st.behind} 个新版本`
-            : `${st.ahead || 0} 篇待同步`;
+      : errorHint
+        ? errorHint
+        : synced
+          ? "已同步到云端"
+          : files.length
+            ? `${files.length} 篇待同步`
+            : st.behind > 0
+              ? `远端有 ${st.behind} 个新版本`
+              : `${st.ahead || 0} 篇待同步`;
   const detailLabel = st?.lastSync
     ? `上次同步 ${formatLastSync(st.lastSync)}`
     : st?.branch || "";
@@ -3523,7 +3578,7 @@ function renderGitQuickPopover() {
 
   content.innerHTML = `
     <div class="gitQuickStatus">
-      <span class="gitQuickStatusDot ${synced ? "gitQuickStatusDotSynced" : ""} ${state.gitBusy ? "gitQuickStatusDotBusy" : ""}"></span>
+      <span class="gitQuickStatusDot ${errorHint ? "gitQuickStatusDotError" : synced ? "gitQuickStatusDotSynced" : ""} ${state.gitBusy ? "gitQuickStatusDotBusy" : ""}"></span>
       <div class="gitQuickStatusText">
         <strong>${escapeHtml(statusLabel)}</strong>
         ${detailLabel ? `<span>${escapeHtml(detailLabel)}</span>` : ""}
@@ -3580,7 +3635,9 @@ function renderGitMainPane(st, files, initialized, synced) {
         ? "已是最新版本"
         : `${files.length} 篇笔记待同步`;
   // 分支、云端状态、上次同步合成一行副标题，底部只留操作
+  const errorHint = initialized && state.gitLastErrorKind && gitErrorHint(state.gitLastErrorKind);
   const subParts = [];
+  if (errorHint) subParts.push(errorHint);
   if (st?.behind > 0) subParts.push("云端有新更新");
   if (st?.branch) subParts.push(st.branch);
   if (st?.lastSync) subParts.push(`上次同步 ${formatLastSync(st.lastSync)}`);
@@ -3588,7 +3645,7 @@ function renderGitMainPane(st, files, initialized, synced) {
   return `
     <div class="gitStatusBar">
       <div class="gitStatusLeft">
-        <span class="gitStatusDot ${synced ? "gitStatusDotSynced" : ""} ${state.gitBusy ? "gitStatusDotPulsing" : ""}"></span>
+        <span class="gitStatusDot ${errorHint ? "gitStatusDotError" : synced ? "gitStatusDotSynced" : ""} ${state.gitBusy ? "gitStatusDotPulsing" : ""}"></span>
         <div class="gitStatusText">
           <div class="gitStatusLabel">${escapeHtml(statusLabel)}</div>
           <div class="gitStatusSubLabel">${escapeHtml(subParts.join(" · "))}</div>

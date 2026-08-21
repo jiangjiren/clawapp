@@ -965,6 +965,7 @@ input, textarea { font-family: inherit; }
 }
 
 .sidebarGitDotSynced { background: #34c759 !important; }
+.sidebarGitDotError { background: #ff453a !important; }
 
 .sidebarGitDotPulsing {
   animation: gitPulse 1s ease-in-out infinite;
@@ -2601,6 +2602,11 @@ input, textarea { font-family: inherit; }
   box-shadow: 0 0 0 4px rgba(52, 199, 89, 0.12);
 }
 
+.gitQuickStatusDotError {
+  background: #ff453a;
+  box-shadow: 0 0 0 4px rgba(255, 69, 58, 0.12);
+}
+
 .gitQuickStatusDotBusy { animation: gitPulse 1s ease-in-out infinite; }
 
 .gitQuickStatusText {
@@ -3296,6 +3302,11 @@ input, textarea { font-family: inherit; }
   box-shadow: 0 0 0 3.5px rgba(52, 199, 89, 0.14);
 }
 
+.gitStatusDotError {
+  background: #ff453a;
+  box-shadow: 0 0 0 3.5px rgba(255, 69, 58, 0.14);
+}
+
 .gitStatusDotPulsing {
   animation: gitPulse 1s ease-in-out infinite;
 }
@@ -3446,6 +3457,10 @@ input, textarea { font-family: inherit; }
 
 .gitStateDotR {
   background: #a855f7;
+}
+
+.gitStateDotConflict {
+  background: #ff453a;
 }
 
 .gitFileInfo {
