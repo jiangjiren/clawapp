@@ -1073,31 +1073,6 @@ html, body {
 #send[data-action="stop"] #icon-send { display: none; }
 #send[data-action="stop"] #icon-stop { display: block; }
 
-/* 停止真正的归属地：正在生成的那条回答本身。
-   跟着消息流走，指向它作用的对象，而不是常驻在工具栏里。 */
-.inline-stop {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  margin-left: 6px;
-  padding: 1px 7px 1px 6px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: transparent;
-  color: var(--text-dim);
-  font-family: inherit;
-  font-size: 10px;
-  line-height: 1.5;
-  cursor: pointer;
-  opacity: 0.85;
-  transition: opacity 0.15s, color 0.15s, border-color 0.15s, background 0.15s, transform 0.1s;
-}
-.inline-stop svg { flex-shrink: 0; }
-.inline-stop:not(:disabled):hover { opacity: 1; color: var(--text); border-color: var(--border-strong); background: var(--bg3); }
-.inline-stop:not(:disabled):active { transform: scale(0.96); }
-.inline-stop:disabled { opacity: 0.35; cursor: default; }
-.inline-stop[hidden] { display: none; }
-
 #messages::-webkit-scrollbar { width: 5px; }
 #messages::-webkit-scrollbar-track { background: transparent; }
 #messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
@@ -2722,7 +2697,7 @@ const authFormStatusEl = document.getElementById("auth-form-status");
    steer 生成中 + 有草稿  → 追加到当前任务（steering）
    stop  生成中 + 无草稿  → 停止（此刻本来就没东西可发，改成 accent 实心的
                             "发送"只会得到一个点了没反应的按钮）
-   停止的另外两个入口：正在生成那条回答上的 .inline-stop，以及 Esc。 */
+   生成中想停、但输入框里已经有草稿时，主按钮是"追加"——那种情况按 Esc。 */
 function stopActionState() {
   const socketReady = Boolean(ws && ws.readyState === WebSocket.OPEN);
   // 停止请求已送达、正在等服务端收尾 —— 再点一次没有意义
@@ -2752,7 +2727,6 @@ function syncComposerAction() {
     sendBtn.setAttribute("aria-label", label);
     sendBtn.title = `${label}（Enter）`;
   }
-  syncInlineStops();
 }
 
 function showInlineError(text) {
@@ -4114,10 +4088,9 @@ function applyToolFailuresFromBlocks(body, blocks) {
   }
 }
 
-/* 在跑就必须有一个进行中指示器 —— 它同时是那一轮的就地停止入口。
-   各条渲染路径各自去建太容易漏：新一轮沿用上一条 assistant 气泡时，
-   typing 不会重建、chip 也没人创建，于是会出现一段"明明在跑、却找不到停止"的空窗。
-   这条不变量在这里收口。 */
+/* 在跑就必须有一个进行中指示器。各条渲染路径各自去建太容易漏：新一轮沿用
+   上一条 assistant 气泡时，typing 不会重建、chip 也没人创建，于是会出现一段
+   "明明在跑、界面上却看不出来"的空窗。这条不变量在这里收口。 */
 function ensureProgressIndicator() {
   if (!isGenerating) return;
   if (document.getElementById("typing") || genChipEl) return;
@@ -4905,8 +4878,8 @@ class SquadCard {
     if (this.el) return;
     this.ensureBlock();
     if (!assistantEl) { removeTyping(); assistantEl = addMessage("assistant", ""); }
-    // typing 一走，进行中指示器（连带它身上的停止入口）必须立刻接上，否则会出现
-    // 一段"正在跑、但消息流里找不到停止"的空窗
+    // typing 一走，进行中指示器必须立刻接上，否则会出现一段
+    // "正在跑、但消息流里看不出在跑"的空窗
     if (!genChipEl && isGenerating) showGenChip("");
     const body = assistantEl.querySelector(".msg-body");
     body.appendChild(this.render());
@@ -6198,33 +6171,12 @@ function makeSearchResultBlock(block) {
 
 /* 进行中的指示器（typing / gen-chip）自带停止入口。停止属于"这条正在生成的回答"，
    把它挂在这里，输入区就不用为一个偶尔才需要的动作常驻第二个按钮。 */
-const INLINE_STOP_HTML = `<button type="button" class="inline-stop" aria-label="停止当前回答" title="停止当前回答（Esc）">`
-  + `<svg width="7" height="7" viewBox="0 0 8 8" fill="none" aria-hidden="true"><rect x="0.5" y="0.5" width="7" height="7" rx="1.2" fill="currentColor"/></svg>`
-  + `停止</button>`;
-
-function syncInlineStops() {
-  const { socketReady, stopping } = stopActionState();
-  // 正在停止时 gen-chip 的文案已经在说"正在停止..."，再留一个按钮是重复的
-  const visible = isGenerating && !stopping;
-  /* 流式输出时这个函数跟着每个事件跑，所以定向取两个已知位置，
-     不在整条消息流（可能上千个节点）里扫 class */
-  for (const btn of [
-    document.getElementById("typing")?.querySelector(".inline-stop"),
-    genChipEl?.querySelector(".inline-stop"),
-  ]) {
-    if (!btn) continue;
-    btn.hidden = !visible;
-    btn.disabled = !socketReady;
-  }
-}
-
 function addTyping() {
   removeTyping();
   const el = document.createElement("div");
   el.id = "typing"; el.className = "msg";
-  el.innerHTML = `<div class="typing"><span></span><span></span><span></span><small class="typing-status"></small>${INLINE_STOP_HTML}</div>`;
+  el.innerHTML = `<div class="typing"><span></span><span></span><span></span><small class="typing-status"></small></div>`;
   messagesEl.appendChild(el); scrollBottom();
-  syncInlineStops();
 }
 function removeTyping() { document.getElementById("typing")?.remove(); }
 
@@ -6232,17 +6184,15 @@ function showGenChip(text) {
   if (!genChipEl) {
     genChipEl = document.createElement("div");
     genChipEl.className = "gen-chip";
-    genChipEl.innerHTML = `<span class="gen-chip-dot"></span><span class="gen-chip-label"></span>${INLINE_STOP_HTML}`;
+    genChipEl.innerHTML = `<span class="gen-chip-dot"></span><span class="gen-chip-label"></span>`;
   }
   genChipEl.querySelector(".gen-chip-label").textContent = text || "";
   reanchorGenChip();
-  syncInlineStops();
 }
 function updateGenChip(text) {
   if (!genChipEl) return;
   genChipEl.querySelector(".gen-chip-label").textContent = text || "";
   reanchorGenChip();
-  syncInlineStops();
 }
 function reanchorGenChip() {
   if (!genChipEl || !assistantEl) return;
@@ -7537,14 +7487,7 @@ sendBtn.addEventListener("click", () => {
   if (composerAction() === "stop") sendStopRequest();
   else send();
 });
-/* typing / gen-chip 里的停止按钮是随消息流动态生成的，走委托 */
 messagesEl.addEventListener("click", (e) => {
-  const btn = e.target.closest?.(".inline-stop");
-  if (btn && !btn.disabled) {
-    if (stopRequested && !stopResendPending) return;
-    sendStopRequest();
-    return;
-  }
   // AI 提到本地文件时会写成 markdown 链接，marked 原样把路径塞进 href——
   // 那从来不是能在 webview 里跳转的 URL，http(s)/mailto/tel 之外一律当本地路径拦下来，
   // 转发到后端用系统默认程序打开（等价于双击这个文件）。
