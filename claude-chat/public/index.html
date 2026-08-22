@@ -1080,6 +1080,118 @@ html, body {
 #slash-popup::-webkit-scrollbar-track { background: transparent; }
 #slash-popup::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 
+/* ── 会话切换器 ────────────────────────────────────────────
+   多开之后最费劲的不是「切不过去」，是「不知道自己在哪个对话里」。
+   所以这里始终显示当前对话名，点一下才展开列表——展开的也只有最近这几个，
+   一年前的 140 个对话仍然归历史抽屉管。 */
+.session-switcher {
+  position: relative;
+  margin-right: auto;          /* header 是 flex-end，靠这个占住左侧 */
+  min-width: 0;
+  max-width: 55%;
+}
+.session-switcher-btn {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 4px 7px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.session-switcher-btn:hover { background: var(--bg3); }
+.session-switcher-btn[aria-expanded="true"] { background: var(--bg3); }
+#session-switcher-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.session-switcher-chevron { flex-shrink: 0; opacity: 0.5; }
+#session-switcher-badge[hidden] { display: none; }
+/* 按钮里的状态点不需要右边距——它紧挨着标题 */
+.session-switcher-btn .session-badge { margin-right: 0; }
+
+.session-switcher-menu {
+  position: absolute;
+  top: calc(100% + 5px);
+  left: 0;
+  z-index: 60;
+  min-width: 240px;
+  /* 面板窄的时候（桌面端默认 400px）菜单不能顶出去 */
+  max-width: min(340px, calc(100vw - 24px));
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.16);
+}
+.session-switcher-menu[hidden] { display: none; }
+.switcher-item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 7px 8px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.switcher-item:hover { background: var(--bg3); }
+.switcher-item.current { background: var(--bg3); }
+.switcher-item-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.switcher-item-note {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.switcher-item-key {
+  flex-shrink: 0;
+  min-width: 15px;
+  font-size: 10px;
+  color: var(--text-dim);
+  text-align: right;
+  opacity: 0.7;
+}
+.switcher-divider {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border);
+}
+.switcher-all {
+  display: block;
+  width: 100%;
+  padding: 7px 8px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.switcher-all:hover { background: var(--bg3); color: var(--text); }
+
 /* ── 多开：会话状态点 ──────────────────────────────────────
    三档状态，抢注意力的程度依次递减：
      awaiting  在等你回话，它卡住了 —— 用醒目色 + 呼吸
@@ -2367,6 +2479,18 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
     <button id="btn-collapse-desktop-panel" class="header-btn" type="button" title="收起 Fellow 侧边栏" aria-label="收起 Fellow 侧边栏" hidden>
       <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7 7 5 5-5 5"/><path d="m12 7 5 5-5 5"/></svg>
     </button>
+    <div id="session-switcher" class="session-switcher">
+    <button id="btn-session-switcher" class="session-switcher-btn" type="button"
+    aria-expanded="false" aria-haspopup="menu" title="切换对话（Ctrl+Tab 来回切，Ctrl+1..9 直达）">
+    <span id="session-switcher-badge" class="session-badge" hidden></span>
+    <span id="session-switcher-title">新对话</span>
+    <svg class="session-switcher-chevron" viewBox="0 0 24 24" width="12" height="12" fill="none"
+    stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="m6 9 6 6 6-6"/>
+    </svg>
+    </button>
+    <div id="session-switcher-menu" class="session-switcher-menu" role="menu" hidden></div>
+    </div>
     <div id="header-actions">
       <button id="btn-settings" class="header-btn" title="账号设置" aria-label="账号设置">
         <svg width="17" height="17" viewBox="3 3 18 18" fill="currentColor" aria-hidden="true">
@@ -7899,6 +8023,7 @@ function renderSessionBadges() {
     badge.title = sessionBadgeTitle(state);
   });
   renderRunningRail();
+  renderSessionSwitcher();
 }
 
 /* 顶部只放「正在跑的」——面板窄的时候（桌面端默认 400px）放不下常驻会话栏，
@@ -7926,6 +8051,164 @@ document.getElementById("running-rail")?.addEventListener("click", async (e) => 
   const id = dot.dataset.id;
   const conv = _historyCache?.find(h => h.id === id) ?? { id };
   await loadConversation(conv);
+});
+
+/* ══════════════════════════════════════════════════════════
+   会话切换器
+   多开之后真正费劲的不是「切不过去」，是「不知道自己在哪个对话里」。
+   所以按钮上始终显示当前对话名；点开的列表也只放最近这几个，
+   一年多攒下的 140 个仍然归历史抽屉管——那是归档，不是工作区。
+
+   排序按最近用过（MRU），不是按时间倒序：你刚从 A 切到 B，想切回 A 时
+   它就该在第一个，而不是沉到某个按创建时间排的位置里。
+   ══════════════════════════════════════════════════════════ */
+const SWITCHER_MAX_ITEMS = 8;
+// 快捷键标注按平台走：Windows 上写 ⌘ 没人认得
+const MOD_LABEL = /mac|iphone|ipad/i.test(navigator.userAgentData?.platform || navigator.platform || "")
+  ? "⌘" : "Ctrl+";
+const recentConvIds = [];
+
+function touchRecentConversation(id) {
+  if (!id) return;
+  const at = recentConvIds.indexOf(id);
+  if (at >= 0) recentConvIds.splice(at, 1);
+  recentConvIds.unshift(id);
+  if (recentConvIds.length > 30) recentConvIds.length = 30;
+}
+
+function convTitleOf(id) {
+  if (!id) return "新对话";
+  return _historyCache?.find(h => h.id === id)?.title || "对话";
+}
+
+/** 切换器里该列哪些对话：活跃的排前面，其余按最近用过补齐。 */
+function switcherEntries() {
+  const active = [...sessionsAwaiting, ...sessionsRunning, ...sessionUnread];
+  const ordered = [];
+  for (const id of [...active, ...recentConvIds]) {
+    if (id && !ordered.includes(id)) ordered.push(id);
+  }
+  if (currentConvId && !ordered.includes(currentConvId)) ordered.unshift(currentConvId);
+  return ordered.slice(0, SWITCHER_MAX_ITEMS);
+}
+
+function switcherNoteOf(id) {
+  const state = sessionBadgeState(id);
+  if (state === "awaiting") return "等你回话";
+  if (state === "running") return "正在跑";
+  if (state === "unread") return "刚完成";
+  return "";
+}
+
+function renderSessionSwitcher() {
+  const titleEl = document.getElementById("session-switcher-title");
+  const badgeEl = document.getElementById("session-switcher-badge");
+  if (!titleEl || !badgeEl) return;
+  titleEl.textContent = currentConvId ? convTitleOf(currentConvId) : "新对话";
+  const state = currentConvId ? sessionBadgeState(currentConvId) : "";
+  if (state) { badgeEl.dataset.state = state; badgeEl.hidden = false; }
+  else { badgeEl.hidden = true; }
+}
+
+function renderSwitcherMenu() {
+  const menu = document.getElementById("session-switcher-menu");
+  if (!menu) return;
+  const ids = switcherEntries();
+  const total = _historyCache?.length ?? 0;
+  const rows = ids.map((id, index) => {
+    const state = sessionBadgeState(id);
+    const note = switcherNoteOf(id);
+    const isCurrent = id === currentConvId;
+    return `<button type="button" class="switcher-item${isCurrent ? " current" : ""}" role="menuitem" data-id="${esc(id)}">
+      ${state ? `<span class="session-badge" data-state="${state}"></span>` : `<span class="session-badge" style="background:transparent"></span>`}
+      <span class="switcher-item-title">${esc(convTitleOf(id))}</span>
+      ${note ? `<span class="switcher-item-note">${note}</span>` : ""}
+      <span class="switcher-item-key">${index < 9 ? MOD_LABEL + (index + 1) : ""}</span>
+    </button>`;
+  }).join("");
+  menu.innerHTML = (rows || `<div class="switcher-all" style="cursor:default">还没有别的对话</div>`)
+    + `<div class="switcher-divider"></div>`
+    + `<button type="button" class="switcher-all" data-open-history="1">查看全部 ${total || ""} 个对话 →</button>`;
+}
+
+function openSwitcher() {
+  const menu = document.getElementById("session-switcher-menu");
+  const btn = document.getElementById("btn-session-switcher");
+  if (!menu || !btn) return;
+  renderSwitcherMenu();
+  menu.hidden = false;
+  btn.setAttribute("aria-expanded", "true");
+}
+
+function closeSwitcher() {
+  const menu = document.getElementById("session-switcher-menu");
+  const btn = document.getElementById("btn-session-switcher");
+  if (!menu || !btn) return;
+  menu.hidden = true;
+  btn.setAttribute("aria-expanded", "false");
+}
+
+function switcherIsOpen() {
+  return document.getElementById("session-switcher-menu")?.hidden === false;
+}
+
+/** 切到某个对话；列表里只有 id 时从缓存补出完整记录。 */
+async function switchToConversation(id) {
+  if (!id || id === currentConvId) { closeSwitcher(); return; }
+  closeSwitcher();
+  const conv = _historyCache?.find(h => h.id === id) ?? { id };
+  await loadConversation(conv);
+}
+
+document.getElementById("btn-session-switcher")?.addEventListener("click", (e) => {
+  e.stopPropagation();
+  if (switcherIsOpen()) closeSwitcher(); else openSwitcher();
+});
+
+document.getElementById("session-switcher-menu")?.addEventListener("click", async (e) => {
+  if (e.target.closest?.("[data-open-history]")) {
+    closeSwitcher();
+    await openHistoryPanel();
+    return;
+  }
+  const item = e.target.closest?.(".switcher-item");
+  if (item) await switchToConversation(item.dataset.id);
+});
+
+document.addEventListener("click", (e) => {
+  if (!switcherIsOpen()) return;
+  if (e.target.closest?.("#session-switcher")) return;
+  closeSwitcher();
+});
+
+/* 快捷键。挂在这个页面上就够了——聊天本来就在这个 iframe 里，
+   要切对话的时候焦点几乎总在这儿。 */
+document.addEventListener("keydown", (e) => {
+  if (e.isComposing) return;
+  const mod = e.metaKey || e.ctrlKey;
+
+  if (e.key === "Escape" && switcherIsOpen()) {
+    e.preventDefault();
+    closeSwitcher();
+    return;
+  }
+
+  // Ctrl/⌘ + Tab：在最近两个之间来回切。开着好几个时，来回对照是最常见的动作
+  if (mod && e.key === "Tab") {
+    const previous = recentConvIds.find(id => id !== currentConvId);
+    if (!previous) return;
+    e.preventDefault();
+    void switchToConversation(previous);
+    return;
+  }
+
+  // Ctrl/⌘ + 1..9：直达切换器列表里的第 N 个
+  if (mod && !e.shiftKey && !e.altKey && /^[1-9]$/.test(e.key)) {
+    const target = switcherEntries()[Number(e.key) - 1];
+    if (!target) return;
+    e.preventDefault();
+    void switchToConversation(target);
+  }
 });
 
 async function loadConversation(conv) {
@@ -7967,6 +8250,8 @@ async function loadConversation(conv) {
   /* 切到的这个对话可能正在后台跑。按它的真实状态恢复输入区，
      否则会出现「明明在跑，输入框却显示可以发送」。 */
   sessionUnread.delete(conv.id);
+  touchRecentConversation(conv.id);
+  renderSessionSwitcher();
   const targetRunning = sessionsRunning.has(conv.id);
   setGenerating(targetRunning);
   if (targetRunning) addTyping(); else removeTyping();
@@ -7997,6 +8282,7 @@ async function startNewConversation() {
   messageLog = [];
   currentConvId = null;
   currentSessionId = null;
+  renderSessionSwitcher();
   resetRequested = true;
   sendResetRequest();
 }
