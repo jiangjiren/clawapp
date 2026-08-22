@@ -5796,7 +5796,7 @@ function handleEvent(ev) {
     removeTyping();
     messagesEl.innerHTML = "";
     messageLog = [];
-    currentConvId = null;
+    currentConvId = genId();      // 同上：重置后的空对话仍然要有身份
     currentSessionId = null;
     steeringQueue.length = 0;
     steeringRemovalPending.clear();
@@ -7434,7 +7434,7 @@ function dispatchRequestDraft(draft) {
     saveCurrentConversation();
     resetAssistantState();
     messagesEl.innerHTML = "";
-    messageLog = []; currentConvId = null; currentSessionId = null;
+    messageLog = []; currentConvId = genId(); currentSessionId = null;
     pendingRequestDraft = null;
     activeRequestId = null;
     clearTimeout(requestRetryTimer);
@@ -7943,7 +7943,7 @@ const historyBackdrop = document.getElementById("history-backdrop");
 
 async function deleteConversation(id) {
   try { await fetch(`api/history/${id}`, { method: "DELETE" }); } catch { }
-  if (currentConvId === id) currentConvId = null;
+  if (currentConvId === id) currentConvId = genId();
   if (_historyCache !== null) {
     _historyCache = _historyCache.filter(h => h.id !== id);
     renderHistoryFromData(_historyCache); // 立即从缓存刷新，不等网络
@@ -8280,7 +8280,10 @@ async function startNewConversation() {
   clearMentionNotes();
   messagesEl.innerHTML = "";
   messageLog = [];
-  currentConvId = null;
+  /* 空对话也要有身份：事件路由靠 conversationId 比对，这里留 null 的话
+     判断会短路，别的对话正在跑的回复会直接渲染进这个空窗口。
+     没发消息之前它不会在服务端留下任何记录，所以提前分配是安全的。 */
+  currentConvId = genId();
   currentSessionId = null;
   renderSessionSwitcher();
   resetRequested = true;
