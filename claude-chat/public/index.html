@@ -7924,6 +7924,14 @@ const historyBackdrop = document.getElementById("history-backdrop");
 
 async function deleteConversation(id) {
   try { await fetch(`api/history/${id}`, { method: "DELETE" }); } catch { }
+  /* 删掉的对话要从所有地方消失，不然它还挂在未读/最近用过里，
+     下一轮 switcherEntries 会再给它分配一个槽位，看起来像删不掉。 */
+  releaseConvSlot(id);
+  sessionUnread.delete(id);
+  sessionsRunning.delete(id);
+  sessionsAwaiting.delete(id);
+  const recentAt = recentConvIds.indexOf(id);
+  if (recentAt >= 0) recentConvIds.splice(recentAt, 1);
   if (currentConvId === id) currentConvId = genId();
   if (_historyCache !== null) {
     _historyCache = _historyCache.filter(h => h.id !== id);
@@ -8016,7 +8024,34 @@ function renderSessionBadges() {
    排序按最近用过（MRU），不是按时间倒序：你刚从 A 切到 B，想切回 A 时
    它就该在第一个，而不是沉到某个按创建时间排的位置里。
    ══════════════════════════════════════════════════════════ */
-const SWITCHER_MAX_ITEMS = 8;
+/* 快捷键槽位：index + 1 就是 Ctrl+N 的那个 N。
+   一旦分配就绑住这个对话不再挪动——数字要能形成肌肉记忆，就不能跟着
+   活跃状态跳。槽位被腾空时留成 null，下一个新对话来填补这个洞，
+   已有对话的编号始终不动。 */
+const SWITCHER_MAX_ITEMS = 9;
+const convSlots = [];
+
+function assignConvSlot(id) {
+  if (!id || convSlots.includes(id)) return;
+  const hole = convSlots.indexOf(null);
+  if (hole >= 0) { convSlots[hole] = id; return; }
+  if (convSlots.length < SWITCHER_MAX_ITEMS) { convSlots.push(id); return; }
+  /* 槽位满了，挤掉最久没碰过、而且没在动的那个。全都在用就先不给槽位——
+     宁可这个对话暂时没有快捷键，也不能把正在跑的挤下去。 */
+  const idle = convSlots.filter(x => x && x !== currentConvId
+    && !sessionsRunning.has(x) && !sessionsAwaiting.has(x) && !sessionUnread.has(x));
+  if (idle.length === 0) return;
+  const victim = idle.reduce((oldest, x) => {
+    const rank = (v) => { const i = recentConvIds.indexOf(v); return i < 0 ? Infinity : i; };
+    return rank(x) > rank(oldest) ? x : oldest;
+  });
+  convSlots[convSlots.indexOf(victim)] = id;
+}
+
+function releaseConvSlot(id) {
+  const at = convSlots.indexOf(id);
+  if (at >= 0) convSlots[at] = null;
+}
 // 快捷键标注按平台走：Windows 上写 ⌘ 没人认得
 const MOD_LABEL = /mac|iphone|ipad/i.test(navigator.userAgentData?.platform || navigator.platform || "")
   ? "⌘" : "Ctrl+";
@@ -8032,18 +8067,23 @@ function touchRecentConversation(id) {
 
 function convTitleOf(id) {
   if (!id) return "新对话";
-  return _historyCache?.find(h => h.id === id)?.title || "对话";
+  const found = _historyCache?.find(h => h.id === id);
+  if (found) return found.title || "对话";
+  // 还没发过第一条消息的对话不在历史里——它就是那个空白的新对话
+  return id === currentConvId ? "新对话" : "对话";
 }
 
-/** 切换器里该列哪些对话：活跃的排前面，其余按最近用过补齐。 */
+/**
+ * 切换器里的对话，按槽位顺序（也就是 Ctrl+N 的顺序）。
+ * 返回的数组里可能有 null——那是被腾空的槽位，编号得留着，
+ * 不然后面所有对话的数字都会往前挪一位。
+ */
 function switcherEntries() {
-  const active = [...sessionsAwaiting, ...sessionsRunning, ...sessionUnread];
-  const ordered = [];
-  for (const id of [...active, ...recentConvIds]) {
-    if (id && !ordered.includes(id)) ordered.push(id);
-  }
-  if (currentConvId && !ordered.includes(currentConvId)) ordered.unshift(currentConvId);
-  return ordered.slice(0, SWITCHER_MAX_ITEMS);
+  // 当前的、正在动的、最近用过的，都该有个槽位
+  assignConvSlot(currentConvId);
+  for (const id of [...sessionsAwaiting, ...sessionsRunning, ...sessionUnread]) assignConvSlot(id);
+  for (const id of recentConvIds.slice(0, SWITCHER_MAX_ITEMS)) assignConvSlot(id);
+  return convSlots.slice(0, SWITCHER_MAX_ITEMS);
 }
 
 function switcherNoteOf(id) {
@@ -8083,6 +8123,7 @@ function renderSwitcherMenu() {
   const ids = switcherEntries();
   const total = _historyCache?.length ?? 0;
   const rows = ids.map((id, index) => {
+    if (!id) return "";            // 空槽不画，但它占着的编号留给原主
     const state = sessionBadgeState(id);
     const note = switcherNoteOf(id);
     const isCurrent = id === currentConvId;
@@ -8169,7 +8210,7 @@ document.addEventListener("keydown", (e) => {
     return;
   }
 
-  // Ctrl/⌘ + 1..9：直达切换器列表里的第 N 个
+  // Ctrl/⌘ + 1..9：直达第 N 个槽位。槽位是稳定的，同一个对话永远同一个数字
   if (mod && !e.shiftKey && !e.altKey && /^[1-9]$/.test(e.key)) {
     const target = switcherEntries()[Number(e.key) - 1];
     if (!target) return;
