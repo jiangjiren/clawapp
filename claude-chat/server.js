@@ -19,16 +19,69 @@ import * as agyProvider from "./providers/antigravity.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHistoryStore } from "./history-store.js";
 import { ConversationSession } from "./conversation-session.js";
+import { SessionRegistry } from "./session-registry.js";
 import { hasSchedulerIntent, hasSchedulerIntentForMessage } from "./scheduler-intent.js";
 import { z } from "zod";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-/* 当前对话的运行时状态。原本是散在这个文件里的 23 个模块级 let——单会话时
-   「当前对话」只有一个，全局变量就是它；要同时跑多个对话就必须先收进一个能有
-   多份的对象。现在仍然只有一个实例，行为与改造前一致；多开时这里换成
-   Map<conversationId, ConversationSession>。 */
-const session = new ConversationSession();
+/**
+ * 事件泵绑定的会话上下文。
+ *
+ * session.claudeRuntimeConversationId 这类字段记的是「此刻」哪个会话在跑，
+ * 而 SDK 的子任务事件可能隔几秒才回来——那时它早被下一个会话改写了。
+ * 把 context 绑在 runtime 的事件泵上，事件走到哪它跟到哪，不用回头猜。
+ * 单会话下两者取值相同；同时跑多个会话时，只有这个是对的。
+ * 传播行为见 agent-context.test.js。
+ */
+const agentContext = new AsyncLocalStorage();
+
+/* 每个对话一份运行时状态。上限指的是「同时在跑」的对话数，不是内存里留着几个
+   ——切走的对话仍然活着，回来能接上。
+   每个在跑的对话是一个真实的 SDK 子进程加一份 token 消耗，所以这个数不该太大。 */
+const MAX_CONCURRENT_CONVERSATIONS = Math.max(
+  1,
+  Number.parseInt(process.env.MAX_CONCURRENT_CONVERSATIONS || "10", 10) || 10,
+);
+
+const sessions = new SessionRegistry({
+  limit: MAX_CONCURRENT_CONVERSATIONS,
+  resolveCurrentId: () => agentContext.getStore()?.conversationId ?? null,
+  createSession: (conversationId) => new ConversationSession({
+    conversationId,
+    createRuntime: () => new PersistentQueryRuntime({
+      contextStore: agentContext,
+      queryFactory: query,
+      onEvent: handlePersistentClaudeEvent,
+      onError: handlePersistentClaudeError,
+      onClose: handlePersistentClaudeClose,
+      onCallbackError: (error, context) => {
+        console.error(`[Web Agent] ${context.source} callback failed without stopping the Claude runtime:`, error);
+      },
+    }),
+  }),
+  isBusy: (candidate) => sessionIsBusy(candidate),
+});
+
+/* `session` 是个路由代理：读写落到「当前上下文属于的那个对话」的实例上。
+   当前是谁由 agentContext 决定——它绑在事件泵和客户端消息处理上，跟着异步流
+   走，不是发出事件时回头猜的。
+
+   之所以用代理而不是把 291 处 `session.xxx` 改成 `sessions.current().xxx`：
+   那 291 处的语义本来就是「当前这个对话的」，代理让这句话继续成立，同时把
+   「当前是谁」从一个模块级变量变成随流传递的上下文。 */
+const session = new Proxy(Object.create(null), {
+  get: (_, prop, receiver) => Reflect.get(sessions.current(), prop, receiver),
+  set: (_, prop, value) => Reflect.set(sessions.current(), prop, value),
+  has: (_, prop) => Reflect.has(sessions.current(), prop),
+  deleteProperty: (_, prop) => Reflect.deleteProperty(sessions.current(), prop),
+  ownKeys: () => Reflect.ownKeys(sessions.current()),
+  getOwnPropertyDescriptor: (_, prop) => {
+    const d = Reflect.getOwnPropertyDescriptor(sessions.current(), prop);
+    // 代理的目标对象是空的，报告 configurable:false 会被引擎判为不变量冲突
+    return d ? { ...d, configurable: true } : d;
+  },
+});
 const PORT = Number.parseInt(process.env.PORT || "8082", 10);
 const HOST = process.env.HOST || "127.0.0.1";
 const DESKTOP_AGENT_TOKEN = process.env.DESKTOP_AGENT_TOKEN || "";
@@ -3755,16 +3808,6 @@ let detachedBuffer = [];
 const RESTART_LEASE_MS = 15_000;
 let restartLease = null;
 
-/**
- * 事件泵绑定的会话上下文。
- *
- * session.claudeRuntimeConversationId 这类字段记的是「此刻」哪个会话在跑，
- * 而 SDK 的子任务事件可能隔几秒才回来——那时它早被下一个会话改写了。
- * 把 context 绑在 runtime 的事件泵上，事件走到哪它跟到哪，不用回头猜。
- * 单会话下两者取值相同；同时跑多个会话时，只有这个是对的。
- * 传播行为见 agent-context.test.js。
- */
-const agentContext = new AsyncLocalStorage();
 const taskEventOwners = new Map();
 const taskEventOwnerTimers = new Map();
 const TASK_EVENT_OWNER_TTL_MS = 5 * 60_000;
@@ -3786,8 +3829,8 @@ function acquireRestartLease() {
   // The process is about to restart, so close an otherwise-idle persistent
   // Query under the same atomic lease. This prevents a late autonomous SDK
   // continuation from starting between the lease grant and process restart.
-  if (claudeRuntime.started) {
-    claudeRuntime.close();
+  if (session.claudeRuntime.started) {
+    session.claudeRuntime.close();
     session.claudeRuntimeSignature = null;
     session.claudeRuntimeConversationId = null;
   }
@@ -3919,12 +3962,30 @@ function acknowledgeClientRequest(requestId, state) {
   deliver({ type: "request_ack", userMessageId: requestId, state });
 }
 
+/**
+ * 告诉前端现在有哪几个对话在跑、哪几个在等你回话。
+ *
+ * run_attached 只报一个「主要」的对话，那是单会话时代的协议；多开之后前端要
+ * 在会话列表上标状态点，需要的是全集。分成两条事件是为了老逻辑不用改。
+ */
+function deliverSessionsSnapshot() {
+  const running = sessions.runningIds();
+  deliver({
+    type: "sessions_snapshot",
+    limit: MAX_CONCURRENT_CONVERSATIONS,
+    running,
+    // 「需要你回话」比「正在跑」更该抢注意力：它卡住了，不点就一直卡着
+    awaiting: running.filter(id => sessions.peek(id)?.pendingAskUserQuestion),
+  });
+}
+
 function startClientRequest(requestId, conversationId) {
   session.activeForegroundRequestId = requestId;
   session.activeForegroundConversationId = conversationId;
   rememberClientRequest(requestId, "running");
   acknowledgeClientRequest(requestId, "running");
   deliver({ type: "request_started", userMessageId: requestId, conversationId });
+  deliverSessionsSnapshot();
 }
 
 function completeClientRequest(state, requestId = session.activeForegroundRequestId) {
@@ -3936,6 +3997,7 @@ function completeClientRequest(state, requestId = session.activeForegroundReques
   if (session.activeForegroundDeliveryContext?.requestId === requestId) {
     session.activeForegroundDeliveryContext = null;
   }
+  deliverSessionsSnapshot();
 }
 
 const FORWARDED_CLAUDE_SYSTEM_EVENTS = new Set([
@@ -4063,7 +4125,7 @@ function applyNextClaudeSteering(safePoint) {
     || context.provider !== "claude"
     || session.claudeStopRequested
     || !session.claudeTurnCompletionPending
-    || !claudeRuntime.started
+    || !session.claudeRuntime.started
     || session.claudeRuntimeConversationId !== context.conversationId
   ) {
     return false;
@@ -4080,7 +4142,7 @@ function applyNextClaudeSteering(safePoint) {
     // race into the gap before beginServerConversationFromClient reopens history.
     finalizeActiveAssistantHistory("complete");
     beginServerConversationFromClient(item.msg);
-    claudeRuntime.send(buildClaudeUserMessage(item.msg));
+    session.claudeRuntime.send(buildClaudeUserMessage(item.msg));
     const applied = steeringQueue.commitClaim(item.userMessageId, claimToken);
     if (!applied) return false;
     rememberClientRequest(item.userMessageId, "steering_applied");
@@ -4281,9 +4343,9 @@ async function handlePersistentClaudeClose() {
   session.claudePendingRecovery = null;
   if (recovery) {
     try {
-      claudeRuntime.start(recovery.options, { conversationId: recovery.conversationId ?? session.claudeRuntimeConversationId });
+      session.claudeRuntime.start(recovery.options, { conversationId: recovery.conversationId ?? session.claudeRuntimeConversationId });
       session.claudeRuntimeSignature = recovery.signature;
-      claudeRuntime.send(recovery.message);
+      session.claudeRuntime.send(recovery.message);
       return;
     } catch (error) {
       send({ type: "error", text: String(error) });
@@ -4294,36 +4356,66 @@ async function handlePersistentClaudeClose() {
   if (session.claudeTurnCompletionPending && !session.claudeErrorHandled) finishClaudeTurn();
 }
 
-const claudeRuntime = new PersistentQueryRuntime({
-  contextStore: agentContext,
-  queryFactory: query,
-  onEvent: handlePersistentClaudeEvent,
-  onError: handlePersistentClaudeError,
-  onClose: handlePersistentClaudeClose,
-  onCallbackError: (error, context) => {
-    console.error(`[Web Agent] ${context.source} callback failed without stopping the Claude runtime:`, error);
-  },
-});
+
+/** 指定对话的前台回合还在跑吗。同样不碰懒创建的 claudeRuntime getter。 */
+function foregroundActiveFor(candidate) {
+  if (!candidate) return false;
+  return Boolean(
+    candidate.abortCtrl
+    || candidate.claudeTurnCompletionPending
+    || (candidate.hasClaudeRuntime && candidate.claudeRuntime.foregroundRunning)
+    || candidate.pendingAskUserQuestion
+  );
+}
 
 function isForegroundRunActive() {
-  return Boolean(session.abortCtrl || session.claudeTurnCompletionPending || claudeRuntime.foregroundRunning || session.pendingAskUserQuestion);
+  return foregroundActiveFor(session);
+}
+
+/**
+ * 客户端重连时该「附着」到哪个对话。
+ *
+ * run_attached 是单会话时代的协议，只报一个。多开之后可能有好几个在跑，这里挑
+ * 最该被恢复成「正在生成」的那个：有前台请求的 > 有排队消息的 > 随便一个在跑的。
+ * 完整的会话列表由 sessions_snapshot 另发一条，这条保持原样。
+ */
+function pickAttachSession() {
+  const running = sessions.runningIds().map(id => sessions.peek(id)).filter(Boolean);
+  return running.find(s => s.activeForegroundRequestId)
+    ?? running.find(s => s.queuedClientPrompts.length > 0)
+    ?? running[0]
+    ?? sessions.ambient;
 }
 
 function shouldQueueClientPrompt() {
   return isForegroundRunActive() || Date.now() < session.claudeTaskWakeGraceUntil;
 }
 
-function isAgentWorkActive() {
+/**
+ * 指定的那个对话还在干活吗。
+ *
+ * 并发上限数的就是它。刻意不读 candidate.claudeRuntime——那是个懒创建的
+ * getter，光是问一句「你忙吗」不该顺手给它起一个 SDK 子进程。
+ */
+function sessionIsBusy(candidate) {
+  if (!candidate) return false;
   return Boolean(
-    session.abortCtrl
-    || session.activeForegroundRequestId
-    || session.claudeTurnCompletionPending
-    || claudeRuntime.running
-    || session.pendingAskUserQuestion
-    || session.queuedClientPrompts.length > 0
-    || steeringQueue.hasUnpaused()
-    || Date.now() < session.claudeTaskWakeGraceUntil
+    candidate.abortCtrl
+    || candidate.activeForegroundRequestId
+    || candidate.claudeTurnCompletionPending
+    || (candidate.hasClaudeRuntime && candidate.claudeRuntime.running)
+    || candidate.pendingAskUserQuestion
+    || candidate.queuedClientPrompts.length > 0
+    || steeringQueue.snapshot().some(item => (
+      item.conversationId === candidate.conversationId && item.state === "queued" && !item.paused
+    ))
+    || Date.now() < candidate.claudeTaskWakeGraceUntil
   );
+}
+
+/** 整个进程还有没有活儿——任何一个对话在跑都算。 */
+function isAgentWorkActive() {
+  return sessions.runningCount > 0 || sessionIsBusy(sessions.ambient);
 }
 
 function isAgentRunActive() {
@@ -4417,31 +4509,37 @@ wss.on("connection", (ws) => {
   // after it loads its local activeProfileId.
   sendSkillInit(send, getActiveProfile(readProfiles())?.provider);
 
-  // Reattach to an in-flight run: restore the generating UI, replay whatever
-  // happened while detached, and re-show a still-unanswered question.
-  const queuedAttachRequestId = getClientRequestId(session.queuedClientPrompts[0]);
-  const attachedRequestId = session.activeForegroundRequestId || queuedAttachRequestId;
-  const queuedAttachConversationId = session.queuedClientPrompts[0]?.conversationId
-    ? normalizeHistoryId(session.queuedClientPrompts[0].conversationId)
+  /* Reattach to an in-flight run: restore the generating UI, replay whatever
+     happened while detached, and re-show a still-unanswered question.
+
+     这段跑在连接回调里，没有会话上下文——`session` 代理在这儿会落到 ambient，
+     而真正在跑的是某个具体对话。所以显式挑一个附着目标，不走代理。 */
+  const attachSession = pickAttachSession();
+  const queuedAttachRequestId = getClientRequestId(attachSession.queuedClientPrompts[0]);
+  const attachedRequestId = attachSession.activeForegroundRequestId || queuedAttachRequestId;
+  const queuedAttachConversationId = attachSession.queuedClientPrompts[0]?.conversationId
+    ? normalizeHistoryId(attachSession.queuedClientPrompts[0].conversationId)
     : null;
-  const attachedConversationId = session.activeForegroundConversationId || queuedAttachConversationId;
-  const reattachRunning = isForegroundRunActive() || Boolean(attachedRequestId);
+  const attachedConversationId = attachSession.activeForegroundConversationId
+    || attachSession.conversationId
+    || queuedAttachConversationId;
+  const reattachRunning = foregroundActiveFor(attachSession) || Boolean(attachedRequestId);
   if (isAgentRunActive() || detachedBuffer.length > 0) {
     const backlog = detachedBuffer;
     detachedBuffer = [];
     let questionInBacklog = false;
     for (const obj of backlog) {
-      if (obj?.type === "ask_user_question" && obj.requestId === session.pendingAskUserQuestion?.requestId) {
+      if (obj?.type === "ask_user_question" && obj.requestId === attachSession.pendingAskUserQuestion?.requestId) {
         questionInBacklog = true;
       }
       deliver(obj);
     }
-    if (session.pendingAskUserQuestion && !questionInBacklog) {
+    if (attachSession.pendingAskUserQuestion && !questionInBacklog) {
       deliver({
         type: "ask_user_question",
-        requestId: session.pendingAskUserQuestion.requestId,
-        toolUseID: session.pendingAskUserQuestion.toolUseID ?? null,
-        questions: session.pendingAskUserQuestion.questions,
+        requestId: attachSession.pendingAskUserQuestion.requestId,
+        toolUseID: attachSession.pendingAskUserQuestion.toolUseID ?? null,
+        questions: attachSession.pendingAskUserQuestion.questions,
       });
     }
   }
@@ -4458,6 +4556,7 @@ wss.on("connection", (ws) => {
     type: "steering_snapshot",
     items: steeringQueue.snapshot().map(steeringEventItem),
   });
+  deliverSessionsSnapshot();
 
   let handleClientMessage;
   const drainThisConnection = () => {
@@ -4470,6 +4569,11 @@ wss.on("connection", (ws) => {
     if (activeWs !== ws) return;
     let msg;
     try { msg = JSON.parse(raw); } catch { return; }
+
+    /* 这条消息属于哪个对话，从它自己身上取——之后整段处理都跑在那个对话的
+       上下文里，`session` 代理和事件泵才会落到同一个实例上。带不出 conversationId
+       的消息（skills 查询之类）落到 ambient，本来就不属于任何对话。 */
+    return agentContext.run({ conversationId: historyIdOrNull(msg.conversationId) }, () => {
 
     if (msg.type === "skills") {
       const profileData = readProfiles();
@@ -4611,7 +4715,7 @@ wss.on("connection", (ws) => {
       clearCodexThread();
       clearAgyConversation();
       if (session.abortCtrl) { session.abortCtrl.abort(); session.abortCtrl = null; }
-      claudeRuntime.close();
+      session.claudeRuntime.close();
       session.claudeRuntimeSignature = null;
       session.claudeRuntimeConversationId = null;
       session.claudeTurnCompletionPending = false;
@@ -4712,16 +4816,16 @@ wss.on("connection", (ws) => {
         scheduleQueuedClientPromptDrain();
       } else if (claudeTurnWasPending) {
         session.claudeStopRequested = true;
-        if (claudeRuntime.foregroundRunning) {
-          claudeRuntime.interrupt().catch((error) => {
+        if (session.claudeRuntime.foregroundRunning) {
+          session.claudeRuntime.interrupt().catch((error) => {
             send({ type: "error", text: String(error) });
             finishClaudeTurn();
           });
         } else {
           finishClaudeTurn();
         }
-      } else if (claudeRuntime.foregroundRunning) {
-        claudeRuntime.interrupt().catch((error) => {
+      } else if (session.claudeRuntime.foregroundRunning) {
+        session.claudeRuntime.interrupt().catch((error) => {
           send({ type: "error", text: String(error) });
           finishClaudeTurn();
         });
@@ -4783,7 +4887,7 @@ wss.on("connection", (ws) => {
       incomingDispatchProfile ?? incomingActiveProfile,
     );
     const crossesActiveClaudeTasks = (incomingProvider === "codex" || incomingProvider === "antigravity")
-      && claudeRuntime.taskIds.size > 0;
+      && session.claudeRuntime.taskIds.size > 0;
     const clientPromptBusy = shouldQueueClientPrompt() || crossesActiveClaudeTasks;
     if (!fromQueue && msg.deliveryMode === "steer" && clientPromptBusy) {
       const steeringConversationId = msg.conversationId
@@ -4851,6 +4955,21 @@ wss.on("connection", (ws) => {
     }
     const requestConversationId = normalizeHistoryId(msg.conversationId);
     msg.conversationId = requestConversationId;
+
+    /* 并发上限。每个在跑的对话是一个真实的 SDK 子进程加一份 token 消耗，
+       不设限不是「不限制」，是把撞墙的时机交给运气。
+       已经在跑的那个对话再发一条不占新名额——那是它自己的下一轮。 */
+    if (!sessions.canRun(requestConversationId)) {
+      rememberClientRequest(requestId, "rejected");
+      acknowledgeClientRequest(requestId, "rejected");
+      send({
+        type: "error",
+        text: `同时进行的对话已达上限（${MAX_CONCURRENT_CONVERSATIONS} 个）。`
+          + `等其中一个跑完，或先停掉一个再发。`,
+      });
+      return;
+    }
+
     if (fromQueue) {
       const fallbackItem = steeringQueue.get(requestId);
       if (fallbackItem?.delivery === "next_turn") {
@@ -5145,8 +5264,8 @@ wss.on("connection", (ws) => {
     if (activeProfile?.provider === "antigravity") {
       // 和 Codex 那条一样：三家共用一套 UI/历史/停止状态，Claude 那边空了就先关掉，
       // 免得它的自动续跑再开一条流出来
-      if (claudeRuntime.started) {
-        claudeRuntime.close();
+      if (session.claudeRuntime.started) {
+        session.claudeRuntime.close();
         session.claudeRuntimeSignature = null;
         session.claudeRuntimeConversationId = null;
       }
@@ -5204,8 +5323,8 @@ wss.on("connection", (ws) => {
       // The two providers share one UI/history/Stop state. Once Claude has no
       // foreground or background work left, close its idle process before Codex
       // starts so a late auto-continuation cannot create a second stream.
-      if (claudeRuntime.started) {
-        claudeRuntime.close();
+      if (session.claudeRuntime.started) {
+        session.claudeRuntime.close();
         session.claudeRuntimeSignature = null;
         session.claudeRuntimeConversationId = null;
       }
@@ -5410,8 +5529,8 @@ wss.on("connection", (ws) => {
     (async () => {
       try {
         if (!isCurrentTurn()) return;
-        if (claudeRuntime.started && session.claudeRuntimeSignature !== runtimeSignature) {
-          if (claudeRuntime.taskIds.size > 0) {
+        if (session.claudeRuntime.started && session.claudeRuntimeSignature !== runtimeSignature) {
+          if (session.claudeRuntime.taskIds.size > 0) {
             send({
               type: "error",
               text: "当前对话仍有后台任务运行，暂不能切换工作目录、账号、推理强度、权限能力或调度模式。请等待任务完成，或重置/新建对话后再切换。",
@@ -5419,25 +5538,25 @@ wss.on("connection", (ws) => {
             finishClaudeTurn();
             return;
           }
-          claudeRuntime.close();
+          session.claudeRuntime.close();
           session.claudeRuntimeSignature = null;
           session.claudeRuntimeConversationId = null;
         }
 
-        if (!claudeRuntime.started) {
+        if (!session.claudeRuntime.started) {
           if (!isCurrentTurn()) return;
-          claudeRuntime.start(options, { conversationId: turnConversationId });
+          session.claudeRuntime.start(options, { conversationId: turnConversationId });
           session.claudeRuntimeSignature = runtimeSignature;
           session.claudeRuntimeConversationId = turnConversationId;
         } else {
-          await claudeRuntime.query.setPermissionMode(permissionMode);
+          await session.claudeRuntime.query.setPermissionMode(permissionMode);
           if (!isCurrentTurn()) return;
-          await claudeRuntime.query.setModel(msg.model || undefined);
+          await session.claudeRuntime.query.setModel(msg.model || undefined);
           if (!isCurrentTurn()) return;
         }
 
         if (!isCurrentTurn()) return;
-        claudeRuntime.send(userMsg);
+        session.claudeRuntime.send(userMsg);
       } catch (error) {
         if (!isCurrentTurn()) return;
         send({ type: "error", text: String(error) });
@@ -5446,6 +5565,8 @@ wss.on("connection", (ws) => {
     })();
     return;
 
+  
+    });
   };
   ws.on("message", raw => handleClientMessage(raw, false));
   scheduleQueuedClientPromptDrain();

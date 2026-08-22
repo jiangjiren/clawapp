@@ -1080,6 +1080,76 @@ html, body {
 #slash-popup::-webkit-scrollbar-track { background: transparent; }
 #slash-popup::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 
+/* ── 多开：会话状态点 ──────────────────────────────────────
+   三档状态，抢注意力的程度依次递减：
+     awaiting  在等你回话，它卡住了 —— 用醒目色 + 呼吸
+     running   在干活，不需要你 —— 细环安静转
+     unread    跑完了还没看 —— 实心点，是你走开之后回来的钩子
+   空闲不显示：没有状态就不该占视觉。 */
+.session-badge {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  margin-right: 8px;
+  border-radius: 50%;
+  align-self: center;
+}
+.session-badge[data-state="running"] {
+  border: 1.5px solid var(--accent);
+  border-top-color: transparent;
+  background: transparent;
+  animation: sessionSpin 1.4s linear infinite;
+}
+.session-badge[data-state="awaiting"] {
+  background: #e8833a;
+  animation: sessionBreath 1.6s ease-in-out infinite;
+}
+.session-badge[data-state="unread"] { background: var(--accent); }
+
+@keyframes sessionSpin { to { transform: rotate(360deg); } }
+@keyframes sessionBreath {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.55; transform: scale(0.86); }
+}
+
+/* 顶部那排：面板窄的时候放不下常驻会话栏，而多开时真正需要一键切过去的
+   也只有正在跑的那几个 —— 其余留在历史抽屉里，不占地方。 */
+.running-rail {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-right: 6px;
+}
+.running-rail[hidden] { display: none; }
+.rail-dot {
+  width: 9px;
+  height: 9px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+  opacity: 0.85;
+  transition: opacity 0.15s, transform 0.1s;
+}
+.rail-dot:hover { opacity: 1; transform: scale(1.15); }
+.rail-dot:active { transform: scale(0.94); }
+.rail-dot[data-state="running"] {
+  background: transparent;
+  border: 1.5px solid var(--accent);
+  border-top-color: transparent;
+  animation: sessionSpin 1.4s linear infinite;
+}
+.rail-dot[data-state="awaiting"] {
+  background: #e8833a;
+  animation: sessionBreath 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .session-badge[data-state="running"], .rail-dot[data-state="running"],
+  .session-badge[data-state="awaiting"], .rail-dot[data-state="awaiting"] { animation: none; }
+}
+
 /* ── Thinking block ── */
 .thinking-block {
   margin: 0 0 8px;
@@ -2303,6 +2373,7 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
           <path fill-rule="evenodd" d="M10.45 6.2L9.93 4.27L14.07 4.27L13.55 6.2A6 6 0 0 1 16.24 7.76L17.66 6.34L19.73 9.93L17.8 10.45A6 6 0 0 1 17.8 13.55L19.73 14.07L17.66 17.66L16.24 16.24A6 6 0 0 1 13.55 17.8L14.07 19.73L9.93 19.73L10.45 17.8A6 6 0 0 1 7.76 16.24L6.34 17.66L4.27 14.07L6.2 13.55A6 6 0 0 1 6.2 10.45L4.27 9.93L6.34 6.34L7.76 7.76A6 6 0 0 1 10.45 6.2ZM9 12a3 3 0 1 0 6 0a3 3 0 1 0-6 0Z"/>
         </svg>
       </button>
+      <div id="running-rail" class="running-rail" role="group" aria-label="正在进行的对话" hidden></div>
       <button id="btn-history" class="header-btn" title="历史对话" aria-label="历史对话">
         <svg width="17" height="17" viewBox="0 0 15 15" fill="none" aria-hidden="true"><circle cx="7.5" cy="7.5" r="5.8" stroke="currentColor" stroke-width="1.3"/><path d="M7.5 4.5V7.5l2.2 2.2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </button>
@@ -5563,6 +5634,17 @@ function handleEvent(ev) {
   // Server heartbeat (every 30s) — only used to keep lastWsEventAt fresh so the
   // dead-socket detector below never fires on a healthy connection.
   if (ev.type === "ping") return;
+
+  if (ev.type === "sessions_snapshot") { applySessionsSnapshot(ev); return; }
+
+  /* 多开：别的对话的事件不能渲染进当前消息流——那正是「串话」。
+     它们只用来更新会话列表上的状态点和未读标记。
+     没带 conversationId 的是连接级事件（init、快照之类），不受此限。 */
+  if (ev.conversationId && currentConvId && ev.conversationId !== currentConvId) {
+    noteBackgroundEvent(ev);
+    return;
+  }
+
   if (handleSteeringEvent(ev)) return;
 
   // 跨厂商子 agent 的工具动作：它跑在独立进程里，事件不会带 parent_tool_use_id
@@ -7746,11 +7828,110 @@ async function deleteConversation(id) {
   }
 }
 
-async function loadConversation(conv) {
-  if (isGenerating || steeringQueue.length > 0) {
-    showInlineError("当前回答或待追加消息仍在处理中，请等待完成，或新建对话以明确取消。");
-    return;
+const esc = (s) => String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+/* ══════════════════════════════════════════════════════════
+   多开：每个对话现在有自己的 runtime，可以同时跑好几个。
+   这里管的是「哪个在跑、哪个在等你、哪个跑完了你还没看」。
+
+   状态分三档，抢注意力的程度依次递减：
+     awaiting  在等你回话——它卡住了，不点就一直卡着，最该被看见
+     running   在干活——不需要你，安静转圈就好
+     unread    跑完了你还没切过去看——这是你走开之后回来的钩子
+
+   数据以服务端的 sessions_snapshot 为准；后台对话来了新内容也顺手标未读。
+   ══════════════════════════════════════════════════════════ */
+const sessionsRunning = new Set();
+const sessionsAwaiting = new Set();
+const sessionUnread = new Set();
+let sessionLimit = 10;
+
+function applySessionsSnapshot(ev) {
+  const nextRunning = new Set(ev.running ?? []);
+  // 从「在跑」掉到「不在跑」，而你当时不在看它 —— 那就是一条未读
+  for (const id of sessionsRunning) {
+    if (!nextRunning.has(id) && id !== currentConvId) sessionUnread.add(id);
   }
+  sessionsRunning.clear();
+  for (const id of nextRunning) sessionsRunning.add(id);
+  sessionsAwaiting.clear();
+  for (const id of ev.awaiting ?? []) sessionsAwaiting.add(id);
+  if (Number.isFinite(ev.limit)) sessionLimit = ev.limit;
+  sessionUnread.delete(currentConvId);   // 正看着的那个不该有未读
+  renderSessionBadges();
+}
+
+function noteBackgroundEvent(ev) {
+  const id = ev.conversationId;
+  if (!id || id === currentConvId) return;
+  // 只认「产生了新内容」的事件；流式增量太碎，不值得为它重画
+  if (ev.type === "assistant" || ev.type === "done" || ev.type === "error") {
+    sessionUnread.add(id);
+    renderSessionBadges();
+  }
+}
+
+function sessionBadgeState(id) {
+  if (sessionsAwaiting.has(id)) return "awaiting";
+  if (sessionsRunning.has(id)) return "running";
+  if (sessionUnread.has(id)) return "unread";
+  return "";
+}
+
+function sessionBadgeTitle(state) {
+  if (state === "awaiting") return "这个对话在等你回话";
+  if (state === "running") return "正在进行";
+  if (state === "unread") return "已完成，还没看过";
+  return "";
+}
+
+/** 历史列表里每一项的状态点，外加顶部那排「正在跑」的圆点。 */
+function renderSessionBadges() {
+  document.querySelectorAll(".history-item[data-id]").forEach((el) => {
+    const state = sessionBadgeState(el.dataset.id);
+    let badge = el.querySelector(".session-badge");
+    if (!state) { badge?.remove(); return; }
+    if (!badge) {
+      badge = document.createElement("span");
+      badge.className = "session-badge";
+      el.prepend(badge);
+    }
+    badge.dataset.state = state;
+    badge.title = sessionBadgeTitle(state);
+  });
+  renderRunningRail();
+}
+
+/* 顶部只放「正在跑的」——面板窄的时候（桌面端默认 400px）放不下常驻会话栏，
+   而多开场景下你真正需要一键切过去的，也只有正在跑的那几个。
+   其余的留在历史抽屉里，不占视觉。 */
+function renderRunningRail() {
+  const rail = document.getElementById("running-rail");
+  if (!rail) return;
+  const ids = [...sessionsRunning, ...sessionUnread]
+    .filter((id, i, arr) => arr.indexOf(id) === i && id !== currentConvId);
+  if (ids.length === 0) { rail.hidden = true; rail.innerHTML = ""; return; }
+
+  const titleOf = (id) => (_historyCache?.find(h => h.id === id)?.title) || "对话";
+  rail.innerHTML = ids.slice(0, 6).map((id) => {
+    const state = sessionBadgeState(id);
+    const label = `${titleOf(id)} — ${sessionBadgeTitle(state)}`;
+    return `<button type="button" class="rail-dot" data-state="${state}" data-id="${esc(id)}" title="${esc(label)}" aria-label="${esc(label)}"></button>`;
+  }).join("");
+  rail.hidden = false;
+}
+
+document.getElementById("running-rail")?.addEventListener("click", async (e) => {
+  const dot = e.target.closest?.(".rail-dot");
+  if (!dot) return;
+  const id = dot.dataset.id;
+  const conv = _historyCache?.find(h => h.id === id) ?? { id };
+  await loadConversation(conv);
+});
+
+async function loadConversation(conv) {
+  /* 以前这里拦住「生成中不许切走」——那是单会话时代的限制：只有一个 runtime，
+     切走等于把正在跑的那轮丢了。现在每个对话有自己的 runtime，切走它继续跑，
+     回来接着看，这正是多开的意义。 */
   await saveCurrentConversation();
   clearMentionNotes();
   // 列表接口只返回摘要，点击时按需拉取完整内容
@@ -7783,6 +7964,13 @@ async function loadConversation(conv) {
   if (conv.sessionId && ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ setSession: conv.sessionId, conversationId: conv.id }));
   }
+  /* 切到的这个对话可能正在后台跑。按它的真实状态恢复输入区，
+     否则会出现「明明在跑，输入框却显示可以发送」。 */
+  sessionUnread.delete(conv.id);
+  const targetRunning = sessionsRunning.has(conv.id);
+  setGenerating(targetRunning);
+  if (targetRunning) addTyping(); else removeTyping();
+  renderSessionBadges();
   closeHistoryPanel();
   updateBackgroundActivity();   // 历史里的编队卡由 renderAssistantBlocks 重建，活动条要跟着重算
   scrollBottom();
@@ -7948,12 +8136,14 @@ function startInlineRename(item, convId) {
 }
 
 function renderHistoryFromData(history) {
+  queueMicrotask(renderSessionBadges);   // 列表 innerHTML 刷完再补状态点
+
   const listEl = document.getElementById("history-list");
   if (history.length === 0) {
     listEl.innerHTML = '<div class="history-empty">暂无历史对话</div>';
     return;
   }
-  const esc = (s) => s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+
   listEl.innerHTML = history.map(conv => {
     const isCurrent = conv.id === currentConvId;
     const msgCount = conv.messageCount ?? (conv.messages ? conv.messages.length : 0);

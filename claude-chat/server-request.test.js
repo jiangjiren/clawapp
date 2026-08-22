@@ -456,11 +456,20 @@ test("Claude steering applies at tool/idle safe points, survives reconnect, and 
     connection.ws.send(JSON.stringify(crossConversation));
     connection.ws.send(JSON.stringify(steer));
     connection.ws.send(JSON.stringify(steer));
-    const queuedCross = await waitForMessage(
+    // 每个对话有自己的 runtime 之后，另一个对话直接开跑，不再挤进当前回合排队。
+    // 要守的不变量没变——它绝不能被当成当前 runtime 的 steering（见下方断言）。
+    const crossStarted = await waitForMessage(
       connection.events,
-      event => event.type === "steering_queued" && event.userMessageId === crossConversation.userMessageId,
+      event => event.type === "request_started" && event.userMessageId === crossConversation.userMessageId,
     );
-    assert.equal(queuedCross.delivery, "next_turn", "another conversation must not enter the active Claude turn");
+    assert.equal(crossStarted.conversationId, crossConversation.conversationId);
+    assert.equal(
+      connection.events.some(
+        event => event.type === "steering_queued" && event.userMessageId === crossConversation.userMessageId,
+      ),
+      false,
+      "another conversation must not be queued into the active turn's steering",
+    );
     const queuedSteer = await waitForMessage(
       connection.events,
       event => event.type === "steering_queued" && event.userMessageId === steer.userMessageId,
@@ -481,11 +490,8 @@ test("Claude steering applies at tool/idle safe points, survives reconnect, and 
       snapshot.items
         .filter(item => [crossConversation.userMessageId, steer.userMessageId].includes(item.userMessageId))
         .map(item => [item.userMessageId, item.delivery]),
-      [
-        [crossConversation.userMessageId, "next_turn"],
-        [steer.userMessageId, "steer"],
-      ],
-      "reconnect restores the pending steering snapshot without changing delivery semantics",
+      [[steer.userMessageId, "steer"]],
+      "reconnect restores this conversation's own pending steering; the other conversation runs on its own runtime and never enters this queue",
     );
     const attached = connection.events.find(event => event.type === "run_attached");
     assert.equal(attached?.userMessageId, first.userMessageId, "reconnect remains attached to the original foreground owner");
@@ -536,17 +542,17 @@ test("Claude steering applies at tool/idle safe points, survives reconnect, and 
     assert.equal(toolHistory.messages[2].text, steer.displayText);
     assert.equal(toolHistory.messages[3].text, "continued: steer at tool boundary");
 
-    await waitForMessage(
-      connection.events,
-      event => event.type === "request_started" && event.userMessageId === crossConversation.userMessageId,
+    /* 这里原本断言「另一个对话必须等当前回合跑完才开始」——那是单 runtime 时代
+       排队的副产物。现在每个对话有自己的 runtime，真正并发，先后顺序不再是不变量。
+       要守的「互不污染」由上面两条断言保证：它从未进入本回合的 steering 队列、
+       也从未被报告为 applied；下面的历史断言进一步确认它没写进这个对话。 */
+    assert.equal(
+      connection.events.some(
+        event => event.type === "steering_applied" && event.userMessageId === crossConversation.userMessageId,
+      ),
+      false,
+      "the other conversation never enters this conversation's turn",
     );
-    const firstDoneIndex = connection.events.findIndex(
-      event => event.type === "done" && event.userMessageId === first.userMessageId,
-    );
-    const crossStartedIndex = connection.events.findIndex(
-      event => event.type === "request_started" && event.userMessageId === crossConversation.userMessageId,
-    );
-    assert.ok(crossStartedIndex > firstDoneIndex, "cross-conversation fallback starts only after the active turn is done");
 
     connection.ws.send(JSON.stringify({ reset: true, conversationId: crossConversation.conversationId }));
     await waitForMessage(connection.events, event => event.type === "reset_complete");

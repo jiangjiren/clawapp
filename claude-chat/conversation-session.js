@@ -17,7 +17,16 @@
  */
 
 export class ConversationSession {
-  constructor() {
+  /**
+   * @param {object} [options]
+   * @param {string|null} [options.conversationId] 这个实例属于哪个对话（ambient 为 null）
+   * @param {function} [options.createRuntime] 造这个会话专属的 Claude 持久 runtime。
+   *   懒创建：大多数会话只是躺在历史里，没必要为它们各起一个 SDK 子进程。
+   */
+  constructor({ conversationId = null, createRuntime = null } = {}) {
+    this.conversationId = conversationId;
+    this._createRuntime = createRuntime;
+    this._claudeRuntime = null;
     /* ── provider 侧的会话标识 ────────────────────────────────
        同一个对话在三家 provider 那儿各有一条自己的线，续接时各认各的 id。 */
     this.sessionId = null;              // Claude Agent SDK 的 session
@@ -67,5 +76,31 @@ export class ConversationSession {
     this.queuedClientPromptDrain = null;
     this.queuedClientPromptDrainTimer = null;
     this.turnIdleWatchdog = null;
+  }
+
+  /**
+   * 这个会话专属的 Claude 持久 runtime，第一次用到才建。
+   *
+   * 每个在跑的会话是一个真实的 SDK 子进程——所以既不能全局共用一个
+   * （两个对话会抢同一条事件流），也不能一上来就给每个历史会话都建。
+   */
+  get claudeRuntime() {
+    if (!this._claudeRuntime) {
+      if (!this._createRuntime) throw new Error("ConversationSession 没有 createRuntime，无法建立 runtime");
+      this._claudeRuntime = this._createRuntime(this);
+    }
+    return this._claudeRuntime;
+  }
+
+  /** runtime 建过了吗。用来判断忙碌状态时不该顺手把它建出来。 */
+  get hasClaudeRuntime() {
+    return this._claudeRuntime !== null;
+  }
+
+  /** 丢弃这个会话前把子进程收掉，别留下孤儿。 */
+  disposeRuntime() {
+    if (!this._claudeRuntime) return;
+    try { this._claudeRuntime.close(); } catch { /* 已经关了就算了 */ }
+    this._claudeRuntime = null;
   }
 }
