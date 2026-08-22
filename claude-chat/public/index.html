@@ -1114,6 +1114,19 @@ html, body {
   min-width: 0;
 }
 .session-switcher-chevron { flex-shrink: 0; opacity: 0.5; }
+/* 还有几个对话在动 —— 不展开也能知道，省下顶部那排匿名圆点的位置 */
+.session-switcher-count {
+  flex-shrink: 0;
+  min-width: 15px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 10px;
+  line-height: 15px;
+  text-align: center;
+}
+.session-switcher-count[hidden] { display: none; }
 #session-switcher-badge[hidden] { display: none; }
 /* 按钮里的状态点不需要右边距——它紧挨着标题 */
 .session-switcher-btn .session-badge { margin-right: 0; }
@@ -1224,42 +1237,10 @@ html, body {
   50% { opacity: 0.55; transform: scale(0.86); }
 }
 
-/* 顶部那排：面板窄的时候放不下常驻会话栏，而多开时真正需要一键切过去的
-   也只有正在跑的那几个 —— 其余留在历史抽屉里，不占地方。 */
-.running-rail {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  margin-right: 6px;
-}
-.running-rail[hidden] { display: none; }
-.rail-dot {
-  width: 9px;
-  height: 9px;
-  padding: 0;
-  border: none;
-  border-radius: 50%;
-  background: var(--accent);
-  cursor: pointer;
-  opacity: 0.85;
-  transition: opacity 0.15s, transform 0.1s;
-}
-.rail-dot:hover { opacity: 1; transform: scale(1.15); }
-.rail-dot:active { transform: scale(0.94); }
-.rail-dot[data-state="running"] {
-  background: transparent;
-  border: 1.5px solid var(--accent);
-  border-top-color: transparent;
-  animation: sessionSpin 1.4s linear infinite;
-}
-.rail-dot[data-state="awaiting"] {
-  background: #e8833a;
-  animation: sessionBreath 1.6s ease-in-out infinite;
-}
 
 @media (prefers-reduced-motion: reduce) {
-  .session-badge[data-state="running"], .rail-dot[data-state="running"],
-  .session-badge[data-state="awaiting"], .rail-dot[data-state="awaiting"] { animation: none; }
+  .session-badge[data-state="running"],
+  .session-badge[data-state="awaiting"] { animation: none; }
 }
 
 /* ── Thinking block ── */
@@ -2484,6 +2465,7 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
     aria-expanded="false" aria-haspopup="menu" title="切换对话（Ctrl+Tab 来回切，Ctrl+1..9 直达）">
     <span id="session-switcher-badge" class="session-badge" hidden></span>
     <span id="session-switcher-title">新对话</span>
+    <span id="session-switcher-count" class="session-switcher-count" hidden></span>
     <svg class="session-switcher-chevron" viewBox="0 0 24 24" width="12" height="12" fill="none"
     stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
     <path d="m6 9 6 6 6-6"/>
@@ -2497,7 +2479,6 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
           <path fill-rule="evenodd" d="M10.45 6.2L9.93 4.27L14.07 4.27L13.55 6.2A6 6 0 0 1 16.24 7.76L17.66 6.34L19.73 9.93L17.8 10.45A6 6 0 0 1 17.8 13.55L19.73 14.07L17.66 17.66L16.24 16.24A6 6 0 0 1 13.55 17.8L14.07 19.73L9.93 19.73L10.45 17.8A6 6 0 0 1 7.76 16.24L6.34 17.66L4.27 14.07L6.2 13.55A6 6 0 0 1 6.2 10.45L4.27 9.93L6.34 6.34L7.76 7.76A6 6 0 0 1 10.45 6.2ZM9 12a3 3 0 1 0 6 0a3 3 0 1 0-6 0Z"/>
         </svg>
       </button>
-      <div id="running-rail" class="running-rail" role="group" aria-label="正在进行的对话" hidden></div>
       <button id="btn-history" class="header-btn" title="历史对话" aria-label="历史对话">
         <svg width="17" height="17" viewBox="0 0 15 15" fill="none" aria-hidden="true"><circle cx="7.5" cy="7.5" r="5.8" stroke="currentColor" stroke-width="1.3"/><path d="M7.5 4.5V7.5l2.2 2.2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </button>
@@ -8022,36 +8003,9 @@ function renderSessionBadges() {
     badge.dataset.state = state;
     badge.title = sessionBadgeTitle(state);
   });
-  renderRunningRail();
   renderSessionSwitcher();
 }
 
-/* 顶部只放「正在跑的」——面板窄的时候（桌面端默认 400px）放不下常驻会话栏，
-   而多开场景下你真正需要一键切过去的，也只有正在跑的那几个。
-   其余的留在历史抽屉里，不占视觉。 */
-function renderRunningRail() {
-  const rail = document.getElementById("running-rail");
-  if (!rail) return;
-  const ids = [...sessionsRunning, ...sessionUnread]
-    .filter((id, i, arr) => arr.indexOf(id) === i && id !== currentConvId);
-  if (ids.length === 0) { rail.hidden = true; rail.innerHTML = ""; return; }
-
-  const titleOf = (id) => (_historyCache?.find(h => h.id === id)?.title) || "对话";
-  rail.innerHTML = ids.slice(0, 6).map((id) => {
-    const state = sessionBadgeState(id);
-    const label = `${titleOf(id)} — ${sessionBadgeTitle(state)}`;
-    return `<button type="button" class="rail-dot" data-state="${state}" data-id="${esc(id)}" title="${esc(label)}" aria-label="${esc(label)}"></button>`;
-  }).join("");
-  rail.hidden = false;
-}
-
-document.getElementById("running-rail")?.addEventListener("click", async (e) => {
-  const dot = e.target.closest?.(".rail-dot");
-  if (!dot) return;
-  const id = dot.dataset.id;
-  const conv = _historyCache?.find(h => h.id === id) ?? { id };
-  await loadConversation(conv);
-});
 
 /* ══════════════════════════════════════════════════════════
    会话切换器
@@ -8108,6 +8062,19 @@ function renderSessionSwitcher() {
   const state = currentConvId ? sessionBadgeState(currentConvId) : "";
   if (state) { badgeEl.dataset.state = state; badgeEl.hidden = false; }
   else { badgeEl.hidden = true; }
+
+  // 除了正看着的这个，还有几个对话在动
+  const countEl = document.getElementById("session-switcher-count");
+  if (!countEl) return;
+  const others = new Set([...sessionsRunning, ...sessionsAwaiting, ...sessionUnread]);
+  others.delete(currentConvId);
+  if (others.size > 0) {
+    countEl.textContent = String(others.size);
+    countEl.title = `另有 ${others.size} 个对话在进行或有新内容`;
+    countEl.hidden = false;
+  } else {
+    countEl.hidden = true;
+  }
 }
 
 function renderSwitcherMenu() {
