@@ -3912,7 +3912,28 @@ function tagAgentEvent(obj) {
   return tagged;
 }
 
+/* 这几个是连接级的，不属于任何一个对话：前端在路由判断之前就处理它们，
+   给它们贴上归属反而会被当成「别人的事件」拦掉。其余一律要带归属。 */
+const CONNECTION_LEVEL_EVENTS = new Set([
+  "ping",
+  "sessions_snapshot",
+  "steering_snapshot",
+  "reset_complete",
+]);
+
 const deliver = (obj) => {
+  /* 会话相关的事件必须带上它属于哪个对话，否则前端没法路由——多开时
+     别的对话的 request_ack 会被当成当前对话的，界面上就凭空多出一个
+     「正在生成」的三个点，而那一轮其实早结束了。
+     在出口统一补，比在几十个 deliver 调用点逐个记得加要可靠。 */
+  if (
+    obj && typeof obj === "object" && typeof obj.type === "string"
+    && !("conversationId" in obj) && !CONNECTION_LEVEL_EVENTS.has(obj.type)
+  ) {
+    const boundId = agentContext.getStore()?.conversationId ?? null;
+    if (boundId) obj = { ...obj, conversationId: boundId };
+  }
+
   if (activeWs && activeWs.readyState === activeWs.OPEN) {
     try {
       activeWs.send(JSON.stringify(obj));
