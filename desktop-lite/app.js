@@ -2,9 +2,15 @@
 const MIN_SIDEBAR_WIDTH = 180;
 const MAX_SIDEBAR_WIDTH = 440;
 const MIN_PANEL_WIDTH = 320;
-const MAX_PANEL_WIDTH = 900;
+function getMaxPanelWidth() {
+  /* 只给拖拽条留 6px。原来留的是 60px，那点宽度什么都放不下，却又足够把笔记
+     预览挤成一条断行的窄带——真正的沉浸是左边一点不剩。
+     完全占满到一像素不留也不行：拖拽条会被挤出屏幕，就只能靠按钮退出了。 */
+  return Math.max(MIN_PANEL_WIDTH, window.innerWidth - 6);
+}
 const SIDEBAR_WIDTH_KEY = "inkfellow-sidebar-width-v1";
 const PANEL_WIDTH_KEY = "inkfellow-panel-width-v1";
+const PANEL_MAXIMIZED_KEY = "inkfellow-panel-maximized-v1";
 const SIDEBAR_VISIBLE_KEY = "inkfellow-sidebar-visible-v1";
 const PANEL_VISIBLE_KEY = "inkfellow-panel-visible-v1";
 const LAST_FILE_KEY = "inkfellow-last-file-v1";
@@ -4167,6 +4173,44 @@ function initSidebarPeek() {
   sidebar.addEventListener("mouseleave", scheduleClose);
 }
 
+let savedFellowWidthBeforeMaximize = null;
+
+/* 全宽宽度不能就那么存下来：它是按当时的窗口宽度算出来的，换个屏幕就对不上；更要命
+   的是读回来时光有个宽度，没人知道该不该同时把左边收起来——那就成了面板全宽、笔记树
+   却还占着位，两边都是 flex:0 0 auto 不会收缩，加起来超出屏幕，面板右边一截被裁掉。
+   所以宽度这一格存的始终是「退出全宽后该回到多宽」，全宽与否单独记一个标志。 */
+function persistPanelLayout(maximized, restoreWidth) {
+  try {
+    localStorage.setItem(PANEL_MAXIMIZED_KEY, maximized ? "1" : "0");
+    if (restoreWidth) localStorage.setItem(PANEL_WIDTH_KEY, String(Math.round(restoreWidth)));
+  } catch {}
+}
+
+function toggleFellowMaximize(forceState = null) {
+  const shell = qs("shell");
+  if (shell.classList.contains("shellPanelHidden")) {
+    openFellowPanel();
+  }
+  const currentW = parseInt(shell.style.getPropertyValue("--assistant-panel-width") || getComputedStyle(shell).getPropertyValue("--assistant-panel-width"), 10) || 400;
+  const maxW = getMaxPanelWidth();
+  const isCurrentlyMaximized = shell.classList.contains("shellPanelMaximized") || currentW >= maxW - 40;
+  const shouldMaximize = forceState !== null ? forceState : !isCurrentlyMaximized;
+
+  if (shouldMaximize) {
+    savedFellowWidthBeforeMaximize = currentW >= maxW - 40 ? 460 : currentW;
+    shell.style.setProperty("--assistant-panel-width", `${maxW}px`);
+    shell.classList.add("shellPanelMaximized");
+    persistPanelLayout(true, savedFellowWidthBeforeMaximize);
+    postAgentMessage({ type: "agent-maximize-state", isMaximized: true });
+  } else {
+    const restoreW = savedFellowWidthBeforeMaximize || 460;
+    shell.style.setProperty("--assistant-panel-width", `${restoreW}px`);
+    shell.classList.remove("shellPanelMaximized");
+    persistPanelLayout(false, restoreW);
+    postAgentMessage({ type: "agent-maximize-state", isMaximized: false });
+  }
+}
+
 function initPanelResize() {
   const resizer = qs("panel-resizer");
   const shell = qs("shell");
@@ -4178,16 +4222,32 @@ function initPanelResize() {
     const startX = e.clientX;
     const startW = parseInt(getComputedStyle(shell).getPropertyValue("--assistant-panel-width"), 10) || 400;
 
+    let lastMaximized = shell.classList.contains("shellPanelMaximized");
+
     function onMove(ev) {
-      const w = clamp(startW - (ev.clientX - startX), MIN_PANEL_WIDTH, MAX_PANEL_WIDTH);
-      shell.style.setProperty("--assistant-panel-width", `${w}px`);
+      const maxW = getMaxPanelWidth();
+      const w = clamp(startW - (ev.clientX - startX), MIN_PANEL_WIDTH, maxW);
+      const maximized = w >= maxW - 30;
+      /* 一旦进入沉浸区就吸附到底。左边的笔记树和预览这一刻已经收起来了，面板要是
+         还停在「拖到哪算哪」的宽度上，右边就空出一条背景色，看着像没对齐。 */
+      shell.style.setProperty("--assistant-panel-width", `${maximized ? maxW : w}px`);
+      shell.classList.toggle("shellPanelMaximized", maximized);
+      // 状态没变就别发——鼠标每动一下都 postMessage，一秒能有几十条
+      if (maximized !== lastMaximized) {
+        lastMaximized = maximized;
+        // 记住是从多宽拖进来的，不然按钮/快捷键退出全宽时只能回落到默认那个 460
+        if (maximized) savedFellowWidthBeforeMaximize = startW >= maxW - 40 ? 460 : startW;
+        postAgentMessage({ type: "agent-maximize-state", isMaximized: maximized });
+      }
     }
 
     function onUp() {
       shell.classList.remove("shellResizing");
       resizer.releasePointerCapture(e.pointerId);
+      const maximized = shell.classList.contains("shellPanelMaximized");
       const w = parseInt(shell.style.getPropertyValue("--assistant-panel-width"), 10);
-      if (w) localStorage.setItem(PANEL_WIDTH_KEY, w);
+      // 全宽时存的不是当下这个宽度，是退出全宽后该回到哪——见 persistPanelLayout
+      persistPanelLayout(maximized, maximized ? savedFellowWidthBeforeMaximize : w);
       resizer.removeEventListener("pointermove", onMove);
       resizer.removeEventListener("pointerup", onUp);
     }
@@ -4198,7 +4258,14 @@ function initPanelResize() {
 
   resizer.addEventListener("dblclick", () => {
     if (shell.classList.contains("shellPanelHidden")) openFellowPanel();
-    else togglePanel();
+    else toggleFellowMaximize();
+  });
+
+  /* 全宽是按当时的窗口宽度算出来的一个固定像素值。窗口一放大，右边就空出一条；
+     缩小则被裁掉。跟着窗口重算。 */
+  window.addEventListener("resize", () => {
+    if (!shell.classList.contains("shellPanelMaximized")) return;
+    shell.style.setProperty("--assistant-panel-width", `${getMaxPanelWidth()}px`);
   });
 }
 
@@ -4211,6 +4278,14 @@ function restoreLayout() {
 
   const pw = localStorage.getItem(PANEL_WIDTH_KEY);
   if (pw) shell.style.setProperty("--assistant-panel-width", `${pw}px`);
+
+  /* 上次退出时停在全宽：宽度按这次的窗口重算，并且必须连 shellPanelMaximized 一起
+     恢复——只设宽度的话左边还占着位，右边一截会被裁掉（见 persistPanelLayout）。 */
+  if (localStorage.getItem(PANEL_MAXIMIZED_KEY) === "1") {
+    savedFellowWidthBeforeMaximize = parseInt(pw, 10) || 460;
+    shell.style.setProperty("--assistant-panel-width", `${getMaxPanelWidth()}px`);
+    shell.classList.add("shellPanelMaximized");
+  }
 
   const sv = localStorage.getItem(SIDEBAR_VISIBLE_KEY);
   if (sv === "0") shell.classList.add("shellSidebarHidden");
@@ -4331,6 +4406,12 @@ function initKeyboard() {
       void createNote();
     }
 
+    if (mod && e.shiftKey && (e.key === "l" || e.key === "L" || e.key === "f" || e.key === "F")) {
+      e.preventDefault();
+      toggleFellowMaximize();
+      return;
+    }
+
     if (mod && e.key === "l") {
       e.preventDefault();
       if (qs("shell").classList.contains("shellPanelHidden")) openFellowPanel();
@@ -4439,6 +4520,10 @@ function wireEvents() {
       if (!qs("shell").classList.contains("shellPanelHidden")) togglePanel();
       return;
     }
+    if (event.data?.type === "agent-toggle-maximize") {
+      toggleFellowMaximize();
+      return;
+    }
     if (event.data?.type !== "agent-ready") return;
     state.agentReady = true;
     setAgentLoading(false);
@@ -4447,6 +4532,10 @@ function wireEvents() {
     });
     sendNoteContext();
     sendVaultNotes(true);
+    postAgentMessage({
+      type: "agent-maximize-state",
+      isMaximized: qs("shell").classList.contains("shellPanelMaximized"),
+    });
   });
 
   qs("search-input").addEventListener("input", (e) => {

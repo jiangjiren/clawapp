@@ -2350,6 +2350,31 @@ input, textarea { font-family: inherit; }
 .assistantPanelResizer:hover::after,
 .shell.shellResizing .assistantPanelResizer::after { opacity: 0.4; }
 
+.shell.shellResizing .assistantPanel,
+.shell.shellResizing .sidebar {
+  transition: none !important;
+}
+
+/* ── 沉浸全宽 ─────────────────────────────────────
+   左边得彻底让出来。原来只是把面板拉到离屏幕边 60px，剩下那点宽度放不下任何
+   东西——笔记预览被压成五十来像素的一条，每行字都断在半截，比什么都不留更难看。
+   拖拽条留着（6px，平时几乎看不见），沉浸之后照样能拖回来。 */
+.shell.shellPanelMaximized .sidebar,
+.shell.shellPanelMaximized .reader {
+  width: 0 !important;
+  min-width: 0;
+  /* 预览区是 flex:1 1 0，光把 width 归零没用——flex-grow 会照样把它撑回来，
+     必须连 grow 一起摁住 */
+  flex: 0 0 0 !important;
+  opacity: 0;
+  pointer-events: none;
+  border-right-width: 0;
+}
+
+/* 沉浸时鼠标扫过左边缘不该把笔记树唤出来盖在对话上 */
+.shell.shellPanelMaximized .sidebarPeekZone,
+.shell.shellPanelMaximized .sidebarResizer { display: none; }
+
 .assistantPanel {
   position: relative;
   z-index: 2;
