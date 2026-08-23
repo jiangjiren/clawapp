@@ -2359,8 +2359,13 @@ input, textarea { font-family: inherit; }
    左边得彻底让出来。原来只是把面板拉到离屏幕边 60px，剩下那点宽度放不下任何
    东西——笔记预览被压成五十来像素的一条，每行字都断在半截，比什么都不留更难看。
    拖拽条留着（6px，平时几乎看不见），沉浸之后照样能拖回来。 */
-.shell.shellPanelMaximized .sidebar,
-.shell.shellPanelMaximized .reader {
+/* :not(.shellPanelHidden) 不能省。面板收起时（左上角那个 >>、Ctrl+L、Fellow 按钮，
+   走的都是 togglePanel）沉浸标记还留着，这两条照样把笔记树和预览摁在 0 宽 +
+   opacity:0 上——面板没了、左边也没了，整个窗口一片空白，连 .reader 里的 Fellow
+   按钮都点不到，只剩 Ctrl+L 一条活路。
+   加上它之后收起/展开是对称的：收起时左边回来，再展开还是全宽。 */
+.shell.shellPanelMaximized:not(.shellPanelHidden) .sidebar,
+.shell.shellPanelMaximized:not(.shellPanelHidden) .reader {
   width: 0 !important;
   min-width: 0;
   /* 预览区是 flex:1 1 0，光把 width 归零没用——flex-grow 会照样把它撑回来，
@@ -2371,9 +2376,9 @@ input, textarea { font-family: inherit; }
   border-right-width: 0;
 }
 
-/* 沉浸时鼠标扫过左边缘不该把笔记树唤出来盖在对话上 */
-.shell.shellPanelMaximized .sidebarPeekZone,
-.shell.shellPanelMaximized .sidebarResizer { display: none; }
+/* 沉浸时鼠标扫过左边缘不该把笔记树唤出来盖在对话上（面板收起时同上，得放行） */
+.shell.shellPanelMaximized:not(.shellPanelHidden) .sidebarPeekZone,
+.shell.shellPanelMaximized:not(.shellPanelHidden) .sidebarResizer { display: none; }
 
 .assistantPanel {
   position: relative;

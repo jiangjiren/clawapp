@@ -4188,16 +4188,18 @@ function persistPanelLayout(maximized, restoreWidth) {
 
 function toggleFellowMaximize(forceState = null) {
   const shell = qs("shell");
-  if (shell.classList.contains("shellPanelHidden")) {
-    openFellowPanel();
-  }
+  /* 面板收着的时候按这个键，人要的是「打开并铺满」，不会是「打开然后退出全宽」
+     ——哪怕它收起前正好停在全宽上。 */
+  const wasHidden = shell.classList.contains("shellPanelHidden");
+  if (wasHidden) openFellowPanel();
   const currentW = parseInt(shell.style.getPropertyValue("--assistant-panel-width") || getComputedStyle(shell).getPropertyValue("--assistant-panel-width"), 10) || 400;
   const maxW = getMaxPanelWidth();
   const isCurrentlyMaximized = shell.classList.contains("shellPanelMaximized") || currentW >= maxW - 40;
-  const shouldMaximize = forceState !== null ? forceState : !isCurrentlyMaximized;
+  const shouldMaximize = forceState !== null ? forceState : (wasHidden || !isCurrentlyMaximized);
 
   if (shouldMaximize) {
-    savedFellowWidthBeforeMaximize = currentW >= maxW - 40 ? 460 : currentW;
+    // 本来就在全宽上，当下这个宽度就是全宽，拿它当「退出后回到哪」等于把记录抹了
+    if (!isCurrentlyMaximized) savedFellowWidthBeforeMaximize = currentW;
     shell.style.setProperty("--assistant-panel-width", `${maxW}px`);
     shell.classList.add("shellPanelMaximized");
     persistPanelLayout(true, savedFellowWidthBeforeMaximize);
