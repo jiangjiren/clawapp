@@ -483,3 +483,20 @@ test("real SDK query keeps one CLI process open across AsyncIterable turns", asy
   assert.equal(runtime.running, false);
   runtime.close();
 });
+
+test("removeConversation 只清这一个对话的，别人的一条不碰", () => {
+  /* /clear 走的就是这条路。steeringQueue 是全局一份，按 ownerToken 清会漏掉
+     同一对话上一轮剩下的；无差别全清则会把别的对话排着的消息一起扔掉——
+     那些消息再也发不出去，而用户根本没在那个窗口里动过手。 */
+  const queue = new SteeringQueue();
+  queue.enqueue({ userMessageId: "a1", ownerToken: "turn-1", conversationId: "conv_a" });
+  queue.enqueue({ userMessageId: "a2", ownerToken: "turn-2", conversationId: "conv_a" });
+  queue.enqueue({ userMessageId: "b1", ownerToken: "turn-3", conversationId: "conv_b" });
+  queue.claimNext("turn-3");   // 正在发送中的也算这个对话的，清 a 时不该被牵连
+
+  const removed = queue.removeConversation("conv_a");
+  assert.deepEqual(removed.map(i => i.userMessageId).sort(), ["a1", "a2"], "同一对话跨轮的都要清掉");
+  assert.deepEqual(queue.snapshot().map(i => i.userMessageId), ["b1"], "别的对话的不能动");
+
+  assert.deepEqual(queue.removeConversation(""), [], "拿不到对话 id 时什么都不清，别误伤");
+});

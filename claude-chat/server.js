@@ -3983,20 +3983,35 @@ function acknowledgeClientRequest(requestId, state) {
   deliver({ type: "request_ack", userMessageId: requestId, state });
 }
 
+let sessionsSnapshotPending = null;
+
 /**
  * 告诉前端现在有哪几个对话在跑、哪几个在等你回话。
  *
  * run_attached 只报一个「主要」的对话，那是单会话时代的协议；多开之后前端要
  * 在会话列表上标状态点，需要的是全集。分成两条事件是为了老逻辑不用改。
+ *
+ * 刻意不当场算 runningIds，而是推迟到这一拍结束：所有调用点都在「一轮刚结束」
+ * 的收尾代码里，而收尾是分好几步走完的——completeClientRequest 跑完之后，才轮到
+ * claudeTurnCompletionPending 归零（finishClaudeTurn）和 abortCtrl 归零（三家
+ * provider 的 finally）。当场算，这两个字段还是「忙」，刚跑完的对话就被报成在跑。
+ *
+ * 而这偏偏是那一轮的最后一条快照，之后再没人来纠正：前端切回那个对话，看到的是
+ * 一个永远转圈、发送键还卡在「停止」的界面。推迟一拍读到的才是终态，而且顺带把
+ * 一轮里的多次调用合并成一条。
  */
 function deliverSessionsSnapshot() {
-  const running = sessions.runningIds();
-  deliver({
-    type: "sessions_snapshot",
-    limit: MAX_CONCURRENT_CONVERSATIONS,
-    running,
-    // 「需要你回话」比「正在跑」更该抢注意力：它卡住了，不点就一直卡着
-    awaiting: running.filter(id => sessions.peek(id)?.pendingAskUserQuestion),
+  if (sessionsSnapshotPending) return;
+  sessionsSnapshotPending = setImmediate(() => {
+    sessionsSnapshotPending = null;
+    const running = sessions.runningIds();
+    deliver({
+      type: "sessions_snapshot",
+      limit: MAX_CONCURRENT_CONVERSATIONS,
+      running,
+      // 「需要你回话」比「正在跑」更该抢注意力：它卡住了，不点就一直卡着
+      awaiting: running.filter(id => sessions.peek(id)?.pendingAskUserQuestion),
+    });
   });
 }
 
@@ -4189,19 +4204,27 @@ function applyNextClaudeSteering(safePoint) {
   }
 }
 
-function clearAllSteering(reason) {
-  const ownerTokens = [...new Set(steeringQueue.snapshot().map(item => item.ownerToken))];
-  for (const ownerToken of ownerTokens) {
-    for (const item of steeringQueue.removeOwner(ownerToken)) {
-      removeFallbackPrompt(item);
-      rememberClientRequest(item.userMessageId, "stopped");
-      deliver({
-        type: "steering_removed",
-        userMessageId: item.userMessageId,
-        conversationId: item.conversationId,
-        reason,
-      });
-    }
+/**
+ * 清掉排着的插话。
+ *
+ * @param {string|null} conversationId 只清这一个对话的；给不出来时才全清。
+ *   /clear 必须带上：steeringQueue 是全局一份，无差别清空会把别的对话排着的
+ *   消息一起扔掉——那些消息再也不会发出去，而用户根本没在那个窗口里动过手。
+ */
+function clearAllSteering(reason, conversationId = null) {
+  const removed = conversationId
+    ? steeringQueue.removeConversation(conversationId)
+    : [...new Set(steeringQueue.snapshot().map(item => item.ownerToken))]
+        .flatMap(ownerToken => steeringQueue.removeOwner(ownerToken));
+  for (const item of removed) {
+    removeFallbackPrompt(item);
+    rememberClientRequest(item.userMessageId, "stopped");
+    deliver({
+      type: "steering_removed",
+      userMessageId: item.userMessageId,
+      conversationId: item.conversationId,
+      reason,
+    });
   }
 }
 
@@ -4725,7 +4748,7 @@ wss.on("connection", (ws) => {
       session.claudeTurnEpoch += 1;
       clearPendingAskUserQuestion("session reset");
       finalizeActiveAssistantHistory("stopped");
-      clearAllSteering("reset");
+      clearAllSteering("reset", historyIdOrNull(msg.conversationId) || session.activeHistoryConversationId);
       // 派发会话一并作废——重置后是新话题，再接着上一轮就成了串台。
       // 必须赶在 clearActiveHistoryConversation() 把 id 置空之前取。
       // 这里不能用 normalizeHistoryId：它拿不到合法值时会造一个新 id，

@@ -141,6 +141,24 @@ export class SteeringQueue {
     return removed;
   }
 
+  /**
+   * 移除某个对话排着的全部插话，不论处在哪个状态。
+   *
+   * ownerToken 是「哪一轮」，跟对话不是一回事：同一个对话的两轮是两个 token。
+   * /clear 要清的是这个对话的全部，按对话清才既不漏自己的、也不碰别人的。
+   */
+  removeConversation(conversationId) {
+    const id = String(conversationId ?? "").trim();
+    if (!id) return [];
+    const removed = [];
+    this.items = this.items.filter(item => {
+      if (item.conversationId !== id) return true;
+      removed.push(item);
+      return false;
+    });
+    return removed;
+  }
+
   reorder(ownerToken, orderedIds) {
     if (!ownerToken || !Array.isArray(orderedIds)) return false;
     const owned = this.items.filter(item => item.ownerToken === ownerToken && item.state === "queued");
