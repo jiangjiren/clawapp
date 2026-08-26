@@ -1752,6 +1752,9 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
 }
 .header-btn:hover { background: var(--bg3); color: var(--text); }
 #btn-collapse-desktop-panel:not([hidden]) { margin-right: auto; }
+/* 全宽时藏 >> 用 visibility 不用 display：它带着 margin-right:auto，真让它从
+   布局里消失，flex:1 的标签栏会当场往左长 36px，每进出一次全宽就横跳一下。 */
+.header-btn.header-btn-vacant { visibility: hidden; pointer-events: none; }
 
 /* ── History dropdown ── */
 #history-backdrop {
@@ -2099,9 +2102,9 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
   width: min(340px, calc(100% - 20px));
   max-height: calc(100dvh - 74px);
   overflow: hidden;
-  border: 1px solid rgba(0, 0, 0, 0.08);
+  border: 1px solid var(--border);
   border-radius: 16px;
-  background: rgba(249, 249, 248, 0.95);
+  background: color-mix(in srgb, var(--bg) 92%, transparent);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
   box-shadow: 0 16px 48px rgba(0,0,0,0.12), 0 4px 12px rgba(0,0,0,0.06);
@@ -2138,7 +2141,7 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
   align-items: center;
   gap: 6px;
   padding: 14px 16px;
-  border-bottom: 1px solid rgba(0,0,0,0.06);
+  border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
 .auth-title {
@@ -2169,7 +2172,7 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
   display: grid; place-items: center;
   transition: background 0.15s, color 0.15s;
 }
-.auth-close:hover, .auth-back:hover { background: rgba(0,0,0,0.06); color: var(--text); }
+.auth-close:hover, .auth-back:hover { background: var(--bg3); color: var(--text); }
 .auth-back { background: transparent; margin-left: -6px; }
 
 /* ── Profile list ── */
@@ -2192,20 +2195,19 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 12px 14px;
+  padding: 11px 14px;
   cursor: pointer;
-  border: 1px solid rgba(0,0,0,0.04);
+  border: 1px solid var(--border);
   border-radius: 12px;
   background: var(--bg-document);
   width: 100%;
   text-align: left;
-  transition: all 0.15s ease;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.02);
+  transition: background 0.15s ease, border-color 0.15s ease;
+  box-shadow: var(--shadow-soft);
 }
-.auth-profile-item:hover { 
-  background: #fafafa; 
-  border-color: rgba(0,0,0,0.08);
-  box-shadow: 0 2px 6px rgba(0,0,0,0.04);
+.auth-profile-item:hover {
+  background: var(--bg3);
+  border-color: var(--border-strong);
 }
 .auth-profile-item.active { 
   background: color-mix(in srgb, var(--accent) 4%, var(--bg-document));
@@ -2218,7 +2220,7 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
   width: 18px;
   height: 18px;
   border-radius: 50%;
-  border: 1.5px solid rgba(0,0,0,0.15);
+  border: 1.5px solid var(--border-strong);
   display: grid;
   place-items: center;
   color: transparent;
@@ -2250,84 +2252,69 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
   white-space: nowrap;
 }
 .auth-profile-item.active .auth-profile-name { color: var(--accent); }
+.auth-profile-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+.auth-profile-head .auth-profile-name { min-width: 0; }
 .auth-profile-meta {
   font-size: 11px;
   color: var(--text-dim);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   display: flex;
   align-items: center;
   gap: 6px;
+  min-width: 0;
 }
 
-/* 右侧操作按钮组 */
-.auth-limit-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  max-width: 100%;
-  border: 1px solid var(--border-strong);
-  background: var(--bg3);
+/* 状态：一个点 + 一行中文。不再叠彩色 pill、emoji 和时钟图标 */
+.auth-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--text-dim);
+  opacity: 0.5;
+}
+.auth-dot.ok   { background: var(--green);  opacity: 1; }
+.auth-dot.warn { background: var(--yellow); opacity: 1; }
+.auth-dot.err  { background: var(--red);    opacity: 1; }
+.auth-dot.idle { animation: authDotBreathe var(--beat) ease-in-out infinite; }
+@keyframes authDotBreathe { 0%, 100% { opacity: 0.22; } 50% { opacity: 0.75; } }
+
+/* 账号名里已经带了厂商时就不重复写，这里只兜自定义命名的账号 */
+.auth-vendor {
+  font-size: 10.5px;
+  font-weight: 500;
   color: var(--text-dim);
-  border-radius: 999px;
-  padding: 1px 6px;
-  font-size: 10px;
-  font-weight: 600;
-  line-height: 1.4;
   flex-shrink: 0;
 }
-.auth-limit-text {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
+.auth-status-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
-.auth-limit-window {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  color: var(--text-dim);
-}
 .auth-limit-percent {
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
   color: var(--green);
-  font-weight: 750;
-  font-variant-numeric: tabular-nums;
 }
-.auth-limit-percent.warning { color: var(--yellow); }
+.auth-limit-percent.warning  { color: var(--yellow); }
 .auth-limit-percent.critical { color: var(--red); }
-.auth-limit-separator {
-  color: var(--text-dim);
-  opacity: 0.52;
-}
-.auth-limit-reset {
-  color: var(--text-dim);
-  font-variant-numeric: tabular-nums;
-}
-.auth-limit-clock {
-  width: 11px;
-  height: 11px;
-  color: var(--text-dim);
-  opacity: 0.72;
-  flex-shrink: 0;
-}
-.auth-limit-badge.muted {
-  color: var(--text-dim);
-}
+
+/* 右侧操作按钮组 */
 
 .auth-profile-actions {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 2px;
   flex-shrink: 0;
-  opacity: 0;
-  transform: translateX(4px);
-  transition: all 0.2s ease;
+  opacity: 0.3;
+  transition: opacity 0.15s ease;
 }
-.auth-profile-item:hover .auth-profile-actions { 
-  opacity: 1; 
-  transform: translateX(0);
-}
+.auth-profile-item:hover .auth-profile-actions { opacity: 1; }
 
 .auth-profile-edit,
 .auth-profile-del {
@@ -2341,34 +2328,105 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
   transition: all 0.15s ease;
   padding: 0;
 }
-.auth-profile-edit:hover { background: rgba(0,0,0,0.05); color: var(--text); }
+.auth-profile-edit:hover { background: var(--bg3); color: var(--text); }
 .auth-profile-del:hover  { background: rgba(192,57,43,0.1); color: var(--red); }
 
 /* ── Section labels in auth dialog ── */
 .auth-section-label {
-  font-size: 11px;
-  font-weight: 650;
+  font-size: 11.5px;
+  font-weight: 600;
   color: var(--text-dim);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
   padding: 12px 14px 6px;
   flex-shrink: 0;
 }
 .auth-section-label + #auth-profile-list { padding-top: 4px; }
 #auth-wechat-section {
-  border-top: 1px solid rgba(0,0,0,0.06);
+  border-top: 1px solid var(--border);
   padding: 0 12px 14px;
   flex-shrink: 0;
 }
+/* 渠道卡跟账号卡同一套语言：一行讲完，要扫码才展开 */
 #wechat-card {
-  padding: 12px;
-  border-radius: 10px;
-  background: rgba(0,0,0,0.015);
-  border: 1px solid rgba(0,0,0,0.06);
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: var(--bg-document);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-soft);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
+}
+.wechat-row { display: flex; align-items: center; gap: 10px; }
+.wechat-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.wechat-name { font-size: 13.5px; font-weight: 600; color: var(--text); }
+.wechat-meta {
+  font-size: 11px;
+  color: var(--text-dim);
+  display: flex;
   align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+#wechat-action-btn {
+  flex-shrink: 0;
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+#wechat-action-btn:hover { background: var(--bg3); }
+#wechat-action-btn.danger { color: var(--red); border-color: color-mix(in srgb, var(--red) 35%, transparent); }
+#wechat-qr-area {
+  display: none;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+#wechat-qr-img {
+  width: 148px;
+  height: 148px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: #fff;
+}
+.wechat-hint { font-size: 11px; color: var(--text-dim); text-align: center; }
+.wechat-hint.warn { color: var(--yellow); font-weight: 500; }
+#wechat-verify-area { display: none; flex-direction: column; gap: 6px; width: 100%; align-items: center; }
+#wechat-verify-row { display: flex; gap: 6px; width: 84%; }
+#wechat-verify-input {
+  flex: 1;
+  height: 30px;
+  padding: 0 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--bg-document);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: center;
+  outline: none;
+}
+#wechat-verify-submit {
+  height: 30px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #fff;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
 }
 
 /* ── Add account 区域 ── */
@@ -2383,9 +2441,9 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
   justify-content: center;
   gap: 8px;
   padding: 12px;
-  border: 1px dashed rgba(0,0,0,0.15);
+  border: 1px dashed var(--border-strong);
   border-radius: 12px;
-  background: rgba(255,255,255,0.5);
+  background: transparent;
   color: var(--text-dim);
   font: inherit;
   font-size: 13px;
@@ -2417,11 +2475,9 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
 #auth-add-form::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 
 .form-group-title {
-  font-size: 11px;
-  font-weight: 650;
+  font-size: 11.5px;
+  font-weight: 600;
   color: var(--text-dim);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
   margin: 0 0 6px 4px;
 }
 .form-group-title.hidden { display: none; }
@@ -2439,10 +2495,10 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
   gap: 1px;
   margin-bottom: 20px;
   background: var(--bg-document);
-  border: 1px solid rgba(0,0,0,0.06);
+  border: 1px solid var(--border);
   border-radius: 12px;
   overflow: hidden;
-  box-shadow: 0 1px 2px rgba(0,0,0,0.02);
+  box-shadow: var(--shadow-soft);
 }
 .form-group.hidden { display: none; }
 
@@ -2451,7 +2507,7 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
   flex-direction: column;
   padding: 10px 12px;
   background: var(--bg-document);
-  border-bottom: 1px solid rgba(0,0,0,0.04);
+  border-bottom: 1px solid var(--border);
 }
 .add-field:last-child { border-bottom: none; }
 .add-field.hidden { display: none; }
@@ -2467,7 +2523,7 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
   height: 34px;
   border: 1px solid transparent;
   border-radius: 8px;
-  background: rgba(0,0,0,0.03);
+  background: var(--bg3);
   color: var(--text);
   font: inherit; font-size: 13px;
   padding: 0 10px;
@@ -2480,7 +2536,7 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
   border-color: color-mix(in srgb, var(--accent) 40%, transparent);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 10%, transparent);
 }
-.add-field input::placeholder { color: rgba(0,0,0,0.25); }
+.add-field input::placeholder { color: var(--text-dim); opacity: 0.65; }
 
 /* 自定义 select */
 .select-wrapper {
@@ -2495,7 +2551,7 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
   height: 34px;
   border: 1px solid transparent;
   border-radius: 8px;
-  background: rgba(0,0,0,0.03);
+  background: var(--bg3);
   color: var(--text);
   font: inherit; font-size: 13px; font-weight: 500;
   padding: 0 32px 0 10px;
@@ -2515,8 +2571,13 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
   color: var(--text-dim);
 }
 
+/* 提交键钉在底部，永远不用滚到才看得见 */
 .add-actions {
-  margin-top: 8px;
+  position: sticky;
+  bottom: 0;
+  margin-top: 12px;
+  padding: 10px 0 2px;
+  background: linear-gradient(to bottom, transparent, var(--bg) 32%);
 }
 .add-submit {
   width: 100%;
@@ -2524,14 +2585,34 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
   border: none;
   border-radius: 10px;
   background: var(--text);
-  color: #fff;
+  color: var(--bg);
   font: inherit; font-size: 13px; font-weight: 600;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: opacity 0.15s ease, transform 0.15s ease;
   display: grid; place-items: center;
 }
-.add-submit:hover { background: #3a3835; transform: scale(0.99); }
-.add-submit:disabled { background: #d0cdc9; cursor: not-allowed; transform: none; }
+.add-submit:hover { opacity: 0.86; }
+.add-submit:active { transform: scale(0.99); }
+.add-submit:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+
+/* 高级设置：预设已经填好的东西默认收起来 */
+.auth-adv { margin-bottom: 4px; }
+.auth-adv > summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-dim);
+  padding: 8px 4px 8px 2px;
+  user-select: none;
+}
+.auth-adv > summary::-webkit-details-marker { display: none; }
+.auth-adv > summary:hover { color: var(--text); }
+.auth-adv-chev { flex-shrink: 0; transition: transform 0.18s var(--ease-out); }
+.auth-adv[open] > summary .auth-adv-chev { transform: rotate(90deg); }
 
 .add-error {
   font-size: 11.5px;
@@ -2761,7 +2842,7 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
         <button class="auth-back" id="auth-close" title="关闭" aria-label="关闭账号设置">
           <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M9 13L3 7L9 1" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
-        <span class="auth-title" id="auth-dialog-title">账号 & 渠道</span>
+        <span class="auth-title" id="auth-dialog-title">账号 &amp; 渠道</span>
         <span id="auth-status" aria-live="polite"></span>
       </header>
 
@@ -2785,23 +2866,26 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
       <div id="auth-wechat-section">
         <div class="auth-section-label" aria-hidden="true">接入渠道</div>
         <div id="wechat-card">
-          <div id="wechat-status-text" style="font-size: 13px; color: var(--fg-color-secondary); width: 100%; text-align: left;">
-            正在检查微信机器人连接状态...
+          <div class="wechat-row">
+            <span class="wechat-info">
+              <span class="wechat-name">微信</span>
+              <span class="wechat-meta" id="wechat-status-text">
+                <span class="auth-dot idle" aria-hidden="true"></span><span class="auth-status-text">检测中…</span>
+              </span>
+            </span>
+            <button id="wechat-action-btn" type="button">连接</button>
           </div>
-          <div id="wechat-qr-area" style="display: none; flex-direction: column; align-items: center; gap: 8px; margin: 8px 0; width: 100%;">
-            <img id="wechat-qr-img" src="" style="width: 160px; height: 160px; border-radius: 8px; border: 1px solid var(--border-color); box-shadow: 0 4px 12px rgba(0,0,0,0.08);" alt="微信登录二维码"/>
-            <span style="font-size: 12px; color: var(--fg-color-secondary);">请用微信扫码并在手机上同意绑定</span>
-            <div id="wechat-verify-area" style="display: none; flex-direction: column; gap: 6px; width: 100%; align-items: center;">
-              <span style="font-size: 12px; color: #d97757; font-weight: 500;">👉 请输入手机微信显示的 4 位数配对码：</span>
-              <div style="display: flex; gap: 6px; width: 80%;">
-                <input id="wechat-verify-input" type="text" maxlength="6" style="flex: 1; padding: 6px; border-radius: 4px; border: 1px solid var(--border-color); font-size: 13px; text-align: center; font-weight: bold; background: var(--bg-color); color: var(--fg-color);" placeholder="0000"/>
-                <button id="wechat-verify-submit" style="padding: 6px 12px; font-size: 12px; background: var(--accent-color, var(--accent)); color: white; border: none; border-radius: 4px; cursor: pointer;">确认</button>
+          <div id="wechat-qr-area">
+            <img id="wechat-qr-img" src="" alt="微信登录二维码"/>
+            <span class="wechat-hint">用微信扫码，并在手机上确认绑定</span>
+            <div id="wechat-verify-area">
+              <span class="wechat-hint warn">输入手机微信上显示的 4 位配对码</span>
+              <div id="wechat-verify-row">
+                <input id="wechat-verify-input" type="text" maxlength="6" placeholder="0000"/>
+                <button id="wechat-verify-submit" type="button">确认</button>
               </div>
             </div>
           </div>
-          <button id="wechat-action-btn" class="auth-add-toggle" style="width: 100%; height: 36px; display: flex; align-items: center; justify-content: center; background: none; border: 1px dashed var(--border-color); border-radius: 6px; font-size: 13px; cursor: pointer; color: var(--fg-color); transition: all 0.2s;">
-            连接微信机器人
-          </button>
         </div>
       </div>
     </div>
@@ -2817,8 +2901,7 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
       </header>
       
       <div id="auth-add-form" role="form" aria-label="添加 / 编辑账号">
-          <!-- 分组 1: 基本信息 -->
-          <div class="form-group-title">基本信息</div>
+          <!-- 基本信息：只有这一段是常驻的 -->
           <div class="form-group">
             <div class="add-field" id="add-segment">
               <label for="add-provider-select">厂商</label>
@@ -2847,37 +2930,37 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
             </div>
           </div>
 
-          <!-- 分组 2: 模型配置 -->
-          <div class="form-group-title">模型映射配置</div>
-          <div class="form-group">
-            <div class="add-field" id="add-field-opus">
-              <label for="add-opus">Opus 级别模型 (旗舰)</label>
-              <input id="add-opus" type="text" autocomplete="off" spellcheck="false" placeholder="旗舰级任务" />
+          <!-- 选完厂商这些就已经填好了，多数人一次都不用打开 -->
+          <details class="auth-adv" id="auth-advanced">
+            <summary>
+              <svg class="auth-adv-chev" width="9" height="9" viewBox="0 0 10 10" fill="none" aria-hidden="true"><path d="M3.5 1L7 5L3.5 9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              高级：模型映射 · 擅长领域
+            </summary>
+            <div class="form-group" style="margin-top:6px">
+              <div class="add-field" id="add-field-opus">
+                <label for="add-opus">旗舰档 · Opus</label>
+                <input id="add-opus" type="text" autocomplete="off" spellcheck="false" placeholder="旗舰级任务" />
+              </div>
+              <div class="add-field" id="add-field-sonnet">
+                <label for="add-sonnet">均衡档 · Sonnet</label>
+                <input id="add-sonnet" type="text" autocomplete="off" spellcheck="false" placeholder="留空同旗舰档" />
+              </div>
+              <div class="add-field" id="add-field-haiku">
+                <label for="add-haiku">轻量档 · Haiku</label>
+                <input id="add-haiku" type="text" autocomplete="off" spellcheck="false" placeholder="留空同均衡档" />
+              </div>
+              <div class="add-field" id="add-field-goodat">
+                <label for="add-goodat">擅长什么任务（选填）</label>
+                <input id="add-goodat" type="text" autocomplete="off" spellcheck="false" placeholder="留空用默认描述" />
+                <p class="add-hint">跨厂商派发时给主模型看，用来判断什么任务适合交给这个账号。</p>
+              </div>
             </div>
-            <div class="add-field" id="add-field-sonnet">
-              <label for="add-sonnet">Sonnet 级别模型 (均衡)</label>
-              <input id="add-sonnet" type="text" autocomplete="off" spellcheck="false" placeholder="均衡任务（留空同 Opus）" />
-            </div>
-            <div class="add-field" id="add-field-haiku">
-              <label for="add-haiku">Haiku 级别模型 (轻量)</label>
-              <input id="add-haiku" type="text" autocomplete="off" spellcheck="false" placeholder="快速 / subagent（留空同 Sonnet）" />
-            </div>
-          </div>
-
-          <!-- 分组 3: 派发提示 -->
-          <div class="form-group-title">擅长领域（选填）</div>
-          <div class="form-group">
-            <div class="add-field" id="add-field-goodat">
-              <label for="add-goodat">擅长什么任务</label>
-              <input id="add-goodat" type="text" autocomplete="off" spellcheck="false" placeholder="留空用默认描述，如：超长上下文通读、跨大量文件梳理" />
-              <p class="add-hint">跨厂商派发时给主模型看，用来判断什么任务适合交给这个账号。</p>
-            </div>
-          </div>
+          </details>
 
           <p class="add-error" id="add-error"></p>
           <div class="add-actions">
             <button class="add-submit" id="add-submit" type="button">确认添加</button>
-        </div>
+          </div>
       </div>
     </div>
   </section>
@@ -2958,7 +3041,7 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
         <div id="model-picker">
           <button id="model-btn" class="toolbar-picker-btn" aria-label="选择模型" aria-haspopup="listbox">
             <span id="model-label">Sonnet 5</span>
-            <span id="effort-label-inline" class="effort-inline">中</span>
+            <span id="effort-label-inline" class="effort-inline">高</span>
             <svg width="7" height="7" viewBox="0 0 8 8" fill="none" aria-hidden="true"><path d="M1.5 5.3L4 2.8l2.5 2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
           </button>
           <div id="model-dropdown" class="picker-dropdown" role="listbox" aria-label="模型列表">
@@ -2994,11 +3077,11 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
                 <span class="picker-option-name">轻 <span class="picker-option-code">low</span></span>
                 <span class="picker-option-desc">降低推理强度，更快回复</span>
               </button>
-              <button class="picker-option effort-option active" data-effort="medium" data-label="中" role="option" aria-selected="true">
+              <button class="picker-option effort-option" data-effort="medium" data-label="中" role="option" aria-selected="false">
                 <span class="picker-option-name">中 <span class="picker-option-code">medium</span></span>
                 <span class="picker-option-desc">日常推理强度</span>
               </button>
-              <button class="picker-option effort-option" data-effort="high" data-label="高" role="option" aria-selected="false">
+              <button class="picker-option effort-option active" data-effort="high" data-label="高" role="option" aria-selected="true">
                 <span class="picker-option-name">高 <span class="picker-option-code">high</span></span>
                 <span class="picker-option-desc">提高推理强度，适合复杂问题</span>
               </button>
@@ -3701,21 +3784,13 @@ function setAuthStatus(type, text, isForm = false) {
 }
 
 // ── Provider display metadata ─────────────────────────────
-const PROVIDER_COLOR = {
-  claude: "#d97757", anthropic: "#c96442", deepseek: "#0071e3", openrouter: "#8b5cf6", minimax: "#ff6b35", custom: "#6b7280",
-  codex: "#10a37f", antigravity: "#4285f4",
-};
 const PROVIDER_LABEL = {
   claude: "Claude", anthropic: "Anthropic", deepseek: "DeepSeek", openrouter: "OpenRouter", minimax: "MiniMax", custom: "自定义",
   codex: "GPT", antigravity: "Gemini",
 };
 
-function providerBadge(provider) {
-  const c = PROVIDER_COLOR[provider] ?? PROVIDER_COLOR.custom;
-  const l = PROVIDER_LABEL[provider] ?? provider;
-  return `<span style="font-size:9.5px;font-weight:650;letter-spacing:.04em;padding:1px 5px;border-radius:3px;background:${c}1a;color:${c};border:1px solid ${c}30;flex-shrink:0">${escapeHtml(l)}</span>`;
-}
-
+const ICON_EDIT  = '<svg width="13" height="13" viewBox="0 0 13 13" fill="none" aria-hidden="true"><path d="M8.5 2L11 4.5L4.5 11H2V8.5L8.5 2Z" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const ICON_TRASH = '<svg width="13" height="13" viewBox="0 0 13 13" fill="none" aria-hidden="true"><path d="M2 3.5h9M5.5 3.5V2.5h2v1M4 3.5l.6 7.5h3.8l.6-7.5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 // ── Render profile list ────────────────────────────────────
 let _providerUsageLimits = {
   claude: { status: "idle" },
@@ -3723,8 +3798,6 @@ let _providerUsageLimits = {
 };
 let _usageLimitsTimer = null;
 let _usageLimitsRequestSeq = 0;
-
-const LIMIT_CLOCK_ICON = '<svg class="auth-limit-clock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 2"></path></svg>';
 
 function formatLimitReset(resetAt, mode = "hm") {
   if (!resetAt) return "";
@@ -3747,18 +3820,14 @@ function formatLimitReset(resetAt, mode = "hm") {
   return `${hours}h${mins}min`;
 }
 
+// 用量直接接在状态行后面：「已登录 · Max 5x · 5h 余 82% · 周 余 40%」
 function renderLimitWindow(label, win, resetFormat = "hm") {
   if (!win || win.usedPercent == null) return "";
   const remaining = win.remainingPercent ?? Math.max(0, 100 - win.usedPercent);
   const reset = formatLimitReset(win.resetAt, resetFormat);
   const status = remaining <= 10 ? " critical" : remaining <= 25 ? " warning" : "";
-  return `<span class="auth-limit-window"><span>${escapeHtml(label)} 剩</span><span class="auth-limit-percent${status}">${remaining}%</span>${reset ? `${LIMIT_CLOCK_ICON}<span class="auth-limit-reset">${escapeHtml(reset)}</span>` : ""}</span>`;
-}
-
-function renderLimitTooltipWindow(label, win) {
-  if (!win || win.usedPercent == null) return "";
-  const reset = win.resetAt ? new Date(win.resetAt).toLocaleString() : "";
-  return `${label} used ${win.usedPercent}%${reset ? `, resets ${reset}` : ""}`;
+  const title = reset ? ` title="${escapeAttr(reset)} 后重置"` : "";
+  return ` · ${escapeHtml(label)} 余 <span class="auth-limit-percent${status}"${title}>${remaining}%</span>`;
 }
 
 const CODEX_PLAN_LABEL = { free: "Free", plus: "Plus", pro: "Pro", team: "Team", business: "Business", enterprise: "Enterprise" };
@@ -3784,26 +3853,15 @@ function claudePlanSuffix() {
 function renderProviderUsageLimit(provider) {
   if (provider !== "claude" && provider !== "codex") return "";
   const limit = _providerUsageLimits[provider];
-  if (!limit || limit.status === "idle" || limit.status === "loading") {
-    return `<span class="auth-limit-badge muted" title="Reading live usage limits">${LIMIT_CLOCK_ICON}<span class="auth-limit-text">checking</span></span>`;
-  }
-  if (!limit.available) {
-    const title = limit.message || (limit.authenticated === false ? "Not logged in or usage is unavailable" : "Usage limits unavailable");
-    return `<span class="auth-limit-badge muted" title="${escapeAttr(title)}">${LIMIT_CLOCK_ICON}<span class="auth-limit-text">unavailable</span></span>`;
-  }
-  const windows = [
-    { label: "5h", tooltipLabel: "5h", value: limit.fiveHour, resetFormat: "hm" },
-    { label: "周", tooltipLabel: "week", value: limit.week, resetFormat: "dh" },
-  ].filter(item => item.value?.usedPercent != null);
-  if (!windows.length) {
-    return `<span class="auth-limit-badge muted" title="No usage window is currently available">${LIMIT_CLOCK_ICON}<span class="auth-limit-text">unavailable</span></span>`;
-  }
-  const tooltipParts = windows.map(item => renderLimitTooltipWindow(item.tooltipLabel, item.value)).filter(Boolean);
-  const title = tooltipParts.length ? tooltipParts.join("; ") : "Live subscription usage";
-  const html = windows
+  // 读不到就什么都不显示 —— 以前那个 checking / unavailable 灰药丸只是噪音
+  if (!limit || !limit.available) return "";
+  return [
+    { label: "5h", value: limit.fiveHour, resetFormat: "hm" },
+    { label: "周", value: limit.week, resetFormat: "dh" },
+  ]
+    .filter(item => item.value?.usedPercent != null)
     .map(item => renderLimitWindow(item.label, item.value, item.resetFormat))
-    .join('<span class="auth-limit-separator" aria-hidden="true">·</span>');
-  return `<span class="auth-limit-badge" title="${escapeAttr(title)}"><span class="auth-limit-text">${html}</span></span>`;
+    .join("");
 }
 
 async function checkProviderUsageLimits({ silent = false } = {}) {
@@ -3850,6 +3908,38 @@ function stopUsageLimitPolling() {
 
 const authProfileList = document.getElementById("auth-profile-list");
 
+// 一行状态：点 + 一句中文。会员类讲登录，Key 类讲密钥和模型。
+function profileStatus(p) {
+  if (p.provider === "claude") {
+    if (_claudeAuthStatus === true)  return { tone: "ok",   text: `已登录${claudePlanSuffix()}` };
+    if (_claudeAuthStatus === false) return { tone: "warn", text: "未登录 · 在服务器跑一次 claude" };
+    return { tone: "idle", text: "检测中…" };
+  }
+  if (p.provider === "codex") {
+    if (_codexAuthStatus === true) {
+      return _providerUsageLimits.codex?.status === "expired"
+        ? { tone: "err", text: "登录已失效 · 重新登录 ChatGPT" }
+        : { tone: "ok",  text: `已登录${codexPlanSuffix()}` };
+    }
+    if (_codexAuthStatus === false) return { tone: "warn", text: "未登录 · 打开 Codex 客户端登录" };
+    return { tone: "idle", text: "检测中…" };
+  }
+  if (p.provider === "antigravity") {
+    if (_agyAuthStatus === true)  return { tone: "ok",   text: "已就绪" };
+    if (_agyAuthStatus === false) return { tone: "warn", text: "未就绪 · 装 agy 并登录一次" };
+    return { tone: "idle", text: "检测中…" };
+  }
+  // 一行只塞得下一件事：显示跑什么模型（真正会切的东西），密钥挪进 tooltip
+  const models = [...new Set([p.opusModel, p.sonnetModel, p.haikuModel].filter(Boolean))]
+    .map(m => m.split("/").pop() || m);
+  if (!p.maskedApiKey) return { tone: "warn", text: "未填密钥" };
+  return {
+    tone: "",
+    text: models.join(" · ") || p.maskedApiKey,
+    title: [p.maskedApiKey, models.join(" · ")].filter(Boolean).join("  ·  "),
+  };
+}
+
 function renderProfileList(data) {
   // activeProfileId 以本实例 localStorage 为准，与 model/effort/permission 同一机制
   const savedId = localStorage.getItem("activeProfileId");
@@ -3859,43 +3949,27 @@ function renderProfileList(data) {
   _profileData = data;
   authProfileList.innerHTML = data.profiles.map(p => {
     const isActive = p.id === data.activeProfileId;
-    const metaParts = [];
-    if (p.maskedApiKey) metaParts.push(p.maskedApiKey);
-    // 显示去重后的模型（opus=sonnet 时只显示一个）
-    const allModels = [p.opusModel, p.sonnetModel, p.haikuModel].filter(Boolean);
-    const uniqueModels = [...new Set(allModels)];
-    if (uniqueModels.length) metaParts.push(uniqueModels.map(m => m.split("/").pop() || m).join(" · "));
-    const meta = p.provider === "claude"
-      ? (_claudeAuthStatus === true  ? `✅ 已登录${claudePlanSuffix()}`
-       : _claudeAuthStatus === false ? "⚠️ 未登录 — 请在服务器运行 claude 命令完成登录"
-       : "正在检测登录状态…")
-      : p.provider === "codex"
-      ? (_codexAuthStatus === true
-          ? (_providerUsageLimits.codex?.status === "expired"
-              ? "⚠️ 登录已失效 — 请重新登录 ChatGPT 账号"
-              : `✅ 已登录${codexPlanSuffix()}`)
-         : _codexAuthStatus === false ? "⚠️ 未登录 — 请打开 Codex 客户端完成登录"
-         : "正在检测登录状态…")
-      : p.provider === "antigravity"
-      ? (_agyAuthStatus === true  ? "✅ Antigravity CLI 已就绪"
-       : _agyAuthStatus === false ? "⚠️ 未就绪 — 请安装 agy 并运行一次完成 Google 账号登录"
-       : "正在检测登录状态…")
-      : metaParts.join("  ");
+    const st = profileStatus(p);
+    // 名字里已经写了厂商就不再挂一个标签重复说一遍
+    const vendor = PROVIDER_LABEL[p.provider] ?? p.provider;
+    const showVendor = !String(p.name || "").toLowerCase().includes(vendor.toLowerCase());
     const canEdit   = p.provider !== "claude";
     const canDelete = p.provider !== "claude";
     const actions = (canEdit || canDelete) ? `
       <span class="auth-profile-actions">
-        ${canEdit   ? `<span class="auth-profile-edit" data-edit="${escapeAttr(p.id)}" title="编辑" aria-label="编辑" role="button">✎</span>` : ""}
-        ${canDelete ? `<span class="auth-profile-del"  data-del="${escapeAttr(p.id)}"  title="删除" aria-label="删除" role="button">×</span>` : ""}
+        ${canEdit   ? `<span class="auth-profile-edit" data-edit="${escapeAttr(p.id)}" title="编辑" aria-label="编辑" role="button">${ICON_EDIT}</span>` : ""}
+        ${canDelete ? `<span class="auth-profile-del"  data-del="${escapeAttr(p.id)}"  title="删除" aria-label="删除" role="button">${ICON_TRASH}</span>` : ""}
       </span>` : "";
-    return `<button class="auth-profile-item${isActive ? " active" : ""}" data-id="${escapeAttr(p.id)}" role="option" aria-selected="${isActive}">
+    return `<button class="auth-profile-item${isActive ? " active" : ""}" data-id="${escapeAttr(p.id)}" role="option" aria-selected="${isActive}"${st.title ? ` title="${escapeAttr(st.title)}"` : ""}>
       <span class="auth-profile-check" aria-hidden="true">${isActive ? "✓" : ""}</span>
       <span class="auth-profile-info">
-        <span class="auth-profile-name">${escapeHtml(p.name)}</span>
-        <span class="auth-profile-meta" style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">
-          ${providerBadge(p.provider)}
-          <span style="opacity:.65;font-size:10.5px">${escapeHtml(meta)}</span>
-          ${renderProviderUsageLimit(p.provider)}
+        <span class="auth-profile-head">
+          <span class="auth-profile-name">${escapeHtml(p.name)}</span>
+          ${showVendor ? `<span class="auth-vendor">${escapeHtml(vendor)}</span>` : ""}
+        </span>
+        <span class="auth-profile-meta">
+          <span class="auth-dot ${st.tone}" aria-hidden="true"></span>
+          <span class="auth-status-text">${escapeHtml(st.text)}${renderProviderUsageLimit(p.provider)}</span>
         </span>
       </span>
       ${actions}
@@ -4145,29 +4219,31 @@ void fetchProfiles();
 let wechatPollInterval = null;
 let currentWechatSessionKey = null;
 
+function setWechatStatus(tone, text) {
+  document.getElementById("wechat-status-text").innerHTML =
+    `<span class="auth-dot${tone ? " " + tone : ""}" aria-hidden="true"></span><span class="auth-status-text">${escapeHtml(text)}</span>`;
+}
+
 async function checkWechatStatus() {
+  const actionBtn = document.getElementById("wechat-action-btn");
+  const qrArea = document.getElementById("wechat-qr-area");
   try {
     const res = await fetch("api/wechat/status");
     const data = await res.json();
-    const statusText = document.getElementById("wechat-status-text");
-    const actionBtn = document.getElementById("wechat-action-btn");
-    const qrArea = document.getElementById("wechat-qr-area");
-
     if (data.connected) {
-      statusText.innerHTML = `🟢 <strong>微信已连接</strong> (Bot ID: <code style="background: rgba(0,0,0,0.05); padding: 2px 4px; border-radius: 4px;">${data.botId}</code>)<br/><span style="font-size: 11px; color: var(--fg-color-secondary);">你现在可在微信直接向此 AI 助手发送消息，共享当前笔记知识库。</span>`;
-      actionBtn.innerText = "断开微信机器人连接";
-      actionBtn.style.color = "#ef4444";
-      actionBtn.style.borderColor = "#fecaca";
+      setWechatStatus("ok", `已连接${data.botId ? ` · ${data.botId}` : ""}`);
+      actionBtn.textContent = "断开";
+      actionBtn.classList.add("danger");
       qrArea.style.display = "none";
       stopWechatPolling();
     } else {
-      statusText.innerHTML = `🔴 <strong>微信未连接</strong><br/><span style="font-size: 11px; color: var(--fg-color-secondary);">连接后，你可在微信对话使用此助手与笔记知识库。</span>`;
-      actionBtn.innerText = "连接微信机器人";
-      actionBtn.style.color = "var(--fg-color)";
-      actionBtn.style.borderColor = "var(--border-color)";
+      setWechatStatus("", "未连接 · 连上后可在微信里直接用这个助手");
+      actionBtn.textContent = "连接";
+      actionBtn.classList.remove("danger");
     }
   } catch (err) {
     console.error("Failed to fetch WeChat status", err);
+    setWechatStatus("warn", "状态读取失败");
   }
 }
 
@@ -4184,59 +4260,59 @@ function stopWechatPolling() {
 async function startWechatLogin() {
   const qrArea = document.getElementById("wechat-qr-area");
   const qrImg = document.getElementById("wechat-qr-img");
-  const statusText = document.getElementById("wechat-status-text");
-  
-  statusText.innerText = "⏳ 正在生成微信登录二维码...";
-  
+
+  setWechatStatus("idle", "正在生成二维码…");
+
   try {
     const res = await fetch("api/wechat/login/start", { method: "POST" });
     const data = await res.json();
     if (!data.ok) throw new Error(data.error);
 
     currentWechatSessionKey = data.sessionKey;
+    // 二维码是第三方服务画的，离线/被墙时会静默变成一个碎图，得说人话
+    qrImg.onerror = () => setWechatStatus("err", "二维码加载失败 · 检查网络");
     qrImg.src = "https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=" + encodeURIComponent(data.qrcodeUrl);
     qrArea.style.display = "flex";
-    statusText.innerHTML = "🟡 <strong>请扫码</strong><br/><span style='font-size:11px;'>微信扫码并确认以启动桥接器</span>";
+    setWechatStatus("warn", "等待扫码");
 
     // Poll status every 2 seconds
     wechatPollInterval = setInterval(pollWechatStatus, 2000);
   } catch (err) {
-    statusText.innerText = `❌ 生成二维码失败: ${err.message}`;
+    setWechatStatus("err", `二维码生成失败：${err.message}`);
   }
 }
 
 async function pollWechatStatus(verifyCode = "") {
   if (!currentWechatSessionKey) return;
-  
+
   let url = `api/wechat/login/poll?sessionKey=${currentWechatSessionKey}`;
   if (verifyCode) url += `&verifyCode=${encodeURIComponent(verifyCode)}`;
 
   try {
     const res = await fetch(url);
     const data = await res.json();
-    const statusText = document.getElementById("wechat-status-text");
     const verifyArea = document.getElementById("wechat-verify-area");
 
     switch (data.status) {
       case "scaned":
-        statusText.innerHTML = "🟡 <strong>已扫码！</strong><br/><span style='font-size:11px;'>正在微信手机端同意登录以完成绑定...</span>";
+        setWechatStatus("warn", "已扫码 · 在手机上点同意");
         verifyArea.style.display = "none";
         break;
       case "need_verifycode":
-        statusText.innerHTML = "🟡 <strong>安全确认</strong><br/><span style='font-size:11px;'>微信要求数字配对验证...</span>";
+        setWechatStatus("warn", "微信要求数字配对");
         verifyArea.style.display = "flex";
         break;
       case "confirmed":
-        statusText.innerText = "🎉 微信机器人连接成功！";
+        setWechatStatus("ok", "连接成功");
         stopWechatPolling();
         setTimeout(checkWechatStatus, 1000);
         break;
       case "expired":
-        statusText.innerText = "❌ 二维码已过期，请重新点击连接。";
+        setWechatStatus("err", "二维码已过期 · 重新点连接");
         stopWechatPolling();
         break;
       case "verify_code_blocked":
-        statusText.innerText = "❌ 数字验证错误次数过多，请稍后重新连接。";
+        setWechatStatus("err", "配对码错太多次 · 稍后重连");
         stopWechatPolling();
         break;
       case "wait":
@@ -4250,7 +4326,7 @@ async function pollWechatStatus(verifyCode = "") {
 
 document.getElementById("wechat-action-btn").addEventListener("click", async (e) => {
   const btn = e.currentTarget;
-  if (btn.innerText.includes("断开")) {
+  if (btn.classList.contains("danger")) {
     if (!confirm("确认断开此实例的微信连接吗？这会停止微信端的消息助手回复。")) return;
     try {
       await fetch("api/wechat/logout", { method: "POST" });
@@ -4267,7 +4343,7 @@ document.getElementById("wechat-verify-submit").addEventListener("click", () => 
   const input = document.getElementById("wechat-verify-input");
   const code = input.value.trim();
   if (!code) {
-    alert("请输入配对码！");
+    setWechatStatus("warn", "请输入配对码");
     return;
   }
   pollWechatStatus(code);
@@ -8045,7 +8121,21 @@ if (
 }
 localStorage.setItem("permissionModeDefaultVersion", permissionModeDefaultVersion);
 let selectedPermissionMode = localStorage.getItem("permissionMode") || "auto";
-let selectedEffort = localStorage.getItem("effort") || "medium";
+
+/* 默认档位从「中」提到「高」。
+   b553fc8 之前的版本会把 effort 写进 localStorage（现在只读不写了，那个 key
+   降级成「没有记录的对话用什么」），所以老装机上多半还压着一个 medium——
+   不清掉的话新默认对已经在用的人等于没改。只退掉停在旧默认上的那一个值，
+   手动选过 low/xhigh/max 的照旧尊重。 */
+const effortDefaultVersion = "high-default-v1";
+if (
+  localStorage.getItem("effortDefaultVersion") !== effortDefaultVersion &&
+  localStorage.getItem("effort") === "medium"
+) {
+  localStorage.removeItem("effort");
+}
+localStorage.setItem("effortDefaultVersion", effortDefaultVersion);
+let selectedEffort = localStorage.getItem("effort") || "high";
 
 /* ══════════════════════════════════════════════════════════
    模型和推理档位跟着对话走
@@ -8095,7 +8185,7 @@ function rememberConvModelPrefs() {
 /** 切到某个对话后，把它自己那份装回来并刷新整排控件。 */
 function applyConvModelPrefs() {
   const pref = currentConvId ? convModelPrefs.get(currentConvId) : null;
-  selectedEffort = pref?.effort ?? localStorage.getItem("effort") ?? "medium";
+  selectedEffort = pref?.effort ?? localStorage.getItem("effort") ?? "high";
   // 模型在 renderModelOptions 里认 pref，顺带把下拉的选中态和标签一起重画
   renderModelOptions(getActiveProfile());
   /* 第一次进这个对话（改动之前建的、或从历史里翻出来的）：把刚解析出来的这份
@@ -8284,9 +8374,10 @@ if (!restorePicker(permissionDropdown, ".permission-option", "permission-mode", 
   selectedPermissionMode = "auto";
 }
 {
-  const savedEffort = localStorage.getItem("effort") ?? "medium";
+  // 默认档位只有一个出处：这里跟上面 selectedEffort 的初值必须是同一个值
+  const savedEffort = localStorage.getItem("effort") ?? "high";
   const eOpt = effortView.querySelector(`.effort-option[data-effort="${savedEffort}"]`);
-  selectedEffort = eOpt ? savedEffort : "medium";
+  selectedEffort = eOpt ? savedEffort : "high";
   updateEffortDisplay();
 }
 
@@ -8811,6 +8902,9 @@ let isPanelMaximized = false;
 
 function setMaximizeButtonState(maximized) {
   isPanelMaximized = maximized;
+  /* 全宽时收掉左上角的 >>：⤡ 已经管了"回到之前的宽度"这件事，两个都往回缩的按钮
+     分列两头只会让人猜哪个是哪个。退出全宽它自己回来。 */
+  collapseDesktopPanelBtn?.classList.toggle("header-btn-vacant", maximized);
   const iconMax = document.getElementById("icon-maximize");
   const iconRestore = document.getElementById("icon-restore");
   const btn = document.getElementById("btn-maximize-panel");
@@ -9274,6 +9368,24 @@ document.getElementById("btn-history")?.addEventListener("click", (e) => {
 document.getElementById("btn-new")?.addEventListener("click", startNewConversation);
 document.getElementById("history-close")?.addEventListener("click", closeHistoryPanel);
 historyBackdrop?.addEventListener("click", closeHistoryPanel);
+
+/* 打开就落在一个真实的对话上。以前 currentConvId 一直空到你发出第一条消息，
+   于是「常驻」标签栏在最常见的状态——刚打开——是空的：你明明能打字能发送、
+   右下角还挂着模型和档位，标签栏却说你不在任何对话里。发送的那一刻标签凭空
+   长出来，把「+」从 x=27 顶到 x=130，人正等着看回答，左上角先动一下。
+
+   顺带修掉一个旧毛病：没有 id 的这段时间里改模型档位是记不住的
+   （rememberConvModelPrefs 见空 id 直接 return），dispatchRequestDraft 里那句
+   「补记一次」就是在给这个打补丁。身份提前给了，补丁的前提也就不存在了。
+
+   这里不需要发 reset：冷启动 resetRequested 是 false，ws.onopen 走的是
+   resendPendingRequest 那条路，不会触发 reset_complete 往返。
+   也不怕排出一串空壳：startNewConversation 见当前就是空对话时只把光标送回
+   输入框，loadConversation 切走时 forgetConversationLocally 会收掉这个槽位。 */
+if (!currentConvId) {
+  currentConvId = genId();
+  rememberConvModelPrefs();
+}
 
 // 启动时静默预取历史标题并初始化常驻标签栏
 void fetchHistory().then(() => {
