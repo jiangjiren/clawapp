@@ -3493,6 +3493,42 @@ function getActiveProfile() {
   return _profileData.profiles.find(p => p.id === _profileData.activeProfileId) ?? _profileData.profiles[0] ?? null;
 }
 
+/** 请求里该带哪个账号 id。getActiveProfile 在 id 失效时会退到第一个账号，这里
+    跟着退——否则界面显示的是一个厂商，消息带出去的是另一个。 */
+function activeProfileId() {
+  return getActiveProfile()?.id ?? _profileData.activeProfileId ?? null;
+}
+
+/** 这个模型是哪个账号供的。给「只记了 model、没记 profileId」的旧记录用——
+    那是账号隔离之前存下的，直接照当前厂商解释会把 claude-opus-5 退成 GPT 的默认，
+    等于把这次要修的现象换成一次性的。同一个模型挂在多个中转账号下时先认当前的，
+    那个顺序最不让人意外。 */
+function profileIdOwningModel(model) {
+  if (!model) return null;
+  const owns = (p) => {
+    if (!p) return false;
+    if (p.provider === "claude") return CLAUDE_MODELS.some(o => o.model === (MODEL_MIGRATIONS[model] ?? model));
+    if (p.provider === "antigravity") return AGY_MODELS.some(o => o.model === model);
+    return [p.opusModel, p.sonnetModel, p.haikuModel].includes(model);
+  };
+  if (owns(getActiveProfile())) return activeProfileId();
+  return _profileData.profiles.find(owns)?.id ?? null;
+}
+
+/** 当前对话该用哪个账号——包括从旧记录反推出来的那种。这里是唯一的出处：
+    renderProfileList 和 applyConvModelPrefs 都问它，各算各的会分叉（反推在一边
+    算出了 Claude，另一边照着 localStorage 又认回上一个厂商，等于没反推）。
+
+    convModelPrefs 声明在下面很远的地方，正常路径上这个函数最早也要等
+    checkClaudeAuth 的 await 之后才跑得到，那时它已经就位；真有人在同步阶段调
+    进来，TDZ 抛出来就当没有记录，不值得为它拦住启动。 */
+function currentConvProfileId() {
+  try {
+    const pref = currentConvId ? convModelPrefs.get(currentConvId) : null;
+    return pref ? (pref.profileId ?? profileIdOwningModel(pref.model)) : null;
+  } catch { return null; }
+}
+
 function renderModelOptions(activeProfile) {
   const provider = activeProfile?.provider || "claude";
   let options;
@@ -3940,11 +3976,13 @@ function profileStatus(p) {
   };
 }
 
-function renderProfileList(data) {
-  // activeProfileId 以本实例 localStorage 为准，与 model/effort/permission 同一机制
-  const savedId = localStorage.getItem("activeProfileId");
-  if (savedId && data.profiles.some(p => p.id === savedId)) {
-    data = { ...data, activeProfileId: savedId };
+function renderProfileList(data, { adopt = false } = {}) {
+  /* 谁说了算：当前对话自己记着的账号 > 本实例的 localStorage 全局默认 > 服务端
+     那份。adopt 是唯一的例外——用户刚在这个面板里点了某个账号，服务端回的就是
+     他选的那个，不该再被上一条记录顶回去。 */
+  const preferredId = adopt ? null : (currentConvProfileId() ?? localStorage.getItem("activeProfileId"));
+  if (preferredId && data.profiles.some(p => p.id === preferredId)) {
+    data = { ...data, activeProfileId: preferredId };
   }
   _profileData = data;
   authProfileList.innerHTML = data.profiles.map(p => {
@@ -3990,7 +4028,11 @@ async function activateProfile(id) {
     const d = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(d.error || "切换失败");
     localStorage.setItem("activeProfileId", id);
-    renderProfileList(d.data);
+    renderProfileList(d.data, { adopt: true });
+    /* 账号跟着对话走，所以手点切换要记到当前对话名下。必须在 renderProfileList
+       之后——那一步才把 selectedModel 落到新厂商的清单里，早记会把旧厂商的模型
+       一起写进去，下次切回来又得退一次默认。 */
+    rememberConvModelPrefs();
     if (d.resetSession) { currentSessionId = null; markResetLanding(); wsSend({ reset: true }); }
     setAuthStatus("saved", "已切换");
     setTimeout(closeAuthDialog, 600);
@@ -4005,6 +4047,8 @@ async function deleteProfile(id) {
       body: JSON.stringify({ action: "delete", profileId: id }) });
     const d = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(d.error || "删除失败");
+    // 别的对话还记着这个账号；留着死 id 只会让每次切进去都白判断一次「它还在吗」
+    forgetProfileFromConvPrefs(id);
     renderProfileList(d.data);
     if (d.resetSession) { currentSessionId = null; markResetLanding(); wsSend({ reset: true }); }
     setAuthStatus("saved", "已删除");
@@ -4148,7 +4192,9 @@ addSubmitBtn.addEventListener("click", async () => {
       body: JSON.stringify({ action: isEdit ? "update" : "add", profile: profilePayload }) });
     const d = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(d.error || (isEdit ? "保存失败" : "添加失败"));
-    renderProfileList(d.data);
+    // 新增的账号服务端会直接设为当前，跟手点切换是一回事；编辑不动当前是谁
+    renderProfileList(d.data, { adopt: !isEdit });
+    if (!isEdit) rememberConvModelPrefs();
     if (d.resetSession) { currentSessionId = null; markResetLanding(); wsSend({ reset: true }); }
     showListView();
     setAuthStatus("saved", isEdit ? "已保存" : "已添加", false);
@@ -4891,7 +4937,7 @@ function requestSkillRefresh(force = false) {
   wsSend({
     type: "skills",
     provider,
-    profileId: _profileData.activeProfileId,
+    profileId: activeProfileId(),
   });
 }
 
@@ -7083,7 +7129,7 @@ function takeRequestDraft(textOverride = null, { consumeComposer = textOverride 
     model: selectedModel,
     permissionMode: selectedPermissionMode,
     effort: selectedEffort,
-    profileId: _profileData.activeProfileId,
+    profileId: activeProfileId(),
     conversationId: currentConvId,
   };
 
@@ -7608,7 +7654,7 @@ function upsertSteeringFromEvent(raw) {
       model: selectedModel,
       permissionMode: selectedPermissionMode,
       effort: selectedEffort,
-      profileId: _profileData.activeProfileId,
+      profileId: activeProfileId(),
       conversationId: event.conversationId,
       userMessageId: event.id,
     };
@@ -8148,8 +8194,13 @@ let selectedEffort = localStorage.getItem("effort") || "high";
    localStorage 里原来那两个 key 留着不动，降级成「没有记录的对话用什么」——
    从历史里翻出来的老对话、以及全新装的应用，都落在它上面。
 
-   权限模式和厂商账号刻意不在此列：前者用得少，后者一换就要重置会话、
-   模型清单也整个换掉，跟对话绑定的语义会打架。
+   厂商账号一开始被排除在外，理由是「一换就要重置会话、模型清单也整个换掉」。
+   但模型清单本来就是厂商算出来的（renderModelOptions 读的是 getActiveProfile），
+   厂商留在全局，模型就隔离不住：在一个对话里切到 Codex，别的对话的选择器里只剩
+   GPT 那三个，各自记着的 Claude 模型全被 options.some 退回默认——看着就像从没
+   隔离过。至于那两条理由，重置会话是手点切换时 PUT 服务端带来的，切对话只在本地
+   认一下账号，那条路根本不走；模型清单整个换掉正是这里想要的效果。
+   权限模式仍然不在此列——用得少，不值得为它付这份复杂度。
    ══════════════════════════════════════════════════════════ */
 const CONV_MODEL_PREFS_KEY = "convModelPrefs-v1";
 const CONV_MODEL_PREFS_MAX = 60;
@@ -8174,23 +8225,58 @@ function persistConvModelPrefs() {
   } catch { /* 配额满了就只在这次会话里生效，不该因此报错 */ }
 }
 
-/** 把当前的选择记到当前对话名下。换模型、换档位、开新对话时都要调。 */
+/** 把当前的选择记到当前对话名下。换模型、换档位、换账号、开新对话时都要调。 */
 function rememberConvModelPrefs() {
   if (!currentConvId) return;
   convModelPrefs.delete(currentConvId);   // 删了再插 = 挪到末尾
-  convModelPrefs.set(currentConvId, { model: selectedModel, effort: selectedEffort });
+  convModelPrefs.set(currentConvId, {
+    model: selectedModel,
+    effort: selectedEffort,
+    // 记解析后的那个 id，不是 _profileData 里可能已经失效的那个
+    profileId: activeProfileId(),
+  });
   persistConvModelPrefs();
+}
+
+/** 账号被删了，所有记着它的对话退回默认。留着死 id 只会让每次切进去都白判断
+    一次「它还在吗」，而且同名 id 万一被复用还会接错厂商。 */
+function forgetProfileFromConvPrefs(profileId) {
+  if (!profileId) return;
+  let changed = false;
+  for (const [id, pref] of convModelPrefs) {
+    if (pref?.profileId !== profileId) continue;
+    const next = { ...pref };
+    delete next.profileId;
+    convModelPrefs.set(id, next);   // 迭代中改已有的 key 不动顺序，安全
+    changed = true;
+  }
+  if (changed) persistConvModelPrefs();
 }
 
 /** 切到某个对话后，把它自己那份装回来并刷新整排控件。 */
 function applyConvModelPrefs() {
   const pref = currentConvId ? convModelPrefs.get(currentConvId) : null;
   selectedEffort = pref?.effort ?? localStorage.getItem("effort") ?? "high";
-  // 模型在 renderModelOptions 里认 pref，顺带把下拉的选中态和标签一起重画
-  renderModelOptions(getActiveProfile());
+  /* 账号得赶在模型前面认下来——模型清单是它算出来的，顺序反了会先照着上一个
+     对话的厂商画一遍。这里刻意不 PUT 服务端：那条路会 clearSession，而服务端
+     每条消息都读请求里的 profileId，它那份只是消息没带时的兜底，无需同步。
+     指向已删账号的记录直接不认，停在当前厂商比跳到一个不存在的强。 */
+  const wantProfileId = currentConvProfileId();
+  if (wantProfileId
+      && wantProfileId !== _profileData.activeProfileId
+      && _profileData.profiles.some(p => p.id === wantProfileId)) {
+    // renderProfileList 自己会认下这个对话记着的账号，顺带把列表的 ✓、模型清单、
+    // slash 命令（Codex 和 Claude 两套）一起对齐，不用在这儿逐个重画
+    renderProfileList(_profileData);
+  } else {
+    // 模型在 renderModelOptions 里认 pref，顺带把下拉的选中态和标签一起重画
+    renderModelOptions(getActiveProfile());
+  }
   /* 第一次进这个对话（改动之前建的、或从历史里翻出来的）：把刚解析出来的这份
-     就地记成它自己的。之后它认的是自己那条记录，不再跟着任何全局值漂。 */
-  if (!pref) rememberConvModelPrefs();
+     就地记成它自己的。之后它认的是自己那条记录，不再跟着任何全局值漂。
+     没有 profileId 的是加账号隔离之前存下的记录，同样在这里补齐——漏掉的话
+     它们永远缺这个字段，也就永远跟着别的对话漂。 */
+  if (!pref || !pref.profileId) rememberConvModelPrefs();
 }
 const modelBtn      = document.getElementById("model-btn");
 const modelDropdown = document.getElementById("model-dropdown");
