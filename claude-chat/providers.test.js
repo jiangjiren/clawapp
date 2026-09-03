@@ -257,9 +257,9 @@ test("agy: effort 按模型能力就近取，medium 缺失时往下走", () => {
   // gemini-3.1-pro 只有 low/high：要 medium 时不能替用户升到 high（更慢更费额度）
   assert.equal(agy.effortForModel("gemini-3.1-pro", "medium"), "low");
   assert.equal(agy.effortForModel("gemini-3.1-pro", "high"), "high");
-  assert.equal(agy.effortForModel("gemini-3.7-flash", "max"), "high");   // max 压到 high
+  assert.equal(agy.effortForModel("gemini-3.8-flash", "max"), "high");   // max 压到 high
   assert.equal(agy.effortForModel("claude-sonnet-4-6", "high"), null);   // 不吃 --effort
-  assert.equal(agy.effortForModel("gemini-3.5-flash-high", "low"), null); // 档位已写死在名字里
+  assert.equal(agy.effortForModel("gemini-3.8-flash-high", "low"), null); // 档位已写死在名字里
   assert.equal(agy.effortForModel("never-seen-model", "low"), "low");     // 没见过就照传
   assert.equal(agy.effortForModel(null, "xhigh"), "high");
 });
@@ -279,10 +279,189 @@ test("agy: 按 agy 的报错自我修正档位表", () => {
 
   assert.equal(agy.learnEffortsFromError(null, "whatever"), false);
   assert.equal(agy.learnEffortsFromError(model, "看不懂的报错"), false);
+  agy._resetCatalog();
+});
+
+/* ══════════════════════════════════════════════════════════════════
+   Antigravity 模型目录（`agy models` → 菜单 + 档位表）
+   ══════════════════════════════════════════════════════════════════ */
+
+// 真实的 `agy models` stdout，包含它开头那行没有 TAB 的日志
+const AGY_MODELS_STDOUT = [
+  "Fetching available models...",
+  "gemini-3.8-flash-high\tGemini 3.8 Flash (High)",
+  "gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)",
+  "gemini-3.8-flash-low\tGemini 3.8 Flash (Low)",
+  "gemini-3.7-flash-high\tGemini 3.7 Flash (High)",
+  "gemini-3.7-flash-medium\tGemini 3.7 Flash (Medium)",
+  "gemini-3.7-flash-low\tGemini 3.7 Flash (Low)",
+  "gemini-3.1-pro-high\tGemini 3.1 Pro (High)",
+  "gemini-3.1-pro-low\tGemini 3.1 Pro (Low)",
+  "claude-sonnet-4-6\tClaude Sonnet 4.6 (Thinking)",
+  "claude-opus-4-6-thinking\tClaude Opus 4.6 (Thinking)",
+  "gpt-oss-120b-medium\tGPT-OSS 120B (Medium)",
+  "",
+].join("\n");
+
+test("agy: 解析 `agy models`，档位后缀合并成模型的能力表", () => {
+  const catalog = agy.parseModelsList(AGY_MODELS_STDOUT);
+  const byModel = Object.fromEntries(catalog.map(entry => [entry.model, entry]));
+
+  // 三行 -high/-medium/-low 合并成一个模型，label 去掉档位括号
+  assert.deepEqual(byModel["gemini-3.8-flash"].efforts, ["low", "medium", "high"]);
+  assert.equal(byModel["gemini-3.8-flash"].label, "Gemini 3.8 Flash");
+  // pro 只有两档，不能凭空补出 medium
+  assert.deepEqual(byModel["gemini-3.1-pro"].efforts, ["low", "high"]);
+  // 没有档位后缀 = 不吃 --effort，label 里的 (Thinking) 不是档位，要留着
+  assert.deepEqual(byModel["claude-sonnet-4-6"].efforts, []);
+  assert.equal(byModel["claude-sonnet-4-6"].label, "Claude Sonnet 4.6 (Thinking)");
+  assert.deepEqual(byModel["gpt-oss-120b"].efforts, ["medium"]);
+  // 开头那行日志没有 TAB，不能被当成模型
+  assert.equal(catalog.length, 6);
+
+  // 认不出来时返回 null，让调用方留着旧目录而不是把菜单清空
+  assert.equal(agy.parseModelsList("Fetching available models...\nsome error"), null);
+  assert.equal(agy.parseModelsList(""), null);
+  assert.equal(agy.parseModelsList(null), null);
+});
+
+test("agy: 目录换新之后，档位表和菜单跟着走", () => {
+  assert.equal(agy.hasLiveCatalog(), false);
+  assert.equal(agy.setCatalog(agy.parseModelsList(AGY_MODELS_STDOUT)), true);
+  assert.equal(agy.hasLiveCatalog(), true);
+
+  // 目录里没有 3.6 了（这份输出没列它），档位查询要落到「没见过」而不是老表里的值
+  assert.equal(agy.effortForModel("gemini-3.8-flash", "medium"), "medium");
+  assert.equal(agy.effortForModel("gemini-3.1-pro", "medium"), "low");
+
+  // 空目录不能把好目录顶掉
+  assert.equal(agy.setCatalog([]), false);
+  assert.equal(agy.setCatalog(null), false);
+  assert.equal(agy.effortForModel("gemini-3.8-flash", "medium"), "medium");
+
+  agy._resetCatalog();
+  assert.equal(agy.hasLiveCatalog(), false);
+});
+
+test("agy: 菜单每个系列只留最新的一个", () => {
+  agy.setCatalog(agy.parseModelsList(AGY_MODELS_STDOUT));
+  const menu = agy.menuModels();
+  const models = menu.map(item => item.model);
+
+  // 3.8 顶掉 3.7：同一个系列不该在菜单里出现两代
+  // gpt-oss 平时用不上，藏起来——但它还在目录里，选着它的对话照样能跑
+  assert.deepEqual(models, [
+    "gemini-3.1-pro",
+    "gemini-3.8-flash",
+    "claude-opus-4-6-thinking",
+    "claude-sonnet-4-6",
+  ]);
+  assert.equal(agy.effortForModel("gpt-oss-120b", "high"), "medium");
+  // 菜单上的名字去掉了结尾括号和 Claude 前缀
+  assert.equal(menu.find(item => item.model === "claude-opus-4-6-thinking").name, "Opus 4.6");
+  assert.equal(menu.find(item => item.model === "gemini-3.8-flash").name, "Gemini 3.8 Flash");
+  assert.equal(menu.find(item => item.model === "gemini-3.1-pro").desc, "旗舰最强");
+  // 档位一起带过去，前端不用再查第二张表
+  assert.deepEqual(menu.find(item => item.model === "gemini-3.1-pro").efforts, ["low", "high"]);
+
+  agy._resetCatalog();
+});
+
+test("agy: 下线的模型顺着系列升到最新", () => {
+  agy.setCatalog(agy.parseModelsList(AGY_MODELS_STDOUT));
+
+  // 3.5 已经从 agy 那边撤了，用户还选着它 → 升到同系列最新的 3.8
+  assert.equal(agy.successorFor("gemini-3.5-flash"), "gemini-3.8-flash");
+  // 3.7 还在目录里（只是不在菜单上），不该被换掉
+  assert.equal(agy.successorFor("gemini-3.7-flash"), null);
+  assert.equal(agy.successorFor("gemini-3.8-flash"), null);
+  // 别家的模型名没有同系列可换，交给调用方退回默认
+  assert.equal(agy.successorFor("claude-opus-5"), null);
+  assert.equal(agy.successorFor(""), null);
+  // 只往上换：目录还没刷新就赶上一次升级时，请求里的版本比目录里的都新，
+  // 这时候必须原样放行，不能把用户选的新模型悄悄降回旧的
+  assert.equal(agy.successorFor("gemini-3.9-flash"), null);
+
+  agy._resetCatalog();
+});
+
+test("agy: 没查过目录时用兜底表，不至于菜单空掉", () => {
+  agy._resetCatalog();
+  const menu = agy.menuModels();
+  assert.ok(menu.length >= 4);
+  assert.ok(menu.every(item => item.model && item.name && item.desc));
+  // 兜底表里同系列也只露最新的一个
+  assert.equal(menu.filter(item => /-flash$/.test(item.model)).length, 1);
+  // 藏起来的那些兜底时也不该冒出来
+  assert.equal(menu.filter(item => /^gpt-/.test(item.model)).length, 0);
 });
 
 test("agy: 权限档位映射", () => {
   assert.equal(agy.modeFlag("plan"), "plan");
   assert.equal(agy.modeFlag("auto"), "accept-edits");
   assert.equal(agy.modeFlag("bypassPermissions"), "accept-edits");
+});
+
+/* ══════════════════════════════════════════════════════════════════
+   Antigravity 用量额度
+   ══════════════════════════════════════════════════════════════════ */
+
+// 真实的 `agy -p "/usage" --output-format json` 回包，删掉了跟配额无关的字段
+const AGY_USAGE_JSON = JSON.stringify({
+  conversation_id: "",
+  status: "SUCCESS",
+  response: "Gemini Models\tWeekly Limit Remaining\t88%\t2026-08-29T07:42:01Z\n",
+  command: {
+    name: "usage",
+    data: {
+      description: "Within each group, models share a weekly limit and a 5-hour limit.",
+      groups: [
+        {
+          name: "Gemini Models",
+          buckets: [
+            { id: "gemini-weekly", name: "Weekly Limit Remaining", window: "weekly", remaining_fraction: 0.875411331653595, reset_time: "2026-08-29T07:42:01Z" },
+            { id: "gemini-5h", name: "Five Hour Limit Remaining", window: "5h", remaining_fraction: 0.9194384217262268, reset_time: "2026-08-27T13:00:43Z" },
+          ],
+        },
+        {
+          name: "Claude and GPT models",
+          buckets: [
+            { id: "3p-weekly", name: "Weekly Limit Remaining", window: "weekly", remaining_fraction: 0.7754247784614563, reset_time: "2026-09-01T03:19:13Z" },
+            { id: "3p-5h", name: "Five Hour Limit Remaining", window: "5h", remaining_fraction: 1, reset_time: "2026-08-27T17:45:26Z" },
+          ],
+        },
+      ],
+    },
+  },
+});
+
+test("agy 用量: 两组配额各自成行，百分比按剩余算", () => {
+  const groups = agy.parseUsage(AGY_USAGE_JSON);
+  assert.equal(groups.length, 2);
+  assert.deepEqual(groups[0], {
+    key: "gemini",
+    label: "Gemini",
+    fiveHour: { usedPercent: 8, remainingPercent: 92, resetAt: "2026-08-27T13:00:43Z" },
+    week: { usedPercent: 12, remainingPercent: 88, resetAt: "2026-08-29T07:42:01Z" },
+  });
+  assert.equal(groups[1].key, "3p");
+  assert.equal(groups[1].label, "Claude/GPT");
+  assert.equal(groups[1].fiveHour.remainingPercent, 100);
+  assert.equal(groups[1].week.remainingPercent, 78);
+});
+
+test("agy 用量: 前面掺了日志行也能捞出那行 JSON", () => {
+  const noisy = `ERROR: logging before google.Init: I0827 doRefreshQuota\n{"broken":\n${AGY_USAGE_JSON}`;
+  assert.equal(agy.parseUsage(noisy)?.length, 2);
+});
+
+test("agy 用量: 解析不出配额时返回 null，不返回空壳", () => {
+  assert.equal(agy.parseUsage(""), null);
+  assert.equal(agy.parseUsage("not json at all"), null);
+  // 起了 agent 轮次的回包（命令没被短路）——没有 command.data.groups
+  assert.equal(agy.parseUsage(JSON.stringify({ status: "SUCCESS", response: "我不知道" })), null);
+  // groups 在但每组都缺可用窗口
+  assert.equal(agy.parseUsage(JSON.stringify({
+    command: { data: { groups: [{ name: "Gemini Models", buckets: [{ id: "gemini-weekly", window: "weekly" }] }] } },
+  })), null);
 });

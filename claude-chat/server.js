@@ -230,24 +230,31 @@ const CODEX_DEFAULT_MODELS = {
 };
 
 // Antigravity CLI（agy）没有 Node SDK，只能起子进程读 stream-json。
-// `agy models` 列出来的 slug 都带推理档位后缀（gemini-3.7-flash-high/low），
+// `agy models` 列出来的 slug 都带推理档位后缀（gemini-3.8-flash-high/low），
 // 但那是「模型 × 档位」的组合，拿它填三档会让下拉里出现两个同名模型。
 // 不带后缀的名字同样可用且能配 --effort，所以三档只放三个真模型，
 // 推理档位交回界面上的 effort 选择器。
-// 界面上的模型菜单由前端的 AGY_MODELS 决定（四个：两个 Gemini + 两个 Claude），
-// 这三档只剩两个用处：账号卡片上显示这个通道主要跑什么，以及派发时的默认模型。
-const AGY_DEFAULT_MODELS = {
-  opusModel: "gemini-3.1-pro",
-  sonnetModel: "gemini-3.7-flash",
-  haikuModel: "gemini-3.7-flash",
-};
+// 界面上的模型菜单由 agyProvider.menuModels() 从模型目录里推，这三档只剩两个
+// 用处：账号卡片上显示这个通道主要跑什么，以及派发时的默认模型。
+//
+// 写成函数而不是常量，是为了让它跟着目录刷新走——3.9 出来的那天这里、账号卡片、
+// 用户存下来的 profile（normalizeProfiles 每次读都拿这三个值强制覆盖一遍）
+// 一起变新，一行代码都不用改。
+function agyDefaultModels() {
+  const menu = agyProvider.menuModels();
+  const pick = (pattern) => menu.find(item => pattern.test(item.model))?.model;
+  const pro = pick(/-pro$/) ?? menu[0]?.model ?? "gemini-3.1-pro";
+  const flash = pick(/-flash$/) ?? pro;
+  return { opusModel: pro, sonnetModel: flash, haikuModel: flash };
+}
 
 const PROVIDER_PRESETS = {
   anthropic:  { baseUrl: "",                                    opusModel: "claude-opus-5",                   sonnetModel: "claude-sonnet-5",                  haikuModel: "claude-haiku-4-5-20251001" },
   deepseek:   { baseUrl: "https://api.deepseek.com/anthropic", opusModel: "deepseek-v4-pro[1m]",            sonnetModel: "deepseek-v4-pro[1m]",             haikuModel: "deepseek-v4-flash" },
   openrouter: { baseUrl: "https://openrouter.ai/api",          opusModel: "~anthropic/claude-opus-latest",   sonnetModel: "~anthropic/claude-sonnet-latest",  haikuModel: "~anthropic/claude-haiku-latest" },
   codex:      { baseUrl: "",                                    ...CODEX_DEFAULT_MODELS },
-  antigravity:{ baseUrl: "",                                    ...AGY_DEFAULT_MODELS },
+  // getter：目录刷新后取到的就是新的，别在这里把值定死
+  get antigravity() { return { baseUrl: "", ...agyDefaultModels() }; },
 };
 const PROVIDER_GOOD_AT = {
   claude: "综合能力强，写代码和长文本理解均衡",
@@ -418,12 +425,22 @@ function explainAgyFailure(raw) {
   return `Antigravity 请求失败：${text}`;
 }
 
-// 前端的模型选择器按 profile 切换，但对话历史里可能残留另一家的模型名。
-// 把不属于 agy 的名字直接丢掉——传过去它只会报 unknown model。
+/* 前端的模型选择器按 profile 切换，但对话历史里可能残留另一家的模型名，
+   也可能残留一个 agy 那边已经下线的版本。三种情况分开处理：
+     还在目录里          → 原样用（包括已经从菜单上撤下来的旧版本，选着它就让它继续跑）
+     下线了但同系列有新的 → 顺着升上去（gemini-3.5-flash → gemini-3.8-flash），
+                            比一律退回默认更接近用户当初的选择
+     压根不是 agy 的名字  → 丢掉，传过去只会报 unknown model
+   目录刚启动还没刷新时会短暂偏旧，那时候放行未知名字交给 agy 自己判，
+   不然一次升级会把新模型误判成「不是 agy 的名字」。 */
 function resolveAgyModel(requested, profile) {
-  const fallback = profile?.opusModel || AGY_DEFAULT_MODELS.opusModel;
+  const fallback = profile?.opusModel || agyDefaultModels().opusModel;
   if (typeof requested !== "string" || !requested.trim()) return fallback;
-  return /^(gemini-\d|claude-(opus|sonnet)-4-6|gpt-oss-)/.test(requested.trim()) ? requested.trim() : fallback;
+  const wanted = requested.trim();
+  if (agyProvider.getCatalog().some(entry => entry.model === wanted)) return wanted;
+  const successor = agyProvider.successorFor(wanted);
+  if (successor) return successor;
+  return /^(gemini-\d|claude-(opus|sonnet)-4-6|gpt-oss-)/.test(wanted) ? wanted : fallback;
 }
 
 
@@ -805,7 +822,7 @@ function migrateOldFormat(old) {
     profiles.push({ id: "p_codex", name: "Codex（GPT 会员）", provider: "codex", apiKey: "", baseUrl: "", goodAt: PROVIDER_GOOD_AT.codex, ...CODEX_DEFAULT_MODELS });
   }
   if (isAgyAuthAvailable()) {
-    profiles.push({ id: "p_agy", name: "Gemini（Antigravity）", provider: "antigravity", apiKey: "", baseUrl: "", goodAt: PROVIDER_GOOD_AT.antigravity, ...AGY_DEFAULT_MODELS });
+    profiles.push({ id: "p_agy", name: "Gemini（Antigravity）", provider: "antigravity", apiKey: "", baseUrl: "", goodAt: PROVIDER_GOOD_AT.antigravity, ...agyDefaultModels() });
   }
   let activeProfileId = "p_claude";
   if (old.provider === "deepseek") {
@@ -843,9 +860,9 @@ function normalizeProfiles(raw) {
   const existingAgy = profiles.find(p => p.provider === "antigravity");
   if (isAgyAuthAvailable()) {
     if (existingAgy) {
-      Object.assign(existingAgy, AGY_DEFAULT_MODELS);
+      Object.assign(existingAgy, agyDefaultModels());
     } else {
-      profiles.push({ id: "p_agy", name: "Gemini（Antigravity）", provider: "antigravity", apiKey: "", baseUrl: "", goodAt: PROVIDER_GOOD_AT.antigravity, ...AGY_DEFAULT_MODELS });
+      profiles.push({ id: "p_agy", name: "Gemini（Antigravity）", provider: "antigravity", apiKey: "", baseUrl: "", goodAt: PROVIDER_GOOD_AT.antigravity, ...agyDefaultModels() });
     }
   }
   const activeProfileId = typeof data.activeProfileId === "string" && profiles.some(p => p.id === data.activeProfileId)
@@ -1137,6 +1154,181 @@ async function queryCodexSubscriptionLimits() {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+/* ── Antigravity 模型目录 ──────────────────────────────────
+   模型清单和每个模型认哪些档位，来源是 `agy models`（解析见 providers/
+   antigravity.js）。这条命令要起进程走一遍登录，实测 7 秒，挡在启动或第一次
+   发消息前面都不合适，所以走「磁盘缓存 + 后台刷新」：
+
+     启动   读缓存 → 立刻有目录，界面不用等
+     之后   过期就在后台刷一次，刷到新的写回缓存，下次启动就是新的
+     失败   （没登录 / 超时 / 输出格式变了）保留上一份，宁可旧也别让菜单空掉
+
+   这一套是为了「模型升级不用改代码」：3.9 上线后第一次刷新就带回来了，菜单、
+   档位表、三档默认值、账号卡片一起变新。provider 里那张兜底表只在从没查成功过
+   时用得上。 */
+const AGY_MODELS_CACHE_FILE = join(DATA_DIR, "agy-models.json");
+const AGY_MODELS_QUERY_TIMEOUT_MS = 45_000;
+// 模型不会一天一换，半天刷一次够了；真赶上了还有 learnEffortsFromError 兜底
+const AGY_MODELS_TTL_MS = 6 * 60 * 60_000;
+
+let _agyModelsFetchedAt = 0;
+let _agyModelsPending = null;
+
+try {
+  if (existsSync(AGY_MODELS_CACHE_FILE)) {
+    const cached = JSON.parse(readFileSync(AGY_MODELS_CACHE_FILE, "utf8"));
+    if (agyProvider.setCatalog(cached?.models)) {
+      _agyModelsFetchedAt = Date.parse(cached?.fetchedAt ?? "") || 0;
+    }
+  }
+} catch { }
+
+function runAgyModelsQuery() {
+  return new Promise((resolve) => {
+    const bin = findAgyBinary();
+    if (!bin) { resolve(null); return; }
+
+    let proc;
+    try {
+      proc = spawn(bin, ["models"], {
+        cwd: DEFAULT_CWD,
+        windowsHide: true,
+        env: { ...process.env, NO_COLOR: "1", TERM: "dumb" },
+      });
+    } catch { resolve(null); return; }
+
+    let stdout = "";
+    let settled = false;
+    let timer = null;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    timer = setTimeout(() => { killAgyProcess(proc); finish(null); }, AGY_MODELS_QUERY_TIMEOUT_MS);
+
+    proc.stdout?.on("data", (chunk) => { stdout += chunk.toString(); });
+    proc.stderr?.on("data", () => { });   // "Fetching available models..." 之类，不用管
+    proc.on("error", () => finish(null));
+    proc.on("close", () => finish(agyProvider.parseModelsList(stdout)));
+  });
+}
+
+/** 刷新模型目录。永远不抛，查失败就留着旧的；返回是否真的换了一份。 */
+function refreshAgyModelCatalog({ force = false } = {}) {
+  if (_agyModelsPending) return _agyModelsPending;
+  const fresh = agyProvider.hasLiveCatalog() && Date.now() - _agyModelsFetchedAt < AGY_MODELS_TTL_MS;
+  if (!force && fresh) return Promise.resolve(false);
+
+  _agyModelsPending = runAgyModelsQuery()
+    .then((models) => {
+      if (!models || !agyProvider.setCatalog(models)) return false;
+      _agyModelsFetchedAt = Date.now();
+      try {
+        writeFileSync(
+          AGY_MODELS_CACHE_FILE,
+          JSON.stringify({ fetchedAt: new Date().toISOString(), models }, null, 2),
+          "utf8",
+        );
+      } catch { }
+      return true;
+    })
+    .catch(() => false)
+    .finally(() => { _agyModelsPending = null; });
+  return _agyModelsPending;
+}
+
+/* Antigravity 的用量走 `agy -p "/usage" --output-format json`。这是 CLI 自己的
+   只读快捷路径：不起 agent 轮次、不花额度、不留会话（官方 changelog 明说）。
+   之所以不像另外两家那样直接打 HTTP，是因为 v1internal:retrieveUserQuota* 认
+   Antigravity 客户端标识，拿账号 token 裸调会 403 SUBSCRIPTION_REQUIRED。
+
+   代价是它得起一个进程、重新走一遍登录和 loadCodeAssist，实测 9~23 秒——比
+   另外两家慢一个数量级。所以这里不能跟着 /api/usage-limits 同步跑，否则整个
+   面板都要等它。改成：接口只读缓存，过期了在后台补一次，下一轮轮询（60 秒）
+   自然就新了。首次打开面板会空一格，这比让 Claude 和 Codex 的数字一起卡住强。 */
+const AGY_USAGE_QUERY_TIMEOUT_MS = 45_000;
+const AGY_USAGE_TTL_MS = 4 * 60_000;
+
+let _agyUsageCache = null;      // 上一次查出来的结果（含失败态）
+let _agyUsageFetchedAt = 0;
+let _agyUsagePending = null;    // 正在跑的那次查询，用来防止并发重复起进程
+
+function runAgyUsageQuery() {
+  return new Promise((resolve) => {
+    const bin = findAgyBinary();
+    const finish = (result) => resolve({ provider: "antigravity", updatedAt: new Date().toISOString(), ...result });
+    if (!bin) {
+      finish({ status: "unauthenticated", authenticated: false, available: false, message: "没有找到 Antigravity CLI（agy）" });
+      return;
+    }
+
+    let proc;
+    try {
+      proc = spawn(bin, ["-p", "/usage", "--output-format", "json"], {
+        cwd: DEFAULT_CWD,
+        windowsHide: true,
+        env: { ...process.env, NO_COLOR: "1", TERM: "dumb" },
+      });
+    } catch (err) {
+      finish({ status: "error", authenticated: false, available: false, message: `启动 agy 失败：${String(err?.message || err)}` });
+      return;
+    }
+
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      killAgyProcess(proc);
+      finish({ status: "timeout", authenticated: true, available: false, message: "Antigravity 用量查询超时" });
+    }, AGY_USAGE_QUERY_TIMEOUT_MS);
+
+    proc.stdout?.on("data", (chunk) => { stdout += chunk.toString(); });
+    proc.stderr?.on("data", (chunk) => { stderr += chunk.toString(); });
+    proc.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      finish({ status: "error", authenticated: false, available: false, message: String(err?.message || err) });
+    });
+    proc.on("close", () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const groups = agyProvider.parseUsage(stdout);
+      if (!groups) {
+        finish({
+          status: "unavailable",
+          authenticated: agyProvider.isAuthAvailable(),
+          available: false,
+          message: (stderr.trim() || stdout.trim() || "agy 没有返回可解析的用量").slice(0, 300),
+        });
+        return;
+      }
+      finish({ status: "ok", authenticated: true, available: true, groups });
+    });
+  });
+}
+
+/** 拿 Antigravity 用量：永远立刻返回，过期时在后台补一次。 */
+function getAntigravityUsageLimits() {
+  const fresh = _agyUsageCache && Date.now() - _agyUsageFetchedAt < AGY_USAGE_TTL_MS;
+  if (!fresh && !_agyUsagePending) {
+    _agyUsagePending = runAgyUsageQuery()
+      .then((result) => {
+        // 一次超时/报错不该把上一份还有效的数字擦掉，界面上留着旧值比空着有用
+        if (result.available || !_agyUsageCache?.available) _agyUsageCache = result;
+        _agyUsageFetchedAt = Date.now();
+      })
+      .catch(() => { _agyUsageFetchedAt = Date.now(); })
+      .finally(() => { _agyUsagePending = null; });
+  }
+  return _agyUsageCache ?? { provider: "antigravity", status: "loading", authenticated: null, available: false };
 }
 
 const CUSTOM_HISTORY_FILE = Boolean(process.env.CLAUDE_CHAT_HISTORY_FILE);
@@ -2468,7 +2660,7 @@ function dispatchModelForProfile(profile) {
     return profile.opusModel || profile.sonnetModel || profile.haikuModel || CODEX_DEFAULT_MODELS.opusModel;
   }
   if (profile.provider === "antigravity") {
-    return profile.opusModel || profile.sonnetModel || profile.haikuModel || AGY_DEFAULT_MODELS.opusModel;
+    return profile.opusModel || profile.sonnetModel || profile.haikuModel || agyDefaultModels().opusModel;
   }
   if (profile.provider === "claude") {
     return profile.sonnetModel || profile.opusModel || "claude-sonnet-5";
@@ -3462,6 +3654,32 @@ const http = createServer((req, res) => {
     return;
   }
 
+  /* Antigravity 能选哪些模型、每个认哪些档位。前端拿它填模型菜单和档位选择器，
+     所以这两处不再需要各自写死一张表——模型升级由 `agy models` 自己带过来。
+       models  菜单要显示的（每个系列只留最新的一个）
+       efforts 全目录，含已经从菜单上撤下来但还能跑的旧版本；档位选择器和
+               「这个模型属于哪个账号」的反推都要认它们
+       live    false = 还在用 provider 里那张兜底表，一次都没查成功过
+     ?wait=1 会等这一次刷新查完（有超时上限）。界面首开时用它，别拿兜底表把
+     菜单定死；之后按 TTL 在后台刷，接口本身不等。 */
+  if (url === "/api/agy/models" && method === "GET") {
+    // url 已经把 query 剥掉了，参数得从 req.url 上取
+    const wait = new URL(req.url ?? "/", "http://localhost").searchParams.get("wait") === "1";
+    const refresh = refreshAgyModelCatalog();
+    const respond = () => {
+      const efforts = {};
+      for (const entry of agyProvider.getCatalog()) efforts[entry.model] = entry.efforts;
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        live: agyProvider.hasLiveCatalog(),
+        models: agyProvider.menuModels(),
+        efforts,
+      }));
+    };
+    if (wait) refresh.then(respond, respond); else respond();
+    return;
+  }
+
   if (url === "/api/auth-profile" && method === "GET") {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(toPublicProfiles()));
@@ -3563,6 +3781,7 @@ const http = createServer((req, res) => {
 
   if (url === "/api/usage-limits" && method === "GET") {
     (async () => {
+      // antigravity 不进 Promise.all：它是本地进程、要十几秒，读缓存就走
       const [claude, codex] = await Promise.all([
         getClaudeSubscriptionLimits(),
         queryCodexSubscriptionLimits(),
@@ -3572,6 +3791,7 @@ const http = createServer((req, res) => {
         providers: {
           claude,
           codex,
+          antigravity: getAntigravityUsageLimits(),
         },
       }));
     })().catch((err) => {

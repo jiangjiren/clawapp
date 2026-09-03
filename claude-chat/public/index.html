@@ -2304,6 +2304,28 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
 .auth-limit-percent.warning  { color: var(--yellow); }
 .auth-limit-percent.critical { color: var(--red); }
 
+/* Antigravity 有两组互不相干的配额池（Gemini 那两个模型烧一组，Claude/GPT 那两个
+   烧另一组），四个数字挤不进状态行，所以铺在状态行下面，每组一行。 */
+.auth-limit-groups {
+  /* 两列的 grid：组名一列、数字一列。写死 min-width 对不齐——组名长短不一，
+     一行放得下另一行就被右边的编辑/删除按钮切掉了尾巴。 */
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 2px 8px;
+  margin-top: 1px;
+  padding-left: 12px;          /* 对齐状态点后面的文字 */
+  font-size: 11px;
+  color: var(--text-dim);
+  min-width: 0;
+}
+.auth-limit-group { display: contents; }
+.auth-limit-group > span {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* 右侧操作按钮组 */
 
 .auth-profile-actions {
@@ -3359,28 +3381,57 @@ const CLAUDE_MODELS = [
   { model: "claude-fable-5",             label: "Fable 5",    name: "Fable 5",    desc: "旗舰最强" },
 ];
 
-// Antigravity 通道能选的模型。名字都不带 -high/-medium/-low 后缀：
-// 那是「模型 × 推理档位」的组合，档位交给 effort 选择器。
-// 注意 Claude 那两个不接受 effort，agy 会自己忽略界面上的档位。
-const AGY_MODELS = [
+/* Antigravity 通道能选的模型，以及每个模型认哪些推理档位。
+
+   这两份不写死——真相源是 agy 自己的 `agy models`，由 /api/agy/models 送过来
+   （解析和菜单规则在 providers/antigravity.js）。所以 Gemini 出新版本时这里
+   什么都不用改，服务端刷新一次目录，菜单和档位跟着就新了。
+
+   下面是首帧兜底：接口回来之前得先有东西渲染，别让模型菜单空一格。接口一到就
+   整份换掉，所以它旧一点没关系，不必跟着每次模型升级来改。
+
+   模型名都不带 -high/-medium/-low 后缀：那是「模型 × 推理档位」的组合，档位
+   交给 effort 选择器。agy 只有 low/medium/high 三档，界面上的 xhigh/max 对它
+   一律不存在；Claude 那两个干脆不吃 --effort，档位给空数组，选择器直接藏掉——
+   选了不生效比不给选更让人困惑。 */
+let AGY_MODELS = [
+  { model: "gemini-3.8-flash",          label: "Gemini 3.8 Flash", name: "Gemini 3.8 Flash", desc: "快速通用" },
   { model: "gemini-3.1-pro",            label: "Gemini 3.1 Pro",   name: "Gemini 3.1 Pro",   desc: "旗舰最强" },
-  { model: "gemini-3.7-flash",          label: "Gemini 3.7 Flash", name: "Gemini 3.7 Flash", desc: "快速通用" },
   { model: "claude-opus-4-6-thinking",  label: "Opus 4.6",         name: "Opus 4.6",         desc: "Claude 旗舰" },
   { model: "claude-sonnet-4-6",         label: "Sonnet 4.6",       name: "Sonnet 4.6",       desc: "Claude 均衡" },
 ];
 
-// 每个 Antigravity 模型认哪些推理档位（要和 server.js 的 AGY_MODEL_EFFORTS 保持一致）。
-// agy 只有 low/medium/high 三档，界面上的 xhigh/max 对它一律不存在；Claude 那两个
-// 干脆不吃 --effort。选了不生效的档位比不给选更让人困惑，所以这里直接藏掉。
-const AGY_EFFORT_LEVELS = {
+// 全目录，含已经从菜单上撤下来但还能跑的旧版本——还选着它的对话要照常显示档位
+let AGY_EFFORT_LEVELS = {
+  "gemini-3.8-flash": ["low", "medium", "high"],
   "gemini-3.7-flash": ["low", "medium", "high"],
   "gemini-3.6-flash": ["low", "medium", "high"],
-  "gemini-3.5-flash": ["low", "medium", "high"],
   "gemini-3.1-pro": ["low", "high"],
   "gpt-oss-120b": ["medium"],
   "claude-opus-4-6-thinking": [],
   "claude-sonnet-4-6": [],
 };
+
+/* 拉一次真目录。wait=1 让服务端等它查完（首次要起 agy 进程，约 7 秒），这里不
+   挡渲染：先用兜底表把界面撑起来，回来了再把菜单换掉。只在这个通道真的装了
+   agy 时才拉，没装的话服务端也只会把兜底表原样退回来。 */
+let _agyModelsLoaded = false;
+async function loadAgyModelCatalog() {
+  if (_agyModelsLoaded) return;
+  _agyModelsLoaded = true;
+  try {
+    const res = await fetch("api/agy/models?wait=1", { cache: "no-store" });
+    if (!res.ok) return;
+    const data = await res.json();
+    if (!Array.isArray(data?.models) || !data.models.length) return;
+    AGY_MODELS = data.models;
+    if (data.efforts && typeof data.efforts === "object") AGY_EFFORT_LEVELS = data.efforts;
+    // 目录换了，当前选中的可能已经不在菜单里（版本下线），重渲染会把它落回默认
+    renderModelOptions(getActiveProfile());
+  } catch {
+    _agyModelsLoaded = false;   // 网络抖一下就放开，下次切到这个账号还能再试
+  }
+}
 
 // null = 这家不限制，五档随便选
 function effortLevelsForCurrentModel() {
@@ -3508,7 +3559,8 @@ function profileIdOwningModel(model) {
   const owns = (p) => {
     if (!p) return false;
     if (p.provider === "claude") return CLAUDE_MODELS.some(o => o.model === (MODEL_MIGRATIONS[model] ?? model));
-    if (p.provider === "antigravity") return AGY_MODELS.some(o => o.model === model);
+    // 认全目录而不是菜单：从菜单上撤下来的旧版本仍然属于这个账号
+    if (p.provider === "antigravity") return Object.prototype.hasOwnProperty.call(AGY_EFFORT_LEVELS, model);
     return [p.opusModel, p.sonnetModel, p.haikuModel].includes(model);
   };
   if (owns(getActiveProfile())) return activeProfileId();
@@ -3538,6 +3590,7 @@ function renderModelOptions(activeProfile) {
     // Antigravity 通道能开的不止 Gemini，Claude 那两个也算 Google 那边的额度。
     // 这里不走 opus/sonnet/haiku 三档——那三个槽位装不下四个模型，而且推理
     // 档位由界面上的 effort 选择器控制，不该再挤进模型名里。
+    loadAgyModelCatalog();   // 第一次切到这个通道时才去拉真目录，回来后自己重渲染
     options = AGY_MODELS;
   } else {
     // 收集三档模型，相同模型合并显示 tier 标签
@@ -3831,6 +3884,7 @@ const ICON_TRASH = '<svg width="13" height="13" viewBox="0 0 13 13" fill="none" 
 let _providerUsageLimits = {
   claude: { status: "idle" },
   codex: { status: "idle" },
+  antigravity: { status: "idle" },
 };
 let _usageLimitsTimer = null;
 let _usageLimitsRequestSeq = 0;
@@ -3856,14 +3910,25 @@ function formatLimitReset(resetAt, mode = "hm") {
   return `${hours}h${mins}min`;
 }
 
-// 用量直接接在状态行后面：「已登录 · Max 5x · 5h 余 82% · 周 余 40%」
-function renderLimitWindow(label, win, resetFormat = "hm") {
+/* 一个窗口一段：「5h 余 82%」。分隔符交给调用方拼——Antigravity 那两行是独立
+   成行的，开头不该挂一个 · 。
+   compact 去掉「余」字：那两行左边有组名当列头，面板只有三百来像素宽，带上
+   「余」字 100% 那行就会被右边的编辑按钮切掉尾巴。 */
+function renderLimitWindow(label, win, resetFormat = "hm", compact = false) {
   if (!win || win.usedPercent == null) return "";
   const remaining = win.remainingPercent ?? Math.max(0, 100 - win.usedPercent);
   const reset = formatLimitReset(win.resetAt, resetFormat);
   const status = remaining <= 10 ? " critical" : remaining <= 25 ? " warning" : "";
   const title = reset ? ` title="${escapeAttr(reset)} 后重置"` : "";
-  return ` · ${escapeHtml(label)} 余 <span class="auth-limit-percent${status}"${title}>${remaining}%</span>`;
+  return `${escapeHtml(label)} ${compact ? "" : "余 "}<span class="auth-limit-percent${status}"${title}>${remaining}%</span>`;
+}
+
+// 「5h 余 92% · 周 余 88%」
+function renderLimitWindows(fiveHour, week, compact = false) {
+  return [
+    renderLimitWindow("5h", fiveHour, "hm", compact),
+    renderLimitWindow("周", week, "dh", compact),
+  ].filter(Boolean).join(" · ");
 }
 
 const CODEX_PLAN_LABEL = { free: "Free", plus: "Plus", pro: "Pro", team: "Team", business: "Business", enterprise: "Enterprise" };
@@ -3887,25 +3952,36 @@ function claudePlanSuffix() {
 }
 
 function renderProviderUsageLimit(provider) {
+  // antigravity 有两组配额，接不进这一行，走下面的 renderProviderUsageGroups
   if (provider !== "claude" && provider !== "codex") return "";
   const limit = _providerUsageLimits[provider];
   // 读不到就什么都不显示 —— 以前那个 checking / unavailable 灰药丸只是噪音
   if (!limit || !limit.available) return "";
-  return [
-    { label: "5h", value: limit.fiveHour, resetFormat: "hm" },
-    { label: "周", value: limit.week, resetFormat: "dh" },
-  ]
-    .filter(item => item.value?.usedPercent != null)
-    .map(item => renderLimitWindow(item.label, item.value, item.resetFormat))
-    .join("");
+  const windows = renderLimitWindows(limit.fiveHour, limit.week);
+  return windows ? ` · ${windows}` : "";
 }
 
-async function checkProviderUsageLimits({ silent = false } = {}) {
+// Antigravity 专用：状态行下面每组配额一行。两组是各自独立的池子，
+// 合成一个数字会骗人——Gemini 烧光了不影响 Claude/GPT 那组。
+function renderProviderUsageGroups(provider) {
+  if (provider !== "antigravity") return "";
+  const limit = _providerUsageLimits.antigravity;
+  if (!limit?.available || !Array.isArray(limit.groups)) return "";
+  const rows = limit.groups.map((group) => {
+    const windows = renderLimitWindows(group.fiveHour, group.week, true);
+    if (!windows) return "";
+    return `<span class="auth-limit-group"><span class="auth-limit-group-name">${escapeHtml(group.label ?? "")}</span><span>${windows}</span></span>`;
+  }).filter(Boolean);
+  return rows.length ? `<span class="auth-limit-groups" title="剩余额度">${rows.join("")}</span>` : "";
+}
+
+async function checkProviderUsageLimits({ silent = false, agyAttempt = 0 } = {}) {
   const seq = ++_usageLimitsRequestSeq;
   if (!silent) {
     _providerUsageLimits = {
       claude: { status: "loading" },
       codex: { status: "loading" },
+      antigravity: { status: "loading" },
     };
     renderProfileList(_profileData);
   }
@@ -3917,6 +3993,7 @@ async function checkProviderUsageLimits({ silent = false } = {}) {
     _providerUsageLimits = {
       claude: data.providers?.claude ?? { status: "unavailable", available: false },
       codex: data.providers?.codex ?? { status: "unsupported", available: false },
+      antigravity: data.providers?.antigravity ?? { status: "unsupported", available: false },
     };
   } catch (err) {
     if (seq !== _usageLimitsRequestSeq) return;
@@ -3924,9 +4001,32 @@ async function checkProviderUsageLimits({ silent = false } = {}) {
     _providerUsageLimits = {
       claude: { status: "error", available: false, message },
       codex: { status: "error", available: false, message },
+      antigravity: { status: "error", available: false, message },
     };
   }
   renderProfileList(_profileData);
+  /* 服务端查 Antigravity 要起一个 agy 进程走一遍登录，实测 10~20 秒，所以那边是
+     读缓存立刻返回、后台补查。首次打开面板必定拿到 loading，而常规轮询 60 秒一
+     次、等太久，这里补几次短轮询把第一份数字接回来。 */
+  if (_providerUsageLimits.antigravity?.status === "loading") scheduleAgyUsageRetry(agyAttempt);
+  else stopAgyUsageRetry();
+}
+
+let _agyUsageRetryTimer = null;
+const AGY_USAGE_RETRY_MAX = 6;
+
+function scheduleAgyUsageRetry(attempt) {
+  stopAgyUsageRetry();
+  if (attempt >= AGY_USAGE_RETRY_MAX) return;   // 一直查不出来就不追了，等常规轮询
+  _agyUsageRetryTimer = setTimeout(() => {
+    if (!authDialog.classList.contains("open")) return;
+    void checkProviderUsageLimits({ silent: true, agyAttempt: attempt + 1 });
+  }, 5_000);
+}
+
+function stopAgyUsageRetry() {
+  if (_agyUsageRetryTimer) clearTimeout(_agyUsageRetryTimer);
+  _agyUsageRetryTimer = null;
 }
 
 function startUsageLimitPolling() {
@@ -3940,6 +4040,7 @@ function startUsageLimitPolling() {
 function stopUsageLimitPolling() {
   if (_usageLimitsTimer) clearInterval(_usageLimitsTimer);
   _usageLimitsTimer = null;
+  stopAgyUsageRetry();
 }
 
 const authProfileList = document.getElementById("auth-profile-list");
@@ -4009,6 +4110,7 @@ function renderProfileList(data, { adopt = false } = {}) {
           <span class="auth-dot ${st.tone}" aria-hidden="true"></span>
           <span class="auth-status-text">${escapeHtml(st.text)}${renderProviderUsageLimit(p.provider)}</span>
         </span>
+        ${renderProviderUsageGroups(p.provider)}
       </span>
       ${actions}
     </button>`;
