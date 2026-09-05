@@ -3353,7 +3353,7 @@ const PROVIDER_COLOR = {
 };
 const PROVIDER_LABEL = {
   claude: "Claude", anthropic: "Anthropic", deepseek: "DeepSeek", openrouter: "OpenRouter", minimax: "MiniMax", custom: "自定义",
-  codex: "GPT", antigravity: "Antigravity",
+  codex: "ChatGPT", antigravity: "Antigravity",
 };
 
 function providerBadge(provider) {
@@ -3527,7 +3527,7 @@ function renderProfileList(data) {
     return `${heading}<button class="auth-profile-item${isActive ? " active" : ""}" data-id="${escapeAttr(p.id)}" role="option" aria-selected="${isActive}">
       <span class="auth-profile-check" aria-hidden="true">${isActive ? "✓" : ""}</span>
       <span class="auth-profile-info">
-        <span class="auth-profile-title"><span class="auth-profile-name">${escapeHtml(p.name)}</span>${providerBadge(p.provider)}</span>
+        <span class="auth-profile-title"><span class="auth-profile-name">${escapeHtml(p.provider === "codex" ? "ChatGPT 会员" : p.name)}</span>${providerBadge(p.provider)}</span>
         <span class="auth-profile-meta">
           <span class="auth-state ${status.tone}" title="${escapeAttr(status.detail)}">${escapeHtml(status.text)}</span>
           ${renderProviderLimitSummary(p.provider)}

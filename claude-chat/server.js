@@ -476,7 +476,7 @@ function normalizeProfile(raw) {
   const str = (v) => typeof v === "string" && v.trim() ? v.trim() : "";
   return {
     id:          str(p.id)   || genProfileId(),
-    name:        str(p.name) || provider,
+    name:        provider === "codex" ? "ChatGPT 会员" : str(p.name) || provider,
     provider,
     apiKey:      typeof p.apiKey === "string" ? p.apiKey.trim() : "",
     opusModel:   str(p.opusModel)   || legacyModel          || preset.opusModel   || "",
@@ -529,7 +529,7 @@ function migrateOldFormat(old) {
   }
 
   if (isCodexAuthAvailable()) {
-    profiles.push({ id: "p_codex", name: "Codex（GPT 会员）", provider: "codex", apiKey: "", baseUrl: "", ...CODEX_DEFAULT_MODELS });
+    profiles.push({ id: "p_codex", name: "ChatGPT 会员", provider: "codex", apiKey: "", baseUrl: "", ...CODEX_DEFAULT_MODELS });
   }
   let activeProfileId = "p_claude";
   if (old.provider === "deepseek") {
@@ -560,7 +560,7 @@ function normalizeProfiles(raw) {
     if (existingCodex) {
       Object.assign(existingCodex, CODEX_DEFAULT_MODELS);
     } else {
-      profiles.push({ id: "p_codex", name: "Codex（GPT 会员）", provider: "codex", apiKey: "", baseUrl: "", ...CODEX_DEFAULT_MODELS });
+      profiles.push({ id: "p_codex", name: "ChatGPT 会员", provider: "codex", apiKey: "", baseUrl: "", ...CODEX_DEFAULT_MODELS });
     }
   }
   // 会员账号（Claude、Codex）固定置顶，其余自定义 key 账号保持原有相对顺序
