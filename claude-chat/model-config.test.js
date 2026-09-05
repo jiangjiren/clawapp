@@ -4,20 +4,28 @@ import test from "node:test";
 
 const HERE = new URL(".", import.meta.url);
 const EXPECTED_CODEX_MODELS = {
-  opusModel: "gpt-5.6-sol",
+  opusModel: "gpt-6-astra",
   sonnetModel: "gpt-5.6-terra",
   haikuModel: "gpt-5.6-luna",
 };
+// 前端下拉里能选到的 Codex 模型：旗舰换代后 gpt-5.6-sol 不再占档位，但仍要可选。
+const EXPECTED_CODEX_PICKER_MODELS = ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"];
 
-test("Codex 服务端默认模型与前端模型说明保持为 GPT-5.6 三档", async () => {
-  const [serverSource, frontendSource] = await Promise.all([
-    readFile(new URL("server.js", HERE), "utf8"),
-    readFile(new URL("public/index.html", HERE), "utf8"),
-  ]);
+test("Codex 服务端档位跟随 GPT-6 旗舰，均衡/快速仍是 GPT-5.6", async () => {
+  const serverSource = await readFile(new URL("server.js", HERE), "utf8");
 
   for (const [tier, model] of Object.entries(EXPECTED_CODEX_MODELS)) {
     assert.match(serverSource, new RegExp(`${tier}: "${model.replaceAll(".", "\\.")}"`));
-    assert.match(frontendSource, new RegExp(`"${model.replaceAll(".", "\\.")}"`));
+  }
+});
+
+test("Codex 模型下拉直接列全量可选模型，不再从三档字段反推", async () => {
+  const frontendSource = await readFile(new URL("public/index.html", HERE), "utf8");
+
+  assert.match(frontendSource, /const CODEX_MODELS = \[/);
+  assert.match(frontendSource, /provider === "codex"\) \{\s*\n\s*options = CODEX_MODELS;/);
+  for (const model of EXPECTED_CODEX_PICKER_MODELS) {
+    assert.match(frontendSource, new RegExp(`model: "${model.replaceAll(".", "\\.")}"`));
   }
 });
 

@@ -192,8 +192,11 @@ const WECHAT_MIME_BY_EXT = {
   ".zip": "application/zip",
 };
 
+// Codex 会员是托管账号，模型字段不给用户在设置里改，这里就是唯一来源。
+// 旗舰档跟着 Codex 换代走：GPT-6 上线后 opus 档指向 gpt-6-astra，
+// 上一代 gpt-5.6-sol 仍在前端模型列表里可选，只是不再占档位。
 const CODEX_DEFAULT_MODELS = {
-  opusModel: "gpt-5.6-sol",
+  opusModel: "gpt-6-astra",
   sonnetModel: "gpt-5.6-terra",
   haikuModel: "gpt-5.6-luna",
 };

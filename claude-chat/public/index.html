@@ -2867,6 +2867,15 @@ const CLAUDE_MODELS = [
 // 匹配不上任何选项，会静默掉回列表第一项（Sonnet 5），用户以为还在用 Opus。
 const MODEL_MIGRATIONS = { "claude-opus-4-8": "claude-opus-5" };
 
+// Codex 会员账号不可编辑，三个档位字段装不下「新旗舰 + 上一代旗舰 + 均衡 + 快速」，
+// 所以这里像 CLAUDE_MODELS 一样直接列出可选模型，不再从档位字段反推。
+const CODEX_MODELS = [
+  { model: "gpt-6-astra",   label: "gpt-6-astra",   name: "gpt-6-astra",   desc: "旗舰最强" },
+  { model: "gpt-5.6-sol",   label: "gpt-5.6-sol",   name: "gpt-5.6-sol",   desc: "上一代旗舰" },
+  { model: "gpt-5.6-terra", label: "gpt-5.6-terra", name: "gpt-5.6-terra", desc: "均衡通用" },
+  { model: "gpt-5.6-luna",  label: "gpt-5.6-luna",  name: "gpt-5.6-luna",  desc: "快速经济" },
+];
+
 let _profileData = { activeProfileId: localStorage.getItem("activeProfileId") || "p_claude", profiles: [] };
 let _claudeAuthStatus = null; // null=checking, true=ok, false=not logged in
 let _codexAuthStatus  = null;
@@ -2926,6 +2935,8 @@ function renderModelOptions(activeProfile) {
   let options;
   if (provider === "claude") {
     options = CLAUDE_MODELS;
+  } else if (provider === "codex") {
+    options = CODEX_MODELS;
   } else {
     // 收集三档模型，相同模型合并显示 tier 标签
     const tierEntries = [
@@ -2939,15 +2950,9 @@ function renderModelOptions(activeProfile) {
       if (!modelTiers[m]) modelTiers[m] = [];
       modelTiers[m].push(tier);
     }
-    const GPT_DESCS = {
-      "gpt-5.6-sol": "旗舰最强",
-      "gpt-5.6-terra": "均衡通用",
-      "gpt-5.6-luna": "快速经济",
-    };
     options = Object.entries(modelTiers).map(([model, tiers]) => {
       const shortName = model.split("/").pop() || model;
-      const desc = provider === "codex" ? (GPT_DESCS[model] || model) : tiers.join("/");
-      return { model, label: shortName, name: shortName, desc };
+      return { model, label: shortName, name: shortName, desc: tiers.join("/") };
     });
     if (!options.length) options = CLAUDE_MODELS;
   }
