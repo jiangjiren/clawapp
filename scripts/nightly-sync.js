@@ -136,6 +136,7 @@ async function getAiMessage(files) {
 
 // ── main ──────────────────────────────────────────────────────────
 async function main() {
+  const { assertNoSyncConflicts, pullForSync } = await import("../src/lib/gitSyncSafety.mjs");
   log(`vault: ${VAULT}`);
 
   // verify git repo
@@ -148,14 +149,11 @@ async function main() {
 
   // 1. pull latest
   log("Pulling latest...");
-  try {
-    const { stdout } = await git(["pull", "--rebase", "--autostash"]);
-    log(`Pull: ${stdout || "already up to date"}`);
-  } catch (err) {
-    log(`Pull failed (continuing): ${err.message}`);
-  }
+  const { stdout: pullOutput } = await pullForSync(git);
+  log(`Pull: ${pullOutput || "already up to date"}`);
 
   // 2. stage everything
+  await assertNoSyncConflicts(git);
   await git(["add", "-A"]);
 
   // 3. check for staged changes

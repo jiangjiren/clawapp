@@ -3,6 +3,7 @@ import { execFile } from "child_process";
 import { promisify } from "util";
 import { readFile } from "fs/promises";
 import path from "path";
+import { assertNoSyncConflicts, GitSyncConflictError, pullForSync } from "@/lib/gitSyncSafety.mjs";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -359,7 +360,7 @@ export async function POST(req: Request) {
       if (!remoteExists) {
         return NextResponse.json({ ok: true, output: "未配置远程仓库，跳过拉取。" });
       }
-      const { stdout, stderr } = await git(["pull", "--rebase", "--autostash"]);
+      const { stdout, stderr } = await pullForSync(git);
       return NextResponse.json({ ok: true, output: stdout || stderr });
     }
 
@@ -368,6 +369,7 @@ export async function POST(req: Request) {
         return NextResponse.json({ error: "未配置远程仓库，无法上传。请先为笔记本配置远程 Git 仓库（如通过 git remote add origin <url>）。" }, { status: 400 });
       }
       const message = body.message?.trim() || `更新笔记 ${new Date().toLocaleDateString("zh-CN")}`;
+      await assertNoSyncConflicts(git);
       await git(["add", "-A"]);
 
       const { stdout: diffOut } = await git(["diff", "--cached", "--name-only"]);
@@ -410,6 +412,9 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "未知操作" }, { status: 400 });
   } catch (err) {
     console.error("Git API Error (POST):", err);
+    if (err instanceof GitSyncConflictError) {
+      return NextResponse.json({ error: err.message, code: "sync_conflict", paths: err.paths }, { status: 409 });
+    }
     const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: msg }, { status: 500 });
   }

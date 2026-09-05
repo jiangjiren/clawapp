@@ -20,6 +20,8 @@ The repository contains two cooperating services:
 - Generate revocable public links for individual notes under `/share/<token>`.
 - Install the web app as a PWA; the UI shell is cached for faster reopening.
 - Open a resizable AI panel beside the active note. Selected text and the current note can be passed into the conversation.
+- Focus on chat in desktop browsers: use the expand button or `Ctrl/⌘ + \` to hide the note preview and restore your reading position when leaving focus mode.
+- Keep a separate account, model, and reasoning effort for each conversation in the current browser. New conversations inherit the current selection.
 - Switch between Claude subscription login, Codex/ChatGPT login, Anthropic, DeepSeek, OpenRouter, MiniMax, and custom Anthropic-compatible endpoints.
 - Preserve chat history, choose models and permission modes, create one-off or cron schedules, and optionally connect a WeChat bot.
 - Use responsive layouts designed for desktop and mobile screens.
@@ -135,6 +137,8 @@ The most common settings are `HOST`, `PORT`, `VAULT_PATH`, `CLAUDE_PERMISSION_MO
 ## Git Sync
 
 Git features operate on `VAULT_PATH`, not on the inkfellow source repository.
+
+Web sync and nightly sync check for unresolved merge conflicts after pulling. If conflicts remain, syncing stops and preserves local changes and the conflict state without committing or pushing them. Resolve the conflicts before retrying. Nightly sync also stops if the pull fails.
 
 1. Initialize the vault and make an initial commit.
 2. Add a remote if you want pull and push.

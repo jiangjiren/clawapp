@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import { flushSync } from "react-dom";
 import type {
   NotesDirectoryNode,
@@ -703,6 +703,9 @@ export default function NotesExplorer() {
   const assistantPanelRef = useRef<HTMLElement>(null);
   const sheetDragRef = useRef<SheetDrag | null>(null);
   const [assistantPanelVisible, setAssistantPanelVisible] = useState(false);
+  const [chatFocusActive, setChatFocusActive] = useState(false);
+  const chatFocusSnapshotRef = useRef<{ path: string | null; snapshot: ScrollSnapshot } | null>(null);
+  const [claudeFrameTick, setClaudeFrameTick] = useState(0);
   // 面板内（设置/历史）是否正显示为满铺子页面：此时唯一的"返回"控件应是子页面自己的返回按钮，
   // 收起整个面板的按钮需要让位，避免两个"返回"叠在同一个左上角
   const [isChildOverlayOpen, setIsChildOverlayOpen] = useState(false);
@@ -1372,6 +1375,8 @@ export default function NotesExplorer() {
   }, []);
 
   const getReaderScrollSnapshot = useCallback((): ScrollSnapshot | null => {
+    const held = chatFocusSnapshotRef.current;
+    if (held && held.path === activePathRef.current) return held.snapshot;
     const reader = readerRef.current;
     if (!reader) {
       return null;
@@ -1401,7 +1406,7 @@ export default function NotesExplorer() {
   }, []);
 
   const saveCurrentScrollSnapshot = useCallback((path = activePathRef.current) => {
-    if (!path) {
+    if (!path || chatFocusSnapshotRef.current) {
       return;
     }
     const snapshot = getReaderScrollSnapshot();
@@ -1478,6 +1483,7 @@ export default function NotesExplorer() {
       if (!options.silent && autoTitlePathRef.current && autoTitlePathRef.current !== path) {
         setAutoTitleTarget(null);
       }
+      if (!options.silent) setChatFocusActive(false);
       // 进入切换窗口：暂停滚动快照写入，直到新内容提交并恢复滚动位置。
       // loading 骨架/内容替换会把 scrollTop 钳制到 0，此时的 scroll 事件
       // 若照常写快照，会把 0 记到旧文件名下，覆盖真实阅读位置。
@@ -2302,6 +2308,7 @@ export default function NotesExplorer() {
 
   /** 回首页：清空当前文章/草稿，本次会话（含刷新）不再被自动恢复弹回 */
   const goHome = useCallback(() => {
+    setChatFocusActive(false);
     void flushEditBeforeSwitch().then(() => {
       if (autoSaveTimerRef.current) {
         clearTimeout(autoSaveTimerRef.current);
@@ -2649,6 +2656,7 @@ export default function NotesExplorer() {
   );
 
   const handleTabSelect = useCallback((path: string) => {
+    setChatFocusActive(false);
     if (path === activePathRef.current) return;
     // 标签切换恢复上次阅读位置（与文件树点击不同，这是标签的核心价值）
     void flushEditBeforeSwitch().then(() => loadNote(path, null, { restoreStoredScroll: true }));
@@ -3166,6 +3174,7 @@ export default function NotesExplorer() {
   );
 
   const handleClaudeToggle = useCallback(() => {
+    setChatFocusActive(false);
     setAiStatus((prev) => (prev === "done" ? "idle" : prev));
 
     if (isMobileViewport) {
@@ -3175,6 +3184,20 @@ export default function NotesExplorer() {
       setAssistantPanelVisible((visible) => !visible);
     }
   }, [isMobileViewport]);
+
+  const enterChatFocus = useCallback(() => {
+    if (isMobileViewport) return;
+    const snapshot = getReaderScrollSnapshot();
+    if (snapshot) chatFocusSnapshotRef.current = { path: activePathRef.current, snapshot };
+    setGitPanelOpen(false);
+    setAssistantPanelVisible(true);
+    setChatFocusActive(true);
+    // Move focus out of the reader before it disappears, avoiding browser auto-scroll
+    // back to the toolbar button when the reader becomes visible again.
+    claudeFrameRef.current?.contentWindow?.focus();
+  }, [isMobileViewport, getReaderScrollSnapshot]);
+
+  const handleExitChatFocus = useCallback(() => setChatFocusActive(false), []);
 
   /** ⌘J / Ctrl+J 开合 AI 对话面板（全局导航，与 ⌘K 同级，输入框内也生效） */
   useEffect(() => {
@@ -3477,6 +3500,54 @@ export default function NotesExplorer() {
   // 首页 → 对话的退场过渡：仪表盘先做退场动画，再原地展开对话面板
   const [isDashboardExiting, setIsDashboardExiting] = useState(false);
   const isDashboardChatMode = !note && isAssistantPanelOpen && isDashboardChatActive && !isMobileViewport;
+  const isChatFocusMode = !isMobileViewport && isAssistantPanelOpen && chatFocusActive && !gitPanelOpen;
+  const isCenteredChatMode = isDashboardChatMode || isChatFocusMode;
+  const focusNoteTitle = isDraft ? "记录灵感" : stripNoteExtension(activePath?.split("/").pop() ?? "");
+
+  // Restore before paint. While hidden, polling and scroll events must not save a clamped zero.
+  useLayoutEffect(() => {
+    if (isChatFocusMode) return;
+    const held = chatFocusSnapshotRef.current;
+    if (!held) return;
+    if (held.path === activePathRef.current) restoreReaderScroll(held.snapshot);
+    // Closing the panel changes width too; browser focus/scroll anchoring runs after
+    // the layout effect. Keep the snapshot protected until that layout has settled.
+    const frame = window.requestAnimationFrame(() => {
+      if (held.path === activePathRef.current) restoreReaderScroll(held.snapshot);
+      if (chatFocusSnapshotRef.current === held) chatFocusSnapshotRef.current = null;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [isChatFocusMode, restoreReaderScroll]);
+
+  useEffect(() => {
+    if (isMobileViewport || gitPanelOpen || !assistantPanelVisible) setChatFocusActive(false);
+  }, [isMobileViewport, gitPanelOpen, assistantPanelVisible]);
+
+  useEffect(() => {
+    if (isMobileViewport) return;
+    const toggle = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing) return;
+      if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key === "\\") {
+        event.preventDefault();
+        if (isChatFocusMode) handleExitChatFocus();
+        else enterChatFocus();
+      }
+    };
+    const onParentKey = (event: KeyboardEvent) => {
+      toggle(event);
+      if (event.key === "Escape" && !event.defaultPrevented && !event.isComposing && !isChildOverlayOpen) {
+        handleExitChatFocus();
+      }
+    };
+    // The chat iframe replaces its document on load, so attach again on each load.
+    const frameDoc = claudeFrameRef.current?.contentDocument;
+    window.addEventListener("keydown", onParentKey);
+    frameDoc?.addEventListener("keydown", toggle);
+    return () => {
+      window.removeEventListener("keydown", onParentKey);
+      frameDoc?.removeEventListener("keydown", toggle);
+    };
+  }, [isMobileViewport, isChatFocusMode, isChildOverlayOpen, enterChatFocus, handleExitChatFocus, claudeFrameTick]);
   // 移动端从首页提问：对话是主任务，全屏接管而非底部 sheet。
   // 不依赖 sheet 是否展开，否则关闭下滑动画进行中全屏类被摘掉，面板高度会跳变。
   const isMobileDashboardChat = !note && isMobileViewport && isDashboardChatActive;
@@ -3944,7 +4015,7 @@ export default function NotesExplorer() {
       </div>
 
       <section
-        className={`${styles.reader} ${isDashboardChatMode ? styles.readerHidden : ""} ${isDesktopGitView ? styles.readerGitMode : ""}`}
+        className={`${styles.reader} ${isCenteredChatMode ? styles.readerHidden : ""} ${isDesktopGitView ? styles.readerGitMode : ""}`}
         ref={readerRef}
         onDoubleClick={handleReaderDoubleClick}
         data-notes-reader
@@ -4149,6 +4220,14 @@ export default function NotesExplorer() {
                       </div>
                     )}
                   </div>
+                ) : null}
+                {!isMobileViewport && isAssistantPanelOpen ? (
+                  <button type="button" className={styles.iconButton} onClick={enterChatFocus}
+                    aria-label="专注聊天" title="专注聊天（Ctrl/⌘ + \）">
+                    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <path d="M15 3h6v6M9 21H3v-6M21 3l-7 7M3 21l7-7" />
+                    </svg>
+                  </button>
                 ) : null}
                 <button
                   type="button"
@@ -4647,7 +4726,7 @@ export default function NotesExplorer() {
 
       <aside
         ref={assistantPanelRef}
-        className={`${styles.assistantPanel} ${!isAssistantPanelOpen ? styles.assistantPanelHidden : ""} ${mobileAssistantSheet === 'full' ? styles.assistantPanelFull : ""} ${isDashboardChatMode ? styles.assistantPanelCenter : ""} ${isMobileDashboardChat ? styles.assistantPanelFullscreen : ""}`}
+        className={`${styles.assistantPanel} ${!isAssistantPanelOpen ? styles.assistantPanelHidden : ""} ${mobileAssistantSheet === 'full' ? styles.assistantPanelFull : ""} ${isCenteredChatMode ? styles.assistantPanelCenter : ""} ${isMobileDashboardChat ? styles.assistantPanelFullscreen : ""}`}
         aria-label="辅助面板"
         aria-hidden={isMobileViewport ? mobileAssistantSheet === 'closed' : !isAssistantPanelOpen}
         inert={isMobileViewport ? mobileAssistantSheet === 'closed' : !isAssistantPanelOpen}
@@ -4668,7 +4747,7 @@ export default function NotesExplorer() {
             <span className={styles.mobileSheetHandlePill} />
           </button>
         )}
-        {!isDashboardChatMode && (
+        {!isCenteredChatMode && (
           <>
             <button
               type="button"
@@ -4718,7 +4797,22 @@ export default function NotesExplorer() {
           </>
         )}
 
-        {(isDashboardChatMode || isMobileDashboardChat) && (
+        {isChatFocusMode && (
+          <header className={styles.dashboardChatHeader}>
+            <button type="button" className={`${styles.dashboardChatBackBtn} ${isChildOverlayOpen ? styles.dashboardChatBackBtnHidden : ""}`}
+              tabIndex={isChildOverlayOpen ? -1 : 0} onClick={handleExitChatFocus}
+              aria-label="退出专注聊天" title="退出专注聊天（Ctrl/⌘ + \ 或 Esc）">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                <path d="M4 14h5v5M20 10h-5V5M15 10l6-6M3 20l6-6" />
+              </svg>
+              <span>退出专注</span>
+            </button>
+            <span className={styles.chatFocusTitle} title={activePath ?? undefined}>
+              {activePath || isDraft ? `正在讨论：${focusNoteTitle}` : "Fellow"}
+            </span>
+          </header>
+        )}
+        {!isChatFocusMode && (isDashboardChatMode || isMobileDashboardChat) && (
           <header className={styles.dashboardChatHeader}>
             <button
               className={`${styles.dashboardChatBackBtn} ${isChildOverlayOpen ? styles.dashboardChatBackBtnHidden : ""}`}
@@ -4753,6 +4847,7 @@ export default function NotesExplorer() {
           tabIndex={isAssistantPanelOpen ? 0 : -1}
           onLoad={() => {
             claudeFrameReadyRef.current = true;
+            setClaudeFrameTick(tick => tick + 1);
             // 新文档里没有任何子面板，清掉可能残留的覆盖态
             setIsChildOverlayOpen(false);
             // Re-send the current note context once the iframe is ready.

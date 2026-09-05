@@ -6530,3 +6530,15 @@
     font-size: 15px;
   }
 }
+
+/* Keep the note context visible while the reader is hidden. */
+.chatFocusTitle {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: var(--notes-text-muted);
+  padding-right: 12px;
+}

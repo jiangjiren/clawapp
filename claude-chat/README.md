@@ -120,6 +120,12 @@ WeChat state and downloaded media are stored below `CLAUDE_CHAT_DATA_DIR`. Treat
 
 ## Configuration
 
+Antigravity is available as a managed account in the web chat account picker. Install and log in to `agy` as the same operating-system user that runs this service. The CLI must expose `--output-format`, `--mode`, and `--effort` in `agy --help`; upgrade older installations with `agy update`. `GET /api/agy/models` checks compatibility and discovers models and supported reasoning levels. A readable model catalog indicates CLI availability, not a guarantee that a model request will succeed.
+
+Antigravity supports streaming text, tool cards, image attachments, per-conversation continuation, persistent history, reconnect recovery, and cancellation. Account settings show separate Gemini and Claude/GPT quota pools from the CLI's `/usage` command. Catalog results are cached for six hours and quota results for four minutes; failed catalog checks retry after a minute. It is currently a web-chat provider; scheduled jobs and WeChat retain their existing execution channels.
+
+For Antigravity, plan mode uses the CLI's `plan` mode; other modes use `accept-edits`. The CLI sandbox remains enabled unless the user selects `bypassPermissions`, which explicitly auto-approves tools. Operations requiring interactive approval may be refused by the CLI in headless mode. Images and long prompts use private temporary files, deleted after the turn. Stopping a turn terminates its process group; disconnecting the browser keeps the turn running and records events for recovery.
+
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `HOST` | `127.0.0.1` | Listener address. Keep loopback unless another trusted network layer protects the service. |
@@ -131,6 +137,8 @@ WeChat state and downloaded media are stored below `CLAUDE_CHAT_DATA_DIR`. Treat
 | `CLAUDE_CHAT_HISTORY_FILE` | `<data dir>/history-<port>.json` | Optional override for the conversation history file. |
 | `CODEX_STREAM_STALL_MS` | `0` (disabled) | Optional Codex no-event watchdog in milliseconds. Leave disabled for long-running work. |
 | `CODEX_MAX_RUN_MS` | `0` (disabled) | Optional Codex wall-clock watchdog in milliseconds. Leave disabled for long-running work. |
+| `AGY_BIN` | `agy` from PATH or the user installation directory | Antigravity CLI executable path. |
+| `AGY_PRINT_TIMEOUT` | `24h` | Antigravity CLI turn time limit (a CLI duration such as `30m` or `24h`). |
 | `WECHAT_CDN_BASE_URL` | Tencent CDN URL | Override for WeChat media downloads. |
 | `WECHAT_MAX_INLINE_IMAGE_BYTES` | `5242880` | Maximum image size embedded directly into an agent request. |
 | `WECHAT_MAX_MEDIA_BYTES` | `26214400` | Maximum inbound or outbound WeChat media size. |
@@ -201,6 +209,8 @@ npm start
 ```
 
 `npm test` runs the isolated Node test suite. The server tests reserve temporary ports and data directories so they do not touch the production instances or credentials.
+
+From the repository root, `node --test tests/git-sync.test.mjs` verifies sync conflict protection with temporary local Git repositories. Scheduler intent tests cover authored instructions versus attached note context; conversation preference tests cover switching, reloads, legacy histories, and removed accounts.
 
 ## Security Checklist
 

@@ -15,6 +15,9 @@ import * as scheduler from "./scheduler.js";
 import { buildModelCandidates, runWithModelFallback } from "./model-fallback.js";
 import { BackgroundTaskTurnGate, PersistentQueryRuntime } from "./agent-session.js";
 import * as eventLog from "./core/event-log.js";
+import { hasSchedulerIntent, hasSchedulerIntentForMessage } from "./scheduler-intent.js";
+import * as agyProvider from "./providers/antigravity.js";
+import { getCatalog as getAgyCatalog, getUsage as getAgyUsage, runAntigravity, resolveModel as resolveAgyModel } from "./antigravity-runtime.js";
 import { z } from "zod";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -64,7 +67,6 @@ const htmlPath   = join(__dirname, "public/index.html");
 const AUTH_PROFILE_FILE = process.env.CLAUDE_CHAT_AUTH_PROFILE_FILE || join(__dirname, "auth-profile.json");
 const WEB_SCHEDULER_PEER = `web:${PORT}`;
 
-const SCHEDULER_INTENT_RE = /分钟后|小时后|一会儿|稍后|稍候|等会|定时|每天|每周|每月|每小时|每隔|工作日|提醒|自动|取消任务|删除任务|查看任务|暂停任务|恢复任务/;
 const INKFELLOW_SCHEDULER_PROMPT = `【inkfellow 定时任务规则】
 
 当用户提到以下任一场景时，必须使用 scheduler MCP 工具处理，不能只用文字承诺：
@@ -146,10 +148,6 @@ const WECHAT_MAX_INLINE_IMAGE_BYTES = Number.parseInt(process.env.WECHAT_MAX_INL
 const WECHAT_MAX_MEDIA_BYTES = Number.parseInt(process.env.WECHAT_MAX_MEDIA_BYTES || String(25 * 1024 * 1024), 10);
 const WECHAT_MAX_TEXT_CHARS = Number.parseInt(process.env.WECHAT_MAX_TEXT_CHARS || "1800", 10);
 mkdirSync(WECHAT_MEDIA_DIR, { recursive: true });
-
-const SCHEDULER_TROUBLESHOOT_RE = /没收到|没有收到|没推送|没有推送|没生效|不生效|未生效|没执行|没有执行|怎么.*没.*推送|怎么.*没.*提醒|有哪些.*任务|任务列表|列出.*任务|查看.*任务|查.*任务/;
-const SCHEDULER_TIME_HINT_RE = /周[一二三四五六日天]|早上|上午|中午|下午|晚上|凌晨|今晚|明天|后天|下周|[0-2]?\d\s*[:：点]\s*(?:[0-5]?\d|半)?/;
-const SCHEDULER_ACTION_HINT_RE = /提醒|推送|通知|复盘|叫我|任务/;
 
 const WECHAT_MESSAGE_ITEM_TYPE = {
   TEXT: 1,
@@ -275,6 +273,7 @@ function clearAllSessions() {
 }
 
 function setProviderSession(provider, id, model = null) {
+  if (provider === "antigravity") { clearAllSessions(); return; }
   if (provider === "codex") {
     clearSession();
     const resolvedModel = typeof model === "string" && model.trim()
@@ -302,7 +301,7 @@ function isPersistedCodexThread(id) {
 }
 
 function resolveSessionProvider(provider, id) {
-  if (provider === "codex" || provider === "claude") return provider;
+  if (["codex", "claude", "antigravity"].includes(provider)) return provider;
   return isPersistedCodexThread(id) ? "codex" : "claude";
 }
 
@@ -547,10 +546,10 @@ function migrateOldFormat(old) {
 function normalizeProfiles(raw) {
   const data = raw && typeof raw === "object" ? raw : {};
   // 旧格式没有 profiles 数组 → 迁移
-  if (!Array.isArray(data.profiles)) return migrateOldFormat(data);
+  if (!Array.isArray(data.profiles)) return normalizeProfiles(migrateOldFormat(data));
 
   const profiles = data.profiles.map(normalizeProfile).filter(p =>
-    p.provider === "claude" || p.provider === "codex" || p.apiKey
+    p.provider === "claude" || p.provider === "codex" || p.provider === "antigravity" || p.apiKey
   );
   if (!profiles.some(p => p.provider === "claude")) {
     profiles.unshift({ id: "p_claude", name: "Claude 会员", provider: "claude", apiKey: "", opusModel: "", sonnetModel: "", haikuModel: "", baseUrl: "" });
@@ -565,8 +564,11 @@ function normalizeProfiles(raw) {
     }
   }
   // 会员账号（Claude、Codex）固定置顶，其余自定义 key 账号保持原有相对顺序
-  const providerRank = { claude: 0, codex: 1 };
-  profiles.sort((a, b) => (providerRank[a.provider] ?? 2) - (providerRank[b.provider] ?? 2));
+  if (!profiles.some(p => p.provider === "antigravity")) {
+    profiles.push({ id: "p_antigravity", name: "Antigravity", provider: "antigravity", apiKey: "", baseUrl: "", opusModel: "", sonnetModel: "", haikuModel: "" });
+  }
+  const providerRank = { claude: 0, codex: 1, antigravity: 2 };
+  profiles.sort((a, b) => (providerRank[a.provider] ?? 3) - (providerRank[b.provider] ?? 3));
   const activeProfileId = typeof data.activeProfileId === "string" && profiles.some(p => p.id === data.activeProfileId)
     ? data.activeProfileId
     : profiles[0].id;
@@ -1139,6 +1141,7 @@ function addSkillSlugsFromDir(slugs, dir) {
 }
 
 function skillDirsForProvider(provider) {
+  if (provider === "antigravity") return [join(homedir(), ".gemini", "antigravity-cli", "builtin", "skills"), join(homedir(), ".gemini", "skills"), join(DEFAULT_CWD, ".gemini", "skills")];
   if (provider === "codex") {
     return [
       join(homedir(), ".codex", "skills"),
@@ -1156,7 +1159,7 @@ function skillDirsForProvider(provider) {
 }
 
 function normalizeSkillProvider(provider) {
-  return provider === "codex" ? "codex" : "claude";
+  return ["codex", "antigravity"].includes(provider) ? provider : "claude";
 }
 
 function loadSkillsFromDisk(provider = "claude") {
@@ -1918,13 +1921,6 @@ async function startWechatPolling(baseUrl, token, initialBuf = "") {
   })();
 }
 
-function hasSchedulerIntent(prompt) {
-  const text = String(prompt || "");
-  return SCHEDULER_INTENT_RE.test(text)
-    || SCHEDULER_TROUBLESHOOT_RE.test(text)
-    || (SCHEDULER_TIME_HINT_RE.test(text) && SCHEDULER_ACTION_HINT_RE.test(text));
-}
-
 function _buildSchedulerMcpServer({ sourceChannel, sourcePeer, defaultOutputs = [] }) {
   const nowMs = Date.now();
   const nowStr = new Date(nowMs).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" });
@@ -2527,7 +2523,7 @@ const http = createServer((req, res) => {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({
         updatedAt: new Date().toISOString(),
-        providers: { claude, codex },
+        providers: { claude, codex, antigravity: getAgyUsage() },
       }));
     })().catch((err) => {
       res.writeHead(500, { "Content-Type": "application/json" });
@@ -2539,6 +2535,17 @@ const http = createServer((req, res) => {
   // ── Claude subscription auth status ──────────────────────────
   // Run `claude auth status` — the only reliable way to check login state,
   // since credentials may be stored in the system keychain rather than a file.
+  if ((url === "/api/agy/models" || url === "/api/health/antigravity-auth") && method === "GET") {
+    getAgyCatalog().then(data => {
+      res.writeHead(200, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+      res.end(JSON.stringify(data));
+    }).catch(err => {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: String(err.message) }));
+    });
+    return;
+  }
+
   if (url === "/api/health/codex-auth" && method === "GET") {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ authenticated: isCodexAuthAvailable() }));
@@ -2594,9 +2601,9 @@ const http = createServer((req, res) => {
         } else if (payload.action === "add") {
           // 新增账号
           const profile = normalizeProfile(payload.profile ?? {});
-          if (profile.provider === "codex") {
+          if (profile.provider === "codex" || profile.provider === "antigravity") {
             res.writeHead(400, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ error: "Codex 会员账号由本机登录状态自动管理，不能手动添加" }));
+            res.end(JSON.stringify({ error: "CLI 会员账号由本机管理，不能手动添加" }));
             return;
           }
           if (profile.provider !== "claude" && !profile.apiKey) {
@@ -2620,9 +2627,9 @@ const http = createServer((req, res) => {
             res.end(JSON.stringify({ error: "账号不存在" }));
             return;
           }
-          if (target.provider === "codex") {
+          if (target.provider === "codex" || target.provider === "antigravity") {
             res.writeHead(400, { "Content-Type": "application/json" });
-            res.end(JSON.stringify({ error: "Codex 会员账号由本机登录状态自动管理，不能编辑" }));
+            res.end(JSON.stringify({ error: "CLI 会员账号由本机管理，不能编辑" }));
             return;
           }
           const updated = normalizeProfile({ ...target, ...payload.profile, id: target.id, provider: target.provider });
@@ -2642,7 +2649,7 @@ const http = createServer((req, res) => {
           // 删除账号（不能删 Claude 会员 / 不能删到空）
           const id = String(payload.profileId ?? "");
           const target = current.profiles.find(p => p.id === id);
-          if (!target || target.provider === "claude" || target.provider === "codex") {
+          if (!target || ["claude", "codex", "antigravity"].includes(target.provider)) {
             res.writeHead(400, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ error: "该账号不能删除" }));
             return;
@@ -3336,7 +3343,7 @@ wss.on("connection", (ws) => {
       if (activeRun?.requestId) rememberClientRequest(activeRun.requestId, "stopped", activeRun.id);
       // Claude 走长驻会话：只中断本轮，保留 query 供后续消息复用。
       // Codex 仍是每请求一条流，只能 abort。
-      if (interruptClaudeTurn()) { activeRun = null; return; }
+      if (!["codex", "antigravity"].includes(activeRun?.provider) && interruptClaudeTurn()) { activeRun = null; return; }
       if (activeRun && !activeRun.finished) { activeRun.ac.abort(); activeRun = null; }
       else send({ type: "stopped" });
       return;
@@ -3364,6 +3371,8 @@ wss.on("connection", (ws) => {
     if (activeRun && !activeRun.finished) {
       const canSteerClaude = incomingProvider !== "codex"
         && activeRun.provider !== "codex"
+        && incomingProvider !== "antigravity"
+        && activeRun.provider !== "antigravity"
         && claudeRuntime.started
         && !!claudeTurn
         && !activeRun.pendingAskUserQuestion;
@@ -3417,7 +3426,7 @@ wss.on("connection", (ws) => {
     if (!interruptClaudeTurn() && activeRun && !activeRun.finished) activeRun.ac.abort();
     activeRun = null;
 
-    const schedulerRequest = hasSchedulerIntent(msg.prompt);
+    const schedulerRequest = hasSchedulerIntentForMessage(msg);
 
     // Build message content — text only, or images + text
     const userMsg = buildUserMessage(msg);
@@ -3455,7 +3464,7 @@ wss.on("connection", (ws) => {
       effort: run.effort,
     });
 
-    if (activeProfile && activeProfile.provider !== "claude" && activeProfile.provider !== "codex" && !activeProfile.apiKey) {
+    if (activeProfile && !["claude", "codex", "antigravity"].includes(activeProfile.provider) && !activeProfile.apiKey) {
       run.send({ type: "error", text: `${activeProfile.name} 的 API Key 还没有配置，请先在账号设置里保存。` });
       run.send({ type: "done" });
       run.finish(); activeRun = null;
@@ -3467,7 +3476,7 @@ wss.on("connection", (ws) => {
       run.finish(); activeRun = null;
       return;
     }
-    if (activeProfile?.provider === "codex" && schedulerRequest) {
+    if (["codex", "antigravity"].includes(activeProfile?.provider) && schedulerRequest) {
       run.send({ type: "error", text: "定时任务目前需要 Claude 会员通道的 scheduler 工具。请切换到 Claude 会员后再创建、查看或修改提醒任务。" });
       run.send({ type: "done" });
       run.finish(); activeRun = null;
@@ -3475,6 +3484,44 @@ wss.on("connection", (ws) => {
     }
 
     const resolvedCwd = resolveAllowedCwd(msg.cwd);
+    if (activeProfile?.provider === "antigravity") {
+      (async () => {
+        try {
+          await getAgyCatalog();
+          ac.signal.throwIfAborted();
+          const model = resolveAgyModel(msg.model);
+          run.model = model;
+          eventLog.updateMeta(msg.conversationId, { model, profileId: activeProfile.id });
+          const previous = eventLog.getMeta(msg.conversationId);
+          const translate = agyProvider.createTranslator();
+          let hasAnswer = false;
+          const result = await runAntigravity({
+            prompt: content.filter(b => b.type === "text").map(b => b.text).join("\n\n"),
+            images: content.filter(b => b.type === "image").map(b => ({ mediaType: b.source.media_type, data: b.source.data })),
+            cwd: resolvedCwd, model, effort, permissionMode, signal: ac.signal,
+            resumeConversationId: previous?.sessionProvider === "antigravity" ? previous.sessionId : null,
+            onSession: id => run.send({ type: "session", sessionId: id, provider: "antigravity", model }),
+            onEvent: ev => {
+              for (const event of translate(ev)) {
+                if (event.type === "assistant" && event.message?.content?.some(b => b.type === "text")) hasAnswer = true;
+                run.send(event);
+              }
+            },
+          });
+          if (!hasAnswer && result.text) run.send({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: result.text }] } });
+          if (result.conversationId) run.send({ type: "session", sessionId: result.conversationId, provider: "antigravity", model });
+          run.send({ type: "result", subtype: "success", provider: "antigravity", usage: result.usage });
+          run.send({ type: "done" });
+        } catch (err) {
+          if (ac.signal.aborted) run.send({ type: "stopped" });
+          else { run.send({ type: "error", text: String(err.message || err) }); run.send({ type: "done" }); }
+        } finally {
+          run.finish();
+          if (activeRun === run) activeRun = null;
+        }
+      })();
+      return;
+    }
     const webEnv = buildAgentEnv(profileData, effort, msg.model);
     webEnv.PWD = resolvedCwd; // 让 agent 报告的工作目录与实际 cwd 一致
     const options = {

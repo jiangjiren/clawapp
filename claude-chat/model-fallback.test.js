@@ -28,6 +28,11 @@ test("buildModelCandidates uses Sonnet 5 first and reads configured models dynam
   ]);
 });
 
+test("background channels exclude Antigravity even with legacy key fields", () => {
+  const data = { ...profiles, profiles: [...profiles.profiles, { id: "agy", provider: "antigravity", apiKey: "legacy", baseUrl: "https://example.test", sonnetModel: "gemini-3.1-pro" }] };
+  assert.ok(buildModelCandidates(data).every(candidate => candidate.provider !== "antigravity"));
+});
+
 test("buildModelCandidates can omit providers that cannot support required tools", () => {
   assert.equal(buildModelCandidates(profiles, { excludedProviders: ["codex"] })[1].provider, "deepseek");
 });

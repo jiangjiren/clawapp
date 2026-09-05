@@ -42,6 +42,8 @@ export function isCandidateUnavailableError(error) {
 
 function isConfiguredProfile(profile) {
   if (!profile || typeof profile !== "object") return false;
+  // Antigravity currently has a web runner only; never send it to the Claude SDK.
+  if (profile.provider === "antigravity") return false;
   if (profile.provider === "claude" || profile.provider === "codex") return true;
   if (profile.provider === "anthropic") return Boolean(profile.apiKey);
   return Boolean(profile.apiKey && profile.baseUrl);

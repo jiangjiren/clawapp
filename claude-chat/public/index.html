@@ -1502,6 +1502,7 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
   width: min(210px, calc(100vw - 28px));
 }
 .picker-dropdown.open { display: block; animation: dropFadeIn 0.12s ease; }
+.picker-option[hidden] { display: none; }
 .picker-option {
   display: flex;
   flex-direction: column;
@@ -2786,6 +2787,83 @@ let currentSessionId = null; // current Claude session / Codex thread id
 let currentSessionProvider = null; // "claude" | "codex"
 let currentSessionModel = null;
 
+// Account/model/effort belong to the conversation; legacy keys are defaults only.
+const CONV_MODEL_PREFS_KEY = "convModelPrefs-v1";
+const convModelPrefs = (() => {
+  try {
+    const raw = JSON.parse(localStorage.getItem(CONV_MODEL_PREFS_KEY) || "[]");
+    return new Map(Array.isArray(raw) ? raw.filter(entry => Array.isArray(entry)
+      && typeof entry[0] === "string" && entry[1] && typeof entry[1] === "object"
+      && !Array.isArray(entry[1])) : []);
+  } catch { return new Map(); }
+})();
+let currentConversationMeta = null;
+
+function persistConvModelPrefs() {
+  while (convModelPrefs.size > 60) convModelPrefs.delete(convModelPrefs.keys().next().value);
+  try { localStorage.setItem(CONV_MODEL_PREFS_KEY, JSON.stringify([...convModelPrefs])); } catch { }
+}
+
+function rememberConvModelPrefs({ create = false } = {}) {
+  if (!_profileData.profiles.length) return;
+  if (!currentConvId && create) {
+    currentConvId = genId();
+    resetCursor(currentConvId);
+  }
+  if (!currentConvId) return;
+  convModelPrefs.delete(currentConvId);
+  convModelPrefs.set(currentConvId, {
+    profileId: getActiveProfile()?.id,
+    model: selectedModel,
+    effort: selectedEffort,
+  });
+  persistConvModelPrefs();
+}
+
+function currentConvProfileId() {
+  const pref = currentConvId ? convModelPrefs.get(currentConvId) : null;
+  const candidate = pref?.profileId ?? currentConversationMeta?.profileId;
+  if (_profileData.profiles.some(p => p.id === candidate)) return candidate;
+  // Older histories may only name the SDK provider, without an account ID.
+  if (!pref && currentConversationMeta?.sessionProvider) {
+    const provider = currentConversationMeta.sessionProvider;
+    return _profileData.profiles.find(p => p.provider === provider)?.id ?? null;
+  }
+  return null;
+}
+
+function applyConvModelPrefs(conv = null) {
+  if (conv) currentConversationMeta = conv;
+  const pref = currentConvId ? convModelPrefs.get(currentConvId) : null;
+  const effort = pref?.effort ?? currentConversationMeta?.effort ?? localStorage.getItem("effort");
+  selectedEffort = ["low", "medium", "high", "xhigh", "max"].includes(effort) ? effort : "medium";
+  renderProfileList(_profileData);
+  updateEffortDisplay();
+  rememberConvModelPrefs();
+}
+
+function forgetProfileFromConvPrefs(id) {
+  for (const [convId, pref] of convModelPrefs) {
+    if (pref.profileId === id) convModelPrefs.set(convId, { effort: pref.effort });
+  }
+  persistConvModelPrefs();
+}
+
+function selectConversationProfile(id) {
+  rememberConvModelPrefs({ create: true });
+  const pref = convModelPrefs.get(currentConvId) ?? {};
+  convModelPrefs.set(currentConvId, { profileId: id, effort: pref.effort ?? selectedEffort });
+  renderProfileList({ ..._profileData, activeProfileId: id });
+  rememberConvModelPrefs();
+}
+
+function beginConversationDraft() {
+  currentConversationMeta = null;
+  currentConvId = genId();
+  resetCursor(currentConvId);
+  rememberConvModelPrefs();
+}
+
 // ── 游标同步状态 ──────────────────────────────────────────
 // 断线/刷新后靠 {conversationId, lastSeq} 向服务端要差量，不再依赖内存里的 runId。
 // 存 sessionStorage 是关键：它能活过刷新，刷新后才接得回正在跑的轮次。
@@ -2876,6 +2954,8 @@ const CODEX_MODELS = [
   { model: "gpt-5.6-luna",  label: "gpt-5.6-luna",  name: "gpt-5.6-luna",  desc: "快速经济" },
 ];
 
+let AGY_MODELS = [{ model: "gemini-3.1-pro", label: "Gemini 3.1 Pro", name: "Gemini 3.1 Pro", desc: "等待模型目录", efforts: ["low", "high"] }];
+let _agyStatus = { ready: false, message: "正在检测 CLI…" };
 let _profileData = { activeProfileId: localStorage.getItem("activeProfileId") || "p_claude", profiles: [] };
 let _claudeAuthStatus = null; // null=checking, true=ok, false=not logged in
 let _codexAuthStatus  = null;
@@ -2907,26 +2987,42 @@ async function checkCodexAuth() {
 
 checkClaudeAuth();
 checkCodexAuth();
+async function refreshAgyModels() {
+  try {
+    const res = await fetch("api/agy/models", { cache: "no-store" });
+    if (!res.ok) throw new Error("模型目录读取失败");
+    const data = await res.json();
+    _agyStatus = data;
+    if (data.models?.length) AGY_MODELS = data.models.map(m => ({ ...m, name: m.label, desc: "Antigravity", efforts: data.efforts?.[m.model] || [] }));
+  } catch (err) { _agyStatus = { ready: false, message: err.message }; }
+  renderProfileList(_profileData);
+  updateEffortDisplay();
+}
+void refreshAgyModels();
 
 function getActiveProfile() {
   return _profileData.profiles.find(p => p.id === _profileData.activeProfileId) ?? _profileData.profiles[0] ?? null;
 }
 
 function alignProfileToSessionProvider(provider, preferredProfileId = null) {
+  if (currentConvProfileId()) return;
   let target = preferredProfileId
     ? _profileData.profiles.find(p => p.id === preferredProfileId)
     : null;
-  if (provider === "codex") {
-    if (target?.provider !== "codex") {
-      target = _profileData.profiles.find(p => p.provider === "codex") ?? null;
+  if (provider === "codex" || provider === "antigravity") {
+    if (target?.provider !== provider) {
+      target = _profileData.profiles.find(p => p.provider === provider) ?? null;
     }
-  } else if (target?.provider === "codex" || (!target && getActiveProfile()?.provider === "codex")) {
+  } else if (["codex", "antigravity"].includes(target?.provider) || (!target && ["codex", "antigravity"].includes(getActiveProfile()?.provider))) {
     target = _profileData.profiles.find(p => p.provider === "claude")
       ?? _profileData.profiles.find(p => p.provider !== "codex")
       ?? null;
   }
   if (!target || target.id === _profileData.activeProfileId) return;
-  localStorage.setItem("activeProfileId", target.id);
+  if (currentConvId) {
+    const pref = convModelPrefs.get(currentConvId) ?? {};
+    convModelPrefs.set(currentConvId, { ...pref, profileId: target.id });
+  }
   renderProfileList({ ..._profileData, activeProfileId: target.id });
 }
 
@@ -2937,6 +3033,8 @@ function renderModelOptions(activeProfile) {
     options = CLAUDE_MODELS;
   } else if (provider === "codex") {
     options = CODEX_MODELS;
+  } else if (provider === "antigravity") {
+    options = AGY_MODELS;
   } else {
     // 收集三档模型，相同模型合并显示 tier 标签
     const tierEntries = [
@@ -2957,14 +3055,20 @@ function renderModelOptions(activeProfile) {
     if (!options.length) options = CLAUDE_MODELS;
   }
   const key = `model:${provider === "claude" ? "claude" : activeProfile?.id || provider}`;
-  const rawSaved = localStorage.getItem(key);
+  const pref = currentConvId ? convModelPrefs.get(currentConvId) : null;
+  const rawSaved = (pref?.profileId === activeProfile?.id ? pref?.model : null)
+    ?? (!pref && currentConvProfileId() === activeProfile?.id ? currentConversationMeta?.model : null)
+    ?? localStorage.getItem(key);
+  if (provider === "antigravity" && rawSaved && _agyStatus.efforts?.[rawSaved] && !options.some(o => o.model === rawSaved)) {
+    options = [...options, { model: rawSaved, label: rawSaved, name: rawSaved, desc: "当前会话", efforts: _agyStatus.efforts[rawSaved] }];
+  }
   // 只迁移 Claude 会员档位；第三方 profile 的模型名由用户自己填，不能替换
   const saved = provider === "claude" ? (MODEL_MIGRATIONS[rawSaved] ?? rawSaved) : rawSaved;
-  const defaultModel = provider === "claude"
+  const defaultModel = provider === "claude" || provider === "antigravity"
     ? options[0].model
     : (activeProfile?.sonnetModel || options[0].model);
   selectedModel = options.some(o => o.model === saved) ? saved : defaultModel;
-  if (saved !== rawSaved && selectedModel === saved) localStorage.setItem(key, saved);
+
   const modelView = modelDropdown.querySelector(".model-view");
   // Rebuild only the model buttons, then re-append the divider + effort-nav row
   const modelBtnsHtml = options.map(o => `
@@ -2982,6 +3086,7 @@ function renderModelOptions(activeProfile) {
   `;
   modelView.innerHTML = modelBtnsHtml + effortNavHtml;
   modelLabel.textContent = options.find(o => o.model === selectedModel)?.label ?? options[0].label;
+  updateEffortDisplay();
 }
 
 // ── Escape helpers ─────────────────────────────────────────
@@ -3207,11 +3312,11 @@ function setAuthStatus(type, text, isForm = false) {
 // ── Provider display metadata ─────────────────────────────
 const PROVIDER_COLOR = {
   claude: "#d97757", anthropic: "#c96442", deepseek: "#1a6cf6", openrouter: "#8b5cf6", minimax: "#ff6b35", custom: "#6b7280",
-  codex: "#10a37f",
+  codex: "#10a37f", antigravity: "#4285f4",
 };
 const PROVIDER_LABEL = {
   claude: "Claude", anthropic: "Anthropic", deepseek: "DeepSeek", openrouter: "OpenRouter", minimax: "MiniMax", custom: "自定义",
-  codex: "GPT",
+  codex: "GPT", antigravity: "Antigravity",
 };
 
 function providerBadge(provider) {
@@ -3281,7 +3386,7 @@ function renderLimitTooltipWindow(label, win) {
 }
 
 function renderProviderLimitSummary(provider) {
-  if (provider !== "claude" && provider !== "codex") return "";
+  if (!["claude", "codex", "antigravity"].includes(provider)) return "";
   const limit = _providerUsageLimits[provider];
   if (!limit || limit.status === "idle" || limit.status === "loading") {
     return `<span class="auth-limit-badge muted" title="正在读取实时额度">额度检测中…</span>`;
@@ -3297,6 +3402,9 @@ function renderProviderLimitSummary(provider) {
     { label: "5h", tooltipLabel: "5小时", value: limit.fiveHour, resetFormat: "hm" },
     { label: "周", tooltipLabel: "本周", value: limit.week, resetFormat: "dh" },
   ].filter(item => item.value?.usedPercent != null);
+  if (provider === "antigravity" && limit.groups?.length) {
+    return limit.groups.map(group => `<span class="auth-limit-badge" title="${escapeAttr(limit.message || "Antigravity 会员额度")}"><span class="auth-limit-text">${escapeHtml(group.label)} · ${[renderLimitWindow("5h", group.fiveHour), renderLimitWindow("周", group.week, "dh")].filter(Boolean).join(" · ")}</span></span>`).join("");
+  }
   if (!windows.length) {
     return `<span class="auth-limit-badge muted" title="当前账号未返回可用的额度窗口">额度暂不可用</span>`;
   }
@@ -3316,6 +3424,7 @@ async function checkProviderUsageLimits({ silent = false } = {}) {
     _providerUsageLimits = {
       claude: { status: "loading" },
       codex: { status: "loading" },
+      antigravity: { status: "loading" },
     };
     renderProfileList(_profileData);
   }
@@ -3327,6 +3436,7 @@ async function checkProviderUsageLimits({ silent = false } = {}) {
     _providerUsageLimits = {
       claude: data.providers?.claude ?? { status: "unavailable", available: false },
       codex: data.providers?.codex ?? { status: "unsupported", available: false },
+      antigravity: data.providers?.antigravity ?? { status: "unavailable", available: false },
     };
   } catch (err) {
     if (seq !== _usageLimitsRequestSeq) return;
@@ -3334,6 +3444,7 @@ async function checkProviderUsageLimits({ silent = false } = {}) {
     _providerUsageLimits = {
       claude: { status: "error", available: false, message },
       codex: { status: "error", available: false, message },
+      antigravity: { status: "error", available: false, message },
     };
   }
   renderProfileList(_profileData);
@@ -3356,8 +3467,9 @@ function stopUsageLimitPolling() {
 const authProfileList = document.getElementById("auth-profile-list");
 
 function renderProfileList(data) {
-  // activeProfileId 以本实例 localStorage 为准，与 model/effort/permission 同一机制
-  const savedId = localStorage.getItem("activeProfileId");
+  // Polling and opening settings must preserve this conversation's own selection.
+  _profileData = data;
+  const savedId = currentConvProfileId() ?? localStorage.getItem("activeProfileId");
   if (savedId && data.profiles.some(p => p.id === savedId)) {
     data = { ...data, activeProfileId: savedId };
   }
@@ -3378,8 +3490,9 @@ function renderProfileList(data) {
       ? (_codexAuthStatus === true  ? "✅ 已登录 ChatGPT Plus"
        : _codexAuthStatus === false ? "⚠️ 未登录 — 请打开 Codex 客户端完成登录"
        : "正在检测登录状态…")
+      : p.provider === "antigravity" ? (_agyStatus.message || "CLI 状态未知")
       : metaParts.join("  ");
-    const isManagedSubscription = p.provider === "claude" || p.provider === "codex";
+    const isManagedSubscription = ["claude", "codex", "antigravity"].includes(p.provider);
     const canEdit   = !isManagedSubscription;
     const canDelete = !isManagedSubscription;
     const actions = (canEdit || canDelete) ? `
@@ -3413,8 +3526,8 @@ async function activateProfile(id) {
       body: JSON.stringify({ action: "activate", profileId: id }) });
     const d = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(d.error || "切换失败");
-    localStorage.setItem("activeProfileId", id);
-    renderProfileList(d.data);
+    _profileData = d.data;
+    selectConversationProfile(id);
     if (d.resetSession) {
       currentSessionId = null;
       currentSessionProvider = null;
@@ -3434,7 +3547,10 @@ async function deleteProfile(id) {
       body: JSON.stringify({ action: "delete", profileId: id }) });
     const d = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(d.error || "删除失败");
+    forgetProfileFromConvPrefs(id);
+    if (currentConversationMeta?.profileId === id) currentConversationMeta = null;
     renderProfileList(d.data);
+    rememberConvModelPrefs();
     if (d.resetSession) {
       currentSessionId = null;
       currentSessionProvider = null;
@@ -3563,7 +3679,13 @@ addSubmitBtn.addEventListener("click", async () => {
       body: JSON.stringify({ action: isEdit ? "update" : "add", profile: profilePayload }) });
     const d = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(d.error || (isEdit ? "保存失败" : "添加失败"));
-    renderProfileList(d.data);
+    if (!isEdit) {
+      _profileData = d.data;
+      selectConversationProfile(d.data.activeProfileId);
+    } else {
+      renderProfileList(d.data);
+      rememberConvModelPrefs();
+    }
     if (d.resetSession) {
       currentSessionId = null;
       currentSessionProvider = null;
@@ -3600,7 +3722,10 @@ authProfileList.addEventListener("click", (e) => {
 async function fetchProfiles() {
   try {
     const res = await fetch("api/auth-profile", { cache: "no-store" });
-    if (res.ok) renderProfileList(await res.json());
+    if (res.ok) {
+      renderProfileList(await res.json());
+      if (currentConvId) applyConvModelPrefs();
+    }
   } catch { }
 }
 
@@ -3614,6 +3739,7 @@ function notifyPanelOverlayState() {
 }
 
 function openAuthDialog() {
+  void refreshAgyModels();
   closeHeaderPickers();
   closeHistoryPanel();
   authDialog.classList.add("open");
@@ -4074,7 +4200,7 @@ function resetLongRunMonitor() {
 }
 
 function updateLongRunStatus() {
-  if (!isGenerating || currentRunProvider !== "codex" || !runStartedAt || !lastRunProgressAt) {
+  if (!isGenerating || !["codex", "antigravity"].includes(currentRunProvider) || !runStartedAt || !lastRunProgressAt) {
     longRunStatusEl.hidden = true;
     longRunStatusEl.classList.remove("actionable");
     return;
@@ -4090,7 +4216,8 @@ function updateLongRunStatus() {
   const actionable = now - Math.max(lastRunProgressAt, longRunAcknowledgedAt) >= LONG_RUN_ACTION_MS;
   longRunStatusEl.hidden = false;
   longRunStatusEl.classList.toggle("actionable", actionable);
-  longRunTitleEl.textContent = actionable ? "Codex 长时间没有新事件" : "Codex 正在深度处理";
+  const providerName = currentRunProvider === "antigravity" ? "Antigravity" : "Codex";
+  longRunTitleEl.textContent = actionable ? `${providerName} 长时间没有新事件` : `${providerName} 正在深度处理`;
   longRunMetaEl.textContent = `已运行 ${formatElapsed(elapsed)} · ${formatElapsed(silentFor)} 无新进度，任务仍在后台`;
 }
 
@@ -4455,7 +4582,8 @@ function buildCommandList(skills) {
 }
 
 function activeSkillProvider() {
-  return getActiveProfile()?.provider === "codex" ? "codex" : "claude";
+  const provider = getActiveProfile()?.provider;
+  return ["codex", "antigravity"].includes(provider) ? provider : "claude";
 }
 
 function requestSkillRefresh(force = false) {
@@ -5420,6 +5548,7 @@ function handleSyncEvent(ev) {
     saveCursor();
   }
 
+  applyConvModelPrefs();
   applySyncTurn(ev.turn);
 }
 
@@ -5430,8 +5559,9 @@ function applySyncSnapshot(snapshot, convId) {
   resetAssistantState();
   renderConversationMessages(snapshot);
   currentConvId = snapshot.id || convId || currentConvId;
+  currentConversationMeta = snapshot;
   if (snapshot.sessionId) currentSessionId = snapshot.sessionId;
-  if (snapshot.sessionProvider === "codex" || snapshot.sessionProvider === "claude") {
+  if (["codex", "claude", "antigravity"].includes(snapshot.sessionProvider)) {
     currentSessionProvider = snapshot.sessionProvider;
   }
   currentSessionModel = typeof snapshot.model === "string" ? snapshot.model : null;
@@ -5913,7 +6043,7 @@ function handleEvent(ev) {
 
   if (ev.type === "session" && ev.sessionId) {
     currentSessionId = ev.sessionId;
-    currentSessionProvider = ev.provider === "codex" ? "codex" : "claude";
+    currentSessionProvider = ["codex", "antigravity"].includes(ev.provider) ? ev.provider : "claude";
     if (isGenerating) currentRunProvider = currentSessionProvider;
     alignProfileToSessionProvider(currentSessionProvider);
     return;
@@ -6484,8 +6614,9 @@ function selectItem(i) {
     saveCurrentConversation();
     clearAskUserQuestion();
     messagesEl.innerHTML = "";
-    messageLog = []; currentConvId = null; currentSessionId = null; currentSessionProvider = null; currentSessionModel = null;
-    resetCursor();
+    messageLog = [];
+    beginConversationDraft();
+    currentSessionId = null; currentSessionProvider = null; currentSessionModel = null;
     promptEl.value = "";
     promptEl.style.height = "36px";
     clearMentionFiles();
@@ -6615,8 +6746,9 @@ function send() {
     saveCurrentConversation();
     clearAskUserQuestion();
     messagesEl.innerHTML = "";
-    messageLog = []; currentConvId = null; currentSessionId = null; currentSessionProvider = null; currentSessionModel = null;
-    resetCursor();
+    messageLog = [];
+    beginConversationDraft();
+    currentSessionId = null; currentSessionProvider = null; currentSessionModel = null;
     promptEl.value = "";
     promptEl.style.height = "36px";
     clearMentionFiles();
@@ -6632,6 +6764,7 @@ function send() {
     currentConvId = genId();
     resetCursor(currentConvId);
   }
+  rememberConvModelPrefs();
   const imagePreviewUrls = pendingImages.map(img => img.previewUrl);
   if (!isFollowUp) {
     clearAskUserQuestion();
@@ -6699,6 +6832,7 @@ function send() {
   }
   const wsPayload = {
     prompt: parts.join("\n\n"),
+    composerText: text,
     runId: currentRunId,
     userMessageId,
     conversationId: currentConvId,
@@ -6895,12 +7029,20 @@ const permissionDropdown = document.getElementById("permission-dropdown");
 const permissionLabel    = document.getElementById("permission-label");
 
 function updateEffortDisplay() {
-  const opt = effortView.querySelector(`.effort-option[data-effort="${selectedEffort}"]`);
+  const agy = getActiveProfile()?.provider === "antigravity";
+  const supported = agy ? (_agyStatus.efforts?.[selectedModel] || AGY_MODELS.find(m => m.model === selectedModel)?.efforts || []) : null;
+  const requested = agy && ["xhigh", "max"].includes(selectedEffort) ? "high" : selectedEffort;
+  const order = requested === "high" ? ["high", "medium", "low"] : requested === "low" ? ["low", "medium", "high"] : ["low", "high", "medium"];
+  const effective = supported ? (supported.includes(requested) ? requested : order.find(level => supported.includes(level))) : selectedEffort;
+  const nav = document.getElementById("effort-nav-btn");
+  if (nav) nav.hidden = agy && !supported.length;
+  const opt = effortView.querySelector(`.effort-option[data-effort="${effective}"]`);
   const label = opt ? opt.dataset.label : selectedEffort;
-  if (effortLabelInline) effortLabelInline.textContent = label;
+  if (effortLabelInline) effortLabelInline.textContent = agy && !supported.length ? "自动" : label;
   effortView.querySelectorAll(".effort-option").forEach(el => {
-    el.classList.toggle("active", el.dataset.effort === selectedEffort);
-    el.setAttribute("aria-selected", el.dataset.effort === selectedEffort ? "true" : "false");
+    el.hidden = !!supported && !supported.includes(el.dataset.effort);
+    el.classList.toggle("active", el.dataset.effort === effective);
+    el.setAttribute("aria-selected", el.dataset.effort === effective ? "true" : "false");
   });
 }
 
@@ -6980,10 +7122,8 @@ modelDropdown.addEventListener("mousedown", (e) => {
   e.preventDefault();
   selectedModel = setPickerOptions(modelDropdown, ".model-option", opt, "model");
   modelLabel.textContent = opt.dataset.label;
-  const _activeProfile = getActiveProfile();
-  const _provider = _activeProfile?.provider || "claude";
-  const _modelKey = `model:${_provider === "claude" ? "claude" : _activeProfile?.id || _provider}`;
-  localStorage.setItem(_modelKey, selectedModel);
+  updateEffortDisplay();
+  rememberConvModelPrefs({ create: true });
   closeHeaderPickers();
 });
 
@@ -7009,7 +7149,7 @@ effortView.addEventListener("mousedown", (e) => {
   if (!opt) return;
   e.preventDefault();
   selectedEffort = opt.dataset.effort;
-  localStorage.setItem("effort", selectedEffort);
+  rememberConvModelPrefs({ create: true });
   updateEffortDisplay();
   closeHeaderPickers();
 });
@@ -7051,7 +7191,9 @@ const historyBackdrop = document.getElementById("history-backdrop");
 
 async function deleteConversation(id) {
   try { await fetch(`api/history/${id}`, { method: "DELETE" }); } catch { }
-  if (currentConvId === id) { currentConvId = null; resetCursor(); }
+  convModelPrefs.delete(id);
+  persistConvModelPrefs();
+  if (currentConvId === id) { currentConvId = null; currentConversationMeta = null; resetCursor(); }
   if (syncCursor.conversationId === id) resetCursor();
   if (_historyCache !== null) {
     _historyCache = _historyCache.filter(h => h.id !== id);
@@ -7095,6 +7237,7 @@ function renderConversationMessages(conv) {
 }
 
 async function loadConversation(conv) {
+  rememberConvModelPrefs();
   await saveCurrentConversation();
   clearAskUserQuestion();
   clearMentionFiles();
@@ -7112,13 +7255,14 @@ async function loadConversation(conv) {
   currentSessionId = conv.sessionId;
   currentSessionModel = typeof conv.model === "string" ? conv.model : null;
   const savedProfile = _profileData.profiles.find(p => p.id === conv.profileId);
-  currentSessionProvider = conv.sessionProvider === "codex"
+  currentSessionProvider = conv.sessionProvider === "antigravity" ? "antigravity" : conv.sessionProvider === "codex"
     ? "codex"
     : conv.sessionProvider === "claude"
       ? "claude"
       : savedProfile
-        ? (savedProfile.provider === "codex" ? "codex" : "claude")
+        ? (["codex", "antigravity"].includes(savedProfile.provider) ? savedProfile.provider : "claude")
         : null;
+  applyConvModelPrefs(conv);
   if (currentSessionProvider) {
     alignProfileToSessionProvider(currentSessionProvider, conv.profileId);
   }
@@ -7138,16 +7282,16 @@ async function loadConversation(conv) {
 }
 
 async function startNewConversation() {
+  rememberConvModelPrefs();
   await saveCurrentConversation();
   clearAskUserQuestion();
   clearMentionFiles();
   messagesEl.innerHTML = "";
   messageLog = [];
-  currentConvId = null;
+  beginConversationDraft();
   currentSessionId = null;
   currentSessionProvider = null;
   currentSessionModel = null;
-  resetCursor();
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ reset: true }));
   }
