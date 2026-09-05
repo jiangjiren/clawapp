@@ -27,13 +27,15 @@ function harness(saved = {}) {
     localStorage: { getItem: key => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) },
     modelDropdown: sink, modelLabel: sink, authProfileList: sink,
     escapeHtml: String, escapeAttr: String, providerBadge: () => "", renderProviderLimitSummary: () => "",
-    requestSkillRefresh() {}, updateEffortDisplay() {}, resetCursor() {},
+    requestSkillRefresh() {}, updateEffortDisplay() {}, resetCursor() {}, renderQueuedFollowUps() {},
     genId: (() => { let id = 0; return () => `draft-${++id}`; })(),
   });
   vm.runInContext(`
     let currentConvId = null, selectedModel = "claude-sonnet-5", selectedEffort = "medium";
     let _profileData = { activeProfileId: "claude", profiles: [] };
     let _claudeAuthStatus = null, _codexAuthStatus = null;
+    let _providerUsageLimits = {};
+    ${readFileSync(new URL("public/account-status.js", import.meta.url), "utf8")}
     ${prefsSource}
     ${modelsSource}
     ${["getActiveProfile", "renderProfileList", "renderModelOptions"].map(functionSource).join("\n")}

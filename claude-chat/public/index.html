@@ -12,6 +12,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
 <title>inkfellow</title>
 <script src="marked.min.js"></script>
+<script src="pending-queue.js"></script>
+<script src="account-status.js"></script>
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -53,6 +55,8 @@
   /* JS 端引用的别名 */
   --border-color: var(--border);
   --fg-color-secondary: var(--text-dim);
+  --text-muted: var(--text-dim);
+  --text-secondary: var(--text-dim);
   /* 编队卡的分叉/合流动画统一用这条缓动 */
   --ease-out: cubic-bezier(0.32, 0.72, 0, 1);
   /* 所有“仍在进行”的循环动画共用一拍，避免多个状态指示各闪各的。 */
@@ -1502,6 +1506,18 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
   width: min(210px, calc(100vw - 28px));
 }
 .picker-dropdown.open { display: block; animation: dropFadeIn 0.12s ease; }
+#pending-queue[hidden], .queue-editor[hidden] { display: none; }
+#pending-queue { margin: 0 0 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); max-height: 260px; overflow-y: auto; }
+.queue-heading { padding: 9px 12px; display: flex; justify-content: space-between; gap: 8px; font-size: 11px; color: var(--text-muted); border-bottom: 1px solid var(--border-soft); }
+.queue-row { padding: 9px 12px; border-bottom: 1px solid var(--border-soft); }
+.queue-row:last-child { border-bottom: 0; }
+.queue-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; max-height: 62px; overflow: auto; }
+.queue-meta { font-size: 10px; color: var(--text-muted); margin-top: 4px; }
+.queue-actions { display: flex; gap: 5px; margin-top: 6px; flex-wrap: wrap; }
+.queue-actions button { border: 1px solid var(--border); background: transparent; color: var(--text-secondary); padding: 4px 9px; border-radius: 6px; cursor: pointer; font: inherit; font-size: 11px; }
+.queue-actions button:hover { background: var(--surface-2); }
+.queue-actions button:disabled { opacity: .35; cursor: default; }
+.queue-editor { width: 100%; min-height: 72px; padding: 8px; font: inherit; color: inherit; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; resize: vertical; }
 .picker-option[hidden] { display: none; }
 .picker-option {
   display: flex;
@@ -1819,6 +1835,17 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
 }
 
 /* 左侧 checkmark */
+.auth-account-heading { font-size: 10px; color: var(--text-muted); letter-spacing: .06em; padding: 8px 2px 0; }
+.auth-profile-item { padding: 10px 12px; gap: 9px; border-radius: 8px; box-shadow: none; }
+.auth-profile-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 8px; }
+.auth-profile-title { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin-bottom: 3px; }
+.auth-state { font-size: 11px; color: var(--text-secondary); display: inline-flex; align-items: center; gap: 5px; }
+.auth-state::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--text-muted); }
+.auth-state.ok::before { background: #41966a; }
+.auth-state.warn::before { background: #c68b37; }
+#auth-advanced { margin: 10px 0; }
+#auth-advanced summary { padding: 10px 0; font-size: 12px; cursor: pointer; color: var(--text-secondary); }
+#auth-advanced .form-group-title { margin-top: 10px; }
 .auth-profile-check {
   flex-shrink: 0;
   width: 18px;
@@ -2414,6 +2441,7 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
             </div>
           </div>
 
+          <details id="auth-advanced"><summary>高级设置 · 模型映射</summary>
           <!-- 分组 2: 模型配置 -->
           <div class="form-group-title">模型映射配置</div>
           <div class="form-group">
@@ -2431,6 +2459,7 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
             </div>
           </div>
 
+          </details>
           <p class="add-error" id="add-error"></p>
           <div class="add-actions">
             <button class="add-submit" id="add-submit" type="button">确认添加</button>
@@ -2483,6 +2512,7 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
           <svg id="ctx-eye-off" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M3 3l18 18" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M10.6 5.2A10.8 10.8 0 0 1 12 5c6.1 0 9.5 7 9.5 7a16.3 16.3 0 0 1-3 3.6M6.4 6.8C3.9 8.5 2.5 12 2.5 12s3.4 7 9.5 7c1.5 0 2.8-.4 4-1" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M9.9 9.9A2.7 2.7 0 0 0 12 14.7c.7 0 1.3-.2 1.8-.7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
       </div>
+      <section id="pending-queue" aria-label="待发送消息" hidden></section>
       <div id="prompt-row">
         <input type="file" id="file-input" accept="image/*" style="display:none" />
         <textarea id="prompt" rows="1" placeholder="发消息给 Fellow…（@ 引用文件，/ 调用 skill）"></textarea>
@@ -2661,7 +2691,14 @@ let longRunAcknowledgedAt = 0;
 const LONG_RUN_NOTICE_MS = 3 * 60_000;
 const LONG_RUN_ACTION_MS = 15 * 60_000;
 const unackedRequests = new Map(); // userMessageId -> payload，ACK 丢失时可安全重发
-const queuedFollowUps = new Map(); // Codex/忙碌状态下等待下一轮的 payload
+const queuedFollowUps = new PendingMessageQueue({
+  getItem: key => sessionStorage.getItem(key),
+  setItem: (key, value) => sessionStorage.setItem(key, value),
+}, warning => queueMicrotask(() => {
+  renderQueuedFollowUps();
+  if (warning) showInlineError(warning);
+}));
+let editingQueuedId = null;
 const requestRetryTimers = new Map();
 
 function clearUnackedRequest(requestId) {
@@ -3474,25 +3511,12 @@ function renderProfileList(data) {
     data = { ...data, activeProfileId: savedId };
   }
   _profileData = data;
-  authProfileList.innerHTML = data.profiles.map(p => {
+  authProfileList.innerHTML = data.profiles.map((p, index) => {
     const isActive = p.id === data.activeProfileId;
-    const metaParts = [];
-    if (p.maskedApiKey) metaParts.push(p.maskedApiKey);
-    // 显示去重后的模型（opus=sonnet 时只显示一个）
-    const allModels = [p.opusModel, p.sonnetModel, p.haikuModel].filter(Boolean);
-    const uniqueModels = [...new Set(allModels)];
-    if (uniqueModels.length) metaParts.push(uniqueModels.map(m => m.split("/").pop() || m).join(" · "));
-    const meta = p.provider === "claude"
-      ? (_claudeAuthStatus === true  ? "✅ 会员已登录"
-       : _claudeAuthStatus === false ? "⚠️ 未登录 — 请在服务器运行 claude 命令完成登录"
-       : "正在检测登录状态…")
-      : p.provider === "codex"
-      ? (_codexAuthStatus === true  ? "✅ 已登录 ChatGPT Plus"
-       : _codexAuthStatus === false ? "⚠️ 未登录 — 请打开 Codex 客户端完成登录"
-       : "正在检测登录状态…")
-      : p.provider === "antigravity" ? (_agyStatus.message || "CLI 状态未知")
-      : metaParts.join("  ");
+    const status = accountStatus(p, { claudeAuth: _claudeAuthStatus, codexAuth: _codexAuthStatus, agy: _agyStatus, limits: _providerUsageLimits });
     const isManagedSubscription = ["claude", "codex", "antigravity"].includes(p.provider);
+    const previousManaged = index > 0 && ["claude", "codex", "antigravity"].includes(data.profiles[index - 1].provider);
+    const heading = index === 0 || previousManaged !== isManagedSubscription ? `<div class="auth-account-heading" role="presentation">${isManagedSubscription ? "会员账号" : "API 账号"}</div>` : "";
     const canEdit   = !isManagedSubscription;
     const canDelete = !isManagedSubscription;
     const actions = (canEdit || canDelete) ? `
@@ -3500,13 +3524,12 @@ function renderProfileList(data) {
         ${canEdit   ? `<span class="auth-profile-edit" data-edit="${escapeAttr(p.id)}" title="编辑" aria-label="编辑" role="button">✎</span>` : ""}
         ${canDelete ? `<span class="auth-profile-del"  data-del="${escapeAttr(p.id)}"  title="删除" aria-label="删除" role="button">×</span>` : ""}
       </span>` : "";
-    return `<button class="auth-profile-item${isActive ? " active" : ""}" data-id="${escapeAttr(p.id)}" role="option" aria-selected="${isActive}">
+    return `${heading}<button class="auth-profile-item${isActive ? " active" : ""}" data-id="${escapeAttr(p.id)}" role="option" aria-selected="${isActive}">
       <span class="auth-profile-check" aria-hidden="true">${isActive ? "✓" : ""}</span>
       <span class="auth-profile-info">
-        <span class="auth-profile-name">${escapeHtml(p.name)}</span>
-        <span class="auth-profile-meta" style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">
-          ${providerBadge(p.provider)}
-          <span style="opacity:.65;font-size:10.5px">${escapeHtml(meta)}</span>
+        <span class="auth-profile-title"><span class="auth-profile-name">${escapeHtml(p.name)}</span>${providerBadge(p.provider)}</span>
+        <span class="auth-profile-meta">
+          <span class="auth-state ${status.tone}" title="${escapeAttr(status.detail)}">${escapeHtml(status.text)}</span>
           ${renderProviderLimitSummary(p.provider)}
         </span>
       </span>
@@ -3514,6 +3537,7 @@ function renderProfileList(data) {
     </button>`;
   }).join("");
   renderModelOptions(getActiveProfile());
+  renderQueuedFollowUps();
   requestSkillRefresh();
 }
 
@@ -3588,6 +3612,7 @@ let _addProvider = "anthropic";
 let _editingProfileId = null;  // null = add mode; string = edit mode (profile id)
 
 function setAddProvider(value) {
+  document.getElementById("auth-advanced").open = value === "custom";
   _addProvider = value;
   addProviderSelect.value = value;
   const p = ADD_PRESETS[value] ?? ADD_PRESETS.custom;
@@ -3616,6 +3641,7 @@ function showFormView() {
 
 // openAccountForm: pass null/undefined to add, or a profile object to edit
 function openAccountForm(existingProfile) {
+  document.getElementById("auth-advanced").open = !!existingProfile;
   _editingProfileId = existingProfile ? existingProfile.id : null;
   showFormView();
   addErrorEl.textContent = "";
@@ -3739,6 +3765,8 @@ function notifyPanelOverlayState() {
 }
 
 function openAuthDialog() {
+  void checkClaudeAuth();
+  void checkCodexAuth();
   void refreshAgyModels();
   closeHeaderPickers();
   closeHistoryPanel();
@@ -5593,6 +5621,8 @@ function appendSyncedUserMessage(payload) {
 
 // 服务端的 turn 快照是权威：它说还在跑就恢复生成态，说结束就收干净
 function applySyncTurn(turn) {
+  if (turn?.requestId && turn.status === "running") queuedFollowUps.delete(turn.requestId);
+  renderQueuedFollowUps();
   if (turn && turn.status === "running") {
     setGenerating(true);
     startLongRunMonitor(turn);
@@ -5645,7 +5675,7 @@ function handleEvent(ev) {
 
   if (ev.type === "reset_complete") {
     clearAllUnackedRequests();
-    queuedFollowUps.clear();
+    queuedFollowUps.clearConversation(currentConvId);
     clearTimeout(followUpDrainTimer);
     currentRunId = null;
     activeRequestId = null;
@@ -5659,6 +5689,8 @@ function handleEvent(ev) {
     const requestId = ev.userMessageId;
     if (requestId) clearUnackedRequest(requestId);
     if (ev.state === "queued") {
+      const queued = queuedFollowUps.get(requestId);
+      if (queued) queuedFollowUps.set(requestId, { ...queued, queueState: "pending" });
       updateGenChip("下一条消息已排队");
       if (requestId && requestId === activeRequestId && currentRunId) {
         // 自动 drain 与服务端上一轮 finally 极短暂交错时，退回排队态再试。
@@ -5676,6 +5708,7 @@ function handleEvent(ev) {
       activeRequestId = requestId || activeRequestId;
     } else if (ev.state === "complete" || ev.state === "error" || ev.state === "stopped") {
       queuedFollowUps.delete(requestId);
+      if (requestId === activeRequestId) sendHello();
     }
     return;
   }
@@ -6711,13 +6744,90 @@ document.addEventListener("mousedown", (e) => {
 // ── Send ──────────────────────────────────────────────────
 let followUpDrainTimer = null;
 
+function renderQueuedFollowUps() {
+  const panel = document.getElementById("pending-queue");
+  if (!panel) return;
+  // Polling must not replace a textarea while the user is editing it.
+  if (editingQueuedId && panel.querySelector(`[data-queue-id="${CSS.escape(editingQueuedId)}"]`) && queuedFollowUps.get(editingQueuedId)?.conversationId === currentConvId) return;
+  editingQueuedId = null;
+  const items = queuedFollowUps.forConversation(currentConvId);
+  panel.hidden = !items.length;
+  panel.innerHTML = `<div class="queue-heading"><strong>待发送 · ${items.length}</strong><span>当前回复结束后依次发送</span></div>` + items.map(([id, item], index) => {
+    const disabled = item.queueState === "sending" ? "disabled" : "";
+    const profile = _profileData.profiles.find(p => p.id === item.profileId);
+    const canSteer = isGenerating && !["codex", "antigravity"].includes(profile?.provider) && !["codex", "antigravity"].includes(currentRunProvider);
+    return `<div class="queue-row" data-queue-id="${escapeAttr(id)}">
+      <div class="queue-text">${escapeHtml(item.composerText || item.displayText)}</div>
+      <div class="queue-meta">${escapeHtml(profile?.name || "账号不可用")} · ${escapeHtml(item.model || "默认模型")}${item.images?.length ? ` · ${item.images.length} 张图片` : ""}${item.contextParts?.length ? " · 已保留引用上下文" : ""}${disabled ? " · 发送中" : ""}</div>
+      <textarea class="queue-editor" aria-label="修改待发送消息" hidden></textarea>
+      <div class="queue-actions">
+        <button data-queue-action="edit" ${disabled}>编辑</button>
+        <button data-queue-action="up" ${disabled || (index === 0 ? "disabled" : "")} aria-label="上移待发送消息">↑</button>
+        <button data-queue-action="down" ${disabled || (index === items.length - 1 ? "disabled" : "")} aria-label="下移待发送消息">↓</button>
+        <button data-queue-action="delete" ${disabled}>删除</button>
+        ${canSteer ? `<button data-queue-action="steer" ${disabled}>立即追加</button>` : ""}
+      </div></div>`;
+  }).join("");
+}
+
+function showQueuedUserMessage(payload) {
+  if (messageLog.some(m => m.id === payload.userMessageId)) return;
+  const images = payload.images || [];
+  addMessage("user", payload.displayText, images.map(img => `data:${img.mediaType};base64,${img.data}`));
+  messageLog.push({ id: payload.userMessageId, role: "user", text: payload.displayText, images: images.length ? images : undefined, cost: null });
+  scrollBottom();
+}
+
+document.getElementById("pending-queue").addEventListener("click", event => {
+  const button = event.target.closest("[data-queue-action]");
+  if (!button || button.disabled) return;
+  const row = button.closest("[data-queue-id]"), id = row.dataset.queueId;
+  const item = queuedFollowUps.get(id);
+  if (!item || item.conversationId !== currentConvId || item.queueState === "sending") return;
+  const action = button.dataset.queueAction;
+  if (action === "edit") {
+    if (editingQueuedId) return;
+    editingQueuedId = id;
+    const editor = row.querySelector("textarea");
+    editor.hidden = false;
+    editor.value = item.composerText || item.displayText;
+    row.querySelector(".queue-actions").innerHTML = '<button data-queue-action="save">保存</button><button data-queue-action="cancel">取消</button>';
+    editor.focus();
+    return;
+  }
+  if (action === "save") {
+    const value = row.querySelector("textarea").value;
+    if (!value.trim()) { row.querySelector("textarea").focus(); return; }
+    queuedFollowUps.edit(id, value);
+    editingQueuedId = null;
+  } else if (action === "cancel") editingQueuedId = null;
+  else if (editingQueuedId) return;
+  else if (action === "delete") queuedFollowUps.delete(id);
+  else if (action === "up" || action === "down") queuedFollowUps.move(id, action === "up" ? -1 : 1);
+  else if (action === "steer") {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const payload = { ...item, runId: currentRunId, queueState: "sending" };
+    queuedFollowUps.set(id, payload);
+    showQueuedUserMessage(payload);
+    trackUnackedRequest(payload);
+    ws.send(JSON.stringify(payload));
+  }
+  renderQueuedFollowUps();
+  scheduleQueuedFollowUpDrain();
+});
+
 function scheduleQueuedFollowUpDrain(delayMs = 0) {
   clearTimeout(followUpDrainTimer);
   followUpDrainTimer = setTimeout(() => {
     followUpDrainTimer = null;
     if (isGenerating || !queuedFollowUps.size || !ws || ws.readyState !== WebSocket.OPEN) return;
-    const [requestId, queuedPayload] = queuedFollowUps.entries().next().value;
+    if (editingQueuedId) return;
+    const next = queuedFollowUps.forConversation(currentConvId)[0];
+    if (!next) return;
+    const [requestId, queuedPayload] = next;
+    if (!_profileData.profiles.some(p => p.id === queuedPayload.profileId)) { showInlineError("待发送消息的账号已删除，请删除该条后重新发送。"); return; }
     resetAssistantState();
+    showQueuedUserMessage(queuedPayload);
     addTyping();
     setGenerating(true);
     const queuedProfile = _profileData.profiles.find(profile => profile.id === queuedPayload.profileId);
@@ -6725,7 +6835,7 @@ function scheduleQueuedFollowUpDrain(delayMs = 0) {
     currentSessionModel = queuedPayload.model ?? currentSessionModel;
     currentRunId = crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     activeRequestId = requestId;
-    const payload = { ...queuedPayload, runId: currentRunId };
+    const payload = { ...queuedPayload, runId: currentRunId, queueState: "sending" };
     queuedFollowUps.set(requestId, payload);
     trackUnackedRequest(payload);
     lastWsEventAt = Date.now();
@@ -6743,6 +6853,7 @@ function send() {
   }
 
   if (text === "/clear") {
+    queuedFollowUps.clearConversation(currentConvId);
     saveCurrentConversation();
     clearAskUserQuestion();
     messagesEl.innerHTML = "";
@@ -6769,18 +6880,13 @@ function send() {
   if (!isFollowUp) {
     clearAskUserQuestion();
     resetAssistantState();
-  } else if (!assistantEl) {
-    // 第一段正文尚未到达时先占住它在时间线里的位置，后续流会填进这里；
-    // 追加的用户消息因此不会跑到原回答前面。
-    removeTyping();
-    assistantEl = addMessage("assistant", "");
-    showGenChip("");
   }
   const displayText = mentionedFiles.length > 0
     ? `${text}\n\n引用文件：${mentionedFiles.map((file) => `@${file.title}`).join(" · ")}`
     : text;
   const userMessageId = `user_${crypto.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`}`;
   const historyImages = pendingImages.map(img => ({ data: img.data, mediaType: img.mediaType }));
+  if (!isFollowUp) {
   addMessage("user", displayText, imagePreviewUrls);
   scrollBottom(); // 自己发的消息：无论此前翻到哪里都跟回底部
   messageLog.push({
@@ -6790,6 +6896,7 @@ function send() {
     images: historyImages.length ? historyImages : undefined,
     cost: null,
   });
+  }
   promptEl.value = "";
   promptEl.style.height = "36px";
   syncSendButtonMode();
@@ -6832,6 +6939,8 @@ function send() {
   }
   const wsPayload = {
     prompt: parts.join("\n\n"),
+    contextParts: parts.slice(0, -1),
+    displaySuffix: displayText.slice(text.length),
     composerText: text,
     runId: currentRunId,
     userMessageId,
@@ -6846,12 +6955,11 @@ function send() {
     wsPayload.images = pendingImages.map(img => ({ data: img.data, mediaType: img.mediaType }));
     clearImages();
   }
-  trackUnackedRequest(wsPayload);
   if (isFollowUp) {
-    // Claude 收到后会变为 steering；Codex 保留为 queued，当前轮结束后自动续上。
-    queuedFollowUps.set(userMessageId, wsPayload);
-    updateGenChip("正在追加下一条消息…");
+    queuedFollowUps.set(userMessageId, { ...wsPayload, queueState: "pending" });
+    return;
   }
+  trackUnackedRequest(wsPayload);
   ws.send(JSON.stringify(wsPayload));
 }
 
@@ -7250,6 +7358,8 @@ async function loadConversation(conv) {
   }
   renderConversationMessages(conv);
   currentConvId = conv.id;
+  editingQueuedId = null;
+  renderQueuedFollowUps();
   // 换会话就得换游标：不重置的话旧会话的 lastSeq 会挡住新会话的事件
   resetCursor(conv.id);
   currentSessionId = conv.sessionId;
@@ -7282,6 +7392,7 @@ async function loadConversation(conv) {
 }
 
 async function startNewConversation() {
+  editingQueuedId = null;
   rememberConvModelPrefs();
   await saveCurrentConversation();
   clearAskUserQuestion();
@@ -7289,6 +7400,7 @@ async function startNewConversation() {
   messagesEl.innerHTML = "";
   messageLog = [];
   beginConversationDraft();
+  renderQueuedFollowUps();
   currentSessionId = null;
   currentSessionProvider = null;
   currentSessionModel = null;

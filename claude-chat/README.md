@@ -120,6 +120,10 @@ WeChat state and downloaded media are stored below `CLAUDE_CHAT_DATA_DIR`. Treat
 
 ## Configuration
 
+While a web-chat reply is running, new messages enter a visible pending queue above the composer. Edit, delete, or reorder them before dispatch; images, quoted text, and file references stay attached. Claude also offers an explicit immediate follow-up action. Pending queues are scoped to a conversation and saved in the current browser tab's session storage, so refreshing that tab preserves them; they do not sync across devices. Only dispatched messages enter chat history. Switching conversations retains the previous conversation's queue and processes it when you return; `/clear` removes the current conversation's pending messages.
+
+Account settings group subscriptions and API accounts, display reported plan names and expired-login states, and collapse model mappings under advanced settings when adding an account. Quota-query failures do not by themselves imply that login has expired.
+
 Antigravity is available as a managed account in the web chat account picker. Install and log in to `agy` as the same operating-system user that runs this service. The CLI must expose `--output-format`, `--mode`, and `--effort` in `agy --help`; upgrade older installations with `agy update`. `GET /api/agy/models` checks compatibility and discovers models and supported reasoning levels. A readable model catalog indicates CLI availability, not a guarantee that a model request will succeed.
 
 Antigravity supports streaming text, tool cards, image attachments, per-conversation continuation, persistent history, reconnect recovery, and cancellation. Account settings show separate Gemini and Claude/GPT quota pools from the CLI's `/usage` command. Catalog results are cached for six hours and quota results for four minutes; failed catalog checks retry after a minute. It is currently a web-chat provider; scheduled jobs and WeChat retain their existing execution channels.
