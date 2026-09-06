@@ -117,6 +117,8 @@ const MOCK_SDK = `
         // 默认刻意不发 result / idle：这一轮永远挂着，占住一个并发名额。
         // MOCK_AUTO_FINISH 打开时才正常收尾——验证「跑完之后」的那些事得靠它。
         if (process.env.MOCK_AUTO_FINISH === "1") {
+          const finishDelayMs = Number(process.env.MOCK_FINISH_DELAY_MS || 0);
+          if (finishDelayMs > 0) await new Promise(resolve => setTimeout(resolve, finishDelayMs));
           this.events.push({ type: "result", subtype: "success", is_error: false });
           this.events.push({ type: "system", subtype: "session_state_changed", state: "idle" });
         }
@@ -140,7 +142,7 @@ const LOADER = `
 `;
 
 /** 起一个真实的 server 并接上 WebSocket，返回操作句柄。 */
-async function startServer({ limit = "2", autoFinish = false, askQuestion = false } = {}) {
+async function startServer({ limit = "2", autoFinish = false, askQuestion = false, finishDelayMs = 0 } = {}) {
   const scratch = await mkdtemp(join(tmpdir(), "inkfellow-concurrency-"));
   const authFile = join(scratch, "auth-profile.json");
   const mockSdkFile = join(scratch, "mock-sdk.mjs");
@@ -173,6 +175,7 @@ async function startServer({ limit = "2", autoFinish = false, askQuestion = fals
       MOCK_CLAUDE_SDK_FILE: mockSdkFile,
       MAX_CONCURRENT_CONVERSATIONS: limit,
       MOCK_AUTO_FINISH: autoFinish ? "1" : "0",
+      MOCK_FINISH_DELAY_MS: String(finishDelayMs),
       MOCK_ASK_QUESTION: askQuestion ? "1" : "0",
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -326,6 +329,25 @@ test("一轮跑完之后，最后一条快照不能还说它在跑", { timeout: 
       [],
       "跑完了还报在跑；前端照着它渲染，就是一个永远转圈的界面",
     );
+  } finally {
+    await server.close();
+  }
+});
+
+test("同一对话排队的下一条消息会在上一轮结束后自动开始", { timeout: 30_000 }, async () => {
+  const server = await startServer({ limit: "5", autoFinish: true, finishDelayMs: 200 });
+  try {
+    server.askIn("conv_queue", "user_first");
+    await waitFor(server.events, e => e.type === "request_started" && e.userMessageId === "user_first");
+    server.askIn("conv_queue", "user_second");
+    await waitFor(server.events, e => e.type === "request_queued" && e.userMessageId === "user_second");
+
+    const started = await waitFor(
+      server.events,
+      e => e.type === "request_started" && e.userMessageId === "user_second",
+      8_000,
+    );
+    assert.equal(started.conversationId, "conv_queue");
   } finally {
     await server.close();
   }

@@ -71,9 +71,8 @@ export class ConversationSession {
     this.queuedClientPrompts = [];
 
     /* ── 本轮的定时器与调度器 ─────────────────────────────────
-       这三个必须跟着会话走：它们是 per-turn 的，多个对话同时跑时共用一份
+       这些定时器必须跟着会话走：它们是 per-turn 的，多个对话同时跑时共用一份
        会互相取消——A 的看门狗被 B 的新回合清掉，A 那轮失效就再没人报警。 */
-    this.queuedClientPromptDrain = null;
     this.queuedClientPromptDrainTimer = null;
     this.turnIdleWatchdog = null;
   }

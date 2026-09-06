@@ -12,6 +12,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />
 <title>inkfellow</title>
 <script src="marked.min.js"></script>
+<!-- 模型输出经 marked 渲染后要进 innerHTML，中间这一道不能是手写白名单：
+     mXSS 那些命名空间混淆、二次解析差异的坑，DOMPurify 花了十年才补完。
+     跟 desktop-lite/vendor/ 用的是同一份 3.4.7。 -->
+<script src="purify.min.js"></script>
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -108,12 +112,31 @@ html, body {
   display: flex;
   flex-direction: column;
   gap: 16px;
-  scroll-behavior: smooth;
+  /* 会话切换会把各自缓存的 scrollTop 写回来；这里必须即时恢复，否则内容 DOM
+     刚换完时会从 0 平滑滚到旧位置，看起来像整段对话重新播放了一遍。 */
+  scroll-behavior: auto;
+  overflow-anchor: none;
   width: 100%;
   max-width: 1080px;
   margin: 0 auto;
 }
 .msg { display: flex; flex-direction: column; gap: 4px; }
+#input-wrap { position: relative; }
+#jump-to-latest {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+  padding: 7px 12px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--bg);
+  color: var(--text);
+  box-shadow: 0 2px 8px #00000014;
+  cursor: pointer;
+  white-space: nowrap;
+}
 .msg-user {
   align-items: flex-end;
 }
@@ -2303,8 +2326,22 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
 }
 .auth-limit-percent.warning  { color: var(--yellow); }
 .auth-limit-percent.critical { color: var(--red); }
+.auth-limit-summary {
+  display: block;
+  min-width: 0;
+  margin-top: 1px;
+  color: var(--text-dim);
+  font-size: 10.5px;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.auth-limit-summary-label { color: var(--text-dim); }
+.auth-limit-window { display: inline; }
+.auth-limit-label { margin-right: 3px; color: var(--text-dim); }
 
-/* Antigravity 有两组互不相干的配额池（Gemini 那两个模型烧一组，Claude/GPT 那两个
+/* Antigravity 有两组互不相干的配额池（Gemini 那两个模型烧一组，Claude/ChatGPT 那两个
    烧另一组），四个数字挤不进状态行，所以铺在状态行下面，每组一行。 */
 .auth-limit-groups {
   /* 两列的 grid：组名一列、数字一列。写死 min-width 对不齐——组名长短不一，
@@ -2987,6 +3024,7 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
     </div>
   </section>
   <div id="input-wrap">
+    <button id="jump-to-latest" type="button" hidden aria-label="回到最新消息">↓ 回到最新</button>
     <div id="slash-popup" role="listbox" aria-label="输入建议"></div>
     <div id="ask-user-question" role="region" aria-live="polite" aria-label="Agent clarification"></div>
     <!-- 子任务活动条：只要还有子 agent 在跑就常驻在输入框上方，跑完自行消失。
@@ -3026,7 +3064,7 @@ details[open]:not(.thinking-active) .thinking-chevron { transform: rotate(90deg)
       </div>
       <div id="prompt-row">
         <input type="file" id="file-input" accept="image/*" style="display:none" />
-        <textarea id="prompt" rows="1" placeholder="发消息给 Fellow…（@ 引用笔记，&gt; 派发给其他厂商，/ 调用 skill）"></textarea>
+        <textarea id="prompt" rows="1" aria-label="消息" placeholder="发消息给 Fellow…（@ 引用笔记，&gt; 派发给其他厂商，/ 调用 skill）"></textarea>
       </div>
       <div id="input-toolbar">
         <button id="btn-attach" title="附加图片（或直接粘贴）" aria-label="附加图片">
@@ -3353,7 +3391,8 @@ document.addEventListener("paste", (e) => {
 // ── History state ─────────────────────────────────────────
 let messageLog = [];       // messages in current conversation
 let currentConvId = null;  // current conversation id
-let currentSessionId = null; // current Claude session id
+let currentSessionId = null; // current provider-side session id
+let currentSessionProvider = null;
 
 function genId() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
@@ -3581,6 +3620,20 @@ function currentConvProfileId() {
   } catch { return null; }
 }
 
+/**
+ * 指定对话自己记着的厂商；没有记录、或记的账号已经被删掉时返回 null。
+ *
+ * 刻意不拿此刻激活的账号兜底——那是上一个对话的厂商，用它去认一条来路不明的
+ * 会话 id 就是在赌。调用方拿到 null 时该放弃续接，而不是猜一个。
+ */
+function conversationRememberedProvider(id) {
+  try {
+    const profileId = id ? convModelPrefs.get(id)?.profileId : null;
+    if (!profileId) return null;
+    return _profileData?.profiles?.find(p => p.id === profileId)?.provider ?? null;
+  } catch { return null; }
+}
+
 function renderModelOptions(activeProfile) {
   const provider = activeProfile?.provider || "claude";
   let options;
@@ -3663,6 +3716,7 @@ function escapeHtml(value) {
 
 // ── Status indicator ──────────────────────────────────────
 let pendingAskUserQuestion = null;
+const pendingAskUserQuestions = new Map();
 
 function normalizeAskUserQuestions(input) {
   const questions = Array.isArray(input?.questions) ? input.questions : input;
@@ -3680,11 +3734,32 @@ function normalizeAskUserQuestions(input) {
   }).filter(q => q.question && q.options.length > 0);
 }
 
-function clearAskUserQuestion() {
+function hideAskUserQuestion() {
   pendingAskUserQuestion = null;
   isAwaitingAskUserQuestion = false;
   askUserQuestionEl.classList.remove("open");
   askUserQuestionEl.innerHTML = "";
+}
+
+function clearAskUserQuestion(conversationId = pendingAskUserQuestion?.conversationId || currentConvId, requestId = null) {
+  const saved = conversationId ? pendingAskUserQuestions.get(conversationId) : null;
+  if (requestId && saved && saved.requestId !== requestId) return false;
+  if (conversationId) pendingAskUserQuestions.delete(conversationId);
+  if (!pendingAskUserQuestion || !conversationId || pendingAskUserQuestion.conversationId === conversationId) {
+    hideAskUserQuestion();
+  }
+  return true;
+}
+
+function activateAskUserQuestionForConversation(conversationId) {
+  hideAskUserQuestion();
+  const state = pendingAskUserQuestions.get(conversationId);
+  if (!state) return;
+  renderAskUserQuestion({
+    conversationId,
+    requestId: state.requestId,
+    questions: state.questions,
+  });
 }
 
 function askQuestionHasAnswer(index) {
@@ -3722,13 +3797,25 @@ function updateAskUserQuestionUi() {
 function renderAskUserQuestion(ev) {
   const questions = normalizeAskUserQuestions(ev.questions ?? ev.input?.questions);
   if (!questions.length) return;
-  pendingAskUserQuestion = {
-    requestId: ev.requestId,
-    questions,
-    selections: questions.map(() => new Set()),
-    customSelected: questions.map(() => false),
-    customValues: questions.map(() => ""),
-  };
+  const conversationId = ev.conversationId || currentConvId;
+  const existing = conversationId ? pendingAskUserQuestions.get(conversationId) : null;
+  const state = existing?.requestId === ev.requestId
+    ? existing
+    : {
+        conversationId,
+        requestId: ev.requestId,
+        questions,
+        selections: questions.map(() => new Set()),
+        customSelected: questions.map(() => false),
+        customValues: questions.map(() => ""),
+      };
+  if (conversationId) {
+    pendingAskUserQuestions.set(conversationId, state);
+    sessionsAwaiting.add(conversationId);
+    renderSessionBadges();
+  }
+  if (conversationId && currentConvId && conversationId !== currentConvId) return;
+  pendingAskUserQuestion = state;
   isAwaitingAskUserQuestion = true;
   hidePopup();
   updateTypingStatus("Waiting for your choice...");
@@ -3742,7 +3829,7 @@ function renderAskUserQuestion(ev) {
       <button type="button" class="ask-question-close" data-ask-cancel title="Cancel" aria-label="Cancel clarification">×</button>
     </div>
     <div class="ask-question-body">
-      ${questions.map((q, qIndex) => `
+      ${state.questions.map((q, qIndex) => `
         <section class="ask-question-item" data-q="${qIndex}">
           <span class="ask-question-meta">${escapeHtml(q.header || `Q${qIndex + 1}`)}</span>
           <div class="ask-question-text">${escapeHtml(q.question)}</div>
@@ -3770,6 +3857,9 @@ function renderAskUserQuestion(ev) {
       <button type="button" class="ask-question-submit" disabled>Continue</button>
     </div>`;
   askUserQuestionEl.classList.add("open");
+  askUserQuestionEl.querySelectorAll(".ask-custom-input").forEach((input) => {
+    input.value = state.customValues[Number(input.dataset.q)] || "";
+  });
   updateAskUserQuestionUi();
   scrollBottom();
 }
@@ -3803,9 +3893,12 @@ function submitAskUserQuestion() {
   wsSend({
     type: "ask_user_question_response",
     requestId: state.requestId,
+    conversationId: state.conversationId,
     answers: buildAskUserQuestionAnswers(),
   });
-  clearAskUserQuestion();
+  clearAskUserQuestion(state.conversationId, state.requestId);
+  sessionsAwaiting.delete(state.conversationId);
+  renderSessionBadges();
   updateTypingStatus("Continuing...");
   updateGenChip("Continuing...");
 }
@@ -3814,8 +3907,10 @@ askUserQuestionEl.addEventListener("click", (e) => {
   const state = pendingAskUserQuestion;
   if (!state) return;
   if (e.target.closest("[data-ask-cancel]")) {
-    wsSend({ type: "ask_user_question_cancel", requestId: state.requestId });
-    clearAskUserQuestion();
+    wsSend({ type: "ask_user_question_cancel", requestId: state.requestId, conversationId: state.conversationId });
+    clearAskUserQuestion(state.conversationId, state.requestId);
+    sessionsAwaiting.delete(state.conversationId);
+    renderSessionBadges();
     return;
   }
   const submit = e.target.closest(".ask-question-submit");
@@ -3875,7 +3970,7 @@ function setAuthStatus(type, text, isForm = false) {
 // ── Provider display metadata ─────────────────────────────
 const PROVIDER_LABEL = {
   claude: "Claude", anthropic: "Anthropic", deepseek: "DeepSeek", openrouter: "OpenRouter", minimax: "MiniMax", custom: "自定义",
-  codex: "GPT", antigravity: "Gemini",
+  codex: "ChatGPT", antigravity: "Gemini",
 };
 
 const ICON_EDIT  = '<svg width="13" height="13" viewBox="0 0 13 13" fill="none" aria-hidden="true"><path d="M8.5 2L11 4.5L4.5 11H2V8.5L8.5 2Z" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/></svg>';
@@ -3910,20 +4005,20 @@ function formatLimitReset(resetAt, mode = "hm") {
   return `${hours}h${mins}min`;
 }
 
-/* 一个窗口一段：「5h 余 82%」。分隔符交给调用方拼——Antigravity 那两行是独立
-   成行的，开头不该挂一个 · 。
-   compact 去掉「余」字：那两行左边有组名当列头，面板只有三百来像素宽，带上
-   「余」字 100% 那行就会被右边的编辑按钮切掉尾巴。 */
+/* 一个窗口一段：「5小时 余 82%」。使用用户能理解的窗口名称，避免把内部的
+   5h / secondary_window 直接暴露在账号卡片上。分隔符交给调用方拼。 */
 function renderLimitWindow(label, win, resetFormat = "hm", compact = false) {
   if (!win || win.usedPercent == null) return "";
   const remaining = win.remainingPercent ?? Math.max(0, 100 - win.usedPercent);
   const reset = formatLimitReset(win.resetAt, resetFormat);
   const status = remaining <= 10 ? " critical" : remaining <= 25 ? " warning" : "";
-  const title = reset ? ` title="${escapeAttr(reset)} 后重置"` : "";
-  return `${escapeHtml(label)} ${compact ? "" : "余 "}<span class="auth-limit-percent${status}"${title}>${remaining}%</span>`;
+  const readableLabel = label === "5h" ? "5小时" : label === "周" ? "7天" : label;
+  const resetHint = reset ? `；${reset}后重置` : "";
+  const title = ` title="${escapeAttr(`${readableLabel}额度剩余 ${remaining}%${resetHint}`)}"`;
+  return `<span class="auth-limit-window"${title}><span class="auth-limit-label">${escapeHtml(readableLabel)}</span> <span class="auth-limit-percent${status}">${remaining}%</span></span>`;
 }
 
-// 「5h 余 92% · 周 余 88%」
+// 「额度剩余：5小时 92% · 7天 88%」
 function renderLimitWindows(fiveHour, week, compact = false) {
   return [
     renderLimitWindow("5h", fiveHour, "hm", compact),
@@ -3958,7 +4053,7 @@ function renderProviderUsageLimit(provider) {
   // 读不到就什么都不显示 —— 以前那个 checking / unavailable 灰药丸只是噪音
   if (!limit || !limit.available) return "";
   const windows = renderLimitWindows(limit.fiveHour, limit.week);
-  return windows ? ` · ${windows}` : "";
+  return windows ? `<span class="auth-limit-summary" aria-label="额度剩余"><span class="auth-limit-summary-label">额度剩余：</span>${windows}</span>` : "";
 }
 
 // Antigravity 专用：状态行下面每组配额一行。两组是各自独立的池子，
@@ -3972,7 +4067,7 @@ function renderProviderUsageGroups(provider) {
     if (!windows) return "";
     return `<span class="auth-limit-group"><span class="auth-limit-group-name">${escapeHtml(group.label ?? "")}</span><span>${windows}</span></span>`;
   }).filter(Boolean);
-  return rows.length ? `<span class="auth-limit-groups" title="剩余额度">${rows.join("")}</span>` : "";
+  return rows.length ? `<span class="auth-limit-groups" title="额度剩余；悬停数字查看重置时间">${rows.join("")}</span>` : "";
 }
 
 async function checkProviderUsageLimits({ silent = false, agyAttempt = 0 } = {}) {
@@ -4058,7 +4153,7 @@ function profileStatus(p) {
         ? { tone: "err", text: "登录已失效 · 重新登录 ChatGPT" }
         : { tone: "ok",  text: `已登录${codexPlanSuffix()}` };
     }
-    if (_codexAuthStatus === false) return { tone: "warn", text: "未登录 · 打开 Codex 客户端登录" };
+    if (_codexAuthStatus === false) return { tone: "warn", text: "未登录 · 打开 Codex，用 ChatGPT 账号登录" };
     return { tone: "idle", text: "检测中…" };
   }
   if (p.provider === "antigravity") {
@@ -4108,8 +4203,9 @@ function renderProfileList(data, { adopt = false } = {}) {
         </span>
         <span class="auth-profile-meta">
           <span class="auth-dot ${st.tone}" aria-hidden="true"></span>
-          <span class="auth-status-text">${escapeHtml(st.text)}${renderProviderUsageLimit(p.provider)}</span>
+          <span class="auth-status-text">${escapeHtml(st.text)}</span>
         </span>
+        ${renderProviderUsageLimit(p.provider)}
         ${renderProviderUsageGroups(p.provider)}
       </span>
       ${actions}
@@ -4135,7 +4231,7 @@ async function activateProfile(id) {
        之后——那一步才把 selectedModel 落到新厂商的清单里，早记会把旧厂商的模型
        一起写进去，下次切回来又得退一次默认。 */
     rememberConvModelPrefs();
-    if (d.resetSession) { currentSessionId = null; markResetLanding(); wsSend({ reset: true }); }
+    if (d.resetSession) { currentSessionId = null; currentSessionProvider = null; markResetLanding(); wsSend({ reset: true }); }
     setAuthStatus("saved", "已切换");
     setTimeout(closeAuthDialog, 600);
   } catch (err) { setAuthStatus("error", err instanceof Error ? err.message : "切换失败"); }
@@ -4152,7 +4248,7 @@ async function deleteProfile(id) {
     // 别的对话还记着这个账号；留着死 id 只会让每次切进去都白判断一次「它还在吗」
     forgetProfileFromConvPrefs(id);
     renderProfileList(d.data);
-    if (d.resetSession) { currentSessionId = null; markResetLanding(); wsSend({ reset: true }); }
+    if (d.resetSession) { currentSessionId = null; currentSessionProvider = null; markResetLanding(); wsSend({ reset: true }); }
     setAuthStatus("saved", "已删除");
   } catch (err) { setAuthStatus("error", err instanceof Error ? err.message : "删除失败"); }
 }
@@ -4297,7 +4393,7 @@ addSubmitBtn.addEventListener("click", async () => {
     // 新增的账号服务端会直接设为当前，跟手点切换是一回事；编辑不动当前是谁
     renderProfileList(d.data, { adopt: !isEdit });
     if (!isEdit) rememberConvModelPrefs();
-    if (d.resetSession) { currentSessionId = null; markResetLanding(); wsSend({ reset: true }); }
+    if (d.resetSession) { currentSessionId = null; currentSessionProvider = null; markResetLanding(); wsSend({ reset: true }); }
     showListView();
     setAuthStatus("saved", isEdit ? "已保存" : "已添加", false);
   } catch (err) {
@@ -4509,7 +4605,9 @@ async function saveCurrentConversation() {
     title,
     date: new Date().toISOString(),
     sessionId: currentSessionId,
+    sessionProvider: currentSessionProvider,
   };
+  const messageCount = messageLog.length;
   try {
     await fetch(`api/history/${conv.id}`, {
       method: "PUT",
@@ -4519,7 +4617,7 @@ async function saveCurrentConversation() {
     // 更新内存缓存，使下次打开历史面板时可立即渲染
     if (_historyCache !== null) {
       const idx = _historyCache.findIndex(h => h.id === conv.id);
-      const summary = { ...conv, messageCount: messageLog.length };
+      const summary = { ...conv, messageCount };
       if (idx >= 0) _historyCache[idx] = { ..._historyCache[idx], ...summary };
       else _historyCache.unshift(summary);
     }
@@ -4537,14 +4635,101 @@ try {
     _markedReady = true;
   }
 } catch { }
+
+/* ══════════════════════════════════════════════════════════
+   模型输出 → innerHTML 之间的那一道
+   ══════════════════════════════════════════════════════════
+   marked 原样放行原始 HTML，所以这一步不是可选的。刻意不自己写白名单遍历：
+   mXSS 的坑（命名空间混淆、序列化后二次解析的差异、DOM clobbering）不是一份
+   标签表能覆盖的，DOMPurify 花了十年才补完。标签和属性这里收得比它的默认
+   profile 更紧，执行交给它。 */
+const MARKDOWN_ALLOWED_TAGS = [
+  "a", "b", "blockquote", "br", "code", "del", "details", "div", "em",
+  "h1", "h2", "h3", "h4", "h5", "h6", "hr", "i", "img", "input",
+  "kbd", "li", "mark", "ol", "p", "pre", "s", "span", "strong", "sub",
+  "summary", "sup", "table", "tbody", "td", "tfoot", "th", "thead", "tr", "ul",
+];
+const MARKDOWN_ALLOWED_ATTR = [
+  "align", "alt", "checked", "class", "colspan", "disabled", "height",
+  "href", "open", "rowspan", "src", "start", "title", "type", "width",
+];
+/* 相对路径照收，协议只认这四个。data: 刻意不在里面——DOMPurify 自己按
+   ADD_DATA_URI_TAGS 只给 <img> 之类放行 data:，正好是想要的粒度：
+   图片能内嵌，而 <a href="data:text/html"> 进不来。 */
+const MARKDOWN_URI_ALLOWLIST = /^(?:(?:https?|mailto|tel|file):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i;
+/* code 上的 language-* 给高亮用，task-list* 给 GFM 待办列表用。其余一律摘掉：
+   class 值本身不可执行，但能套用页面已有的样式，把模型输出伪装成系统提示。 */
+const MARKDOWN_SAFE_CLASS = /^(?:language-[\w-]+|task-list|task-list-item)$/;
+
+let _purifyHooked = false;
+function ensurePurifyHooks() {
+  if (_purifyHooked || typeof DOMPurify === "undefined") return;
+  DOMPurify.addHook("afterSanitizeAttributes", (node) => {
+    const className = node.getAttribute?.("class");
+    if (className && !className.split(/\s+/).every(name => MARKDOWN_SAFE_CLASS.test(name))) {
+      node.removeAttribute("class");
+    }
+    if (node.tagName === "INPUT") {
+      // GFM 待办列表只该产出只读复选框；别的 input 是能打字的输入框，
+      // 不该出现在一段回答里
+      if (node.getAttribute("type") !== "checkbox") node.remove();
+      else node.setAttribute("disabled", "");
+    }
+  });
+  _purifyHooked = true;
+}
+
+function sanitizeRenderedHtml(html) {
+  if (typeof DOMPurify === "undefined") {
+    // 净化器没加载出来时宁可显示得难看，也不能把原始 HTML 放进 innerHTML
+    return `<pre style="white-space:pre-wrap">${escapeHtml(String(html || ""))}</pre>`;
+  }
+  ensurePurifyHooks();
+  return DOMPurify.sanitize(String(html || ""), {
+    ALLOWED_TAGS: MARKDOWN_ALLOWED_TAGS,
+    ALLOWED_ATTR: MARKDOWN_ALLOWED_ATTR,
+    ALLOWED_URI_REGEXP: MARKDOWN_URI_ALLOWLIST,
+    ALLOW_DATA_ATTR: false,
+    ALLOW_ARIA_ATTR: false,
+    SANITIZE_NAMED_PROPS: true,   // 挡 DOM clobbering：<a name="querySelector">
+    FORBID_ATTR: ["style"],
+  });
+}
+
 function renderMarkdown(text) {
-  if (!_markedReady) return `<pre style="white-space:pre-wrap">${renderPlain(text)}</pre>`;
+  // 净化器缺席时整段退回纯文本——没有它就没有能安全写进 innerHTML 的路径
+  if (!_markedReady || typeof DOMPurify === "undefined") {
+    return `<pre style="white-space:pre-wrap">${renderPlain(text)}</pre>`;
+  }
   try {
     const result = marked.parse(text);
-    return typeof result === "string" ? result : `<pre style="white-space:pre-wrap">${renderPlain(text)}</pre>`;
+    return typeof result === "string" ? sanitizeRenderedHtml(result) : `<pre style="white-space:pre-wrap">${renderPlain(text)}</pre>`;
   } catch {
     return `<pre style="white-space:pre-wrap">${renderPlain(text)}</pre>`;
   }
+}
+
+/* ── 流式重绘的节流 ──────────────────────────────────────
+   每来一个 delta 就把整段文本重新 marked.parse + 净化一遍，长回答上是
+   O(n) × 每个 token。一帧里到几十个 delta 是常事，而屏幕一帧也只画一次——
+   合并到 rAF 里肉眼看不出差别，省下的是几十次全量解析。 */
+const pendingMarkdownBlocks = new Set();
+let markdownRepaintFrame = 0;
+function flushMarkdownRepaints() {
+  if (markdownRepaintFrame) cancelAnimationFrame(markdownRepaintFrame);
+  markdownRepaintFrame = 0;
+  if (pendingMarkdownBlocks.size === 0) return;
+  for (const block of pendingMarkdownBlocks) {
+    // 切走的对话把整个 messagesEl 换掉了，旧元素已经脱离文档——重绘它是白做
+    if (block.el?.isConnected) block.el.innerHTML = renderMarkdown(block.accumulated);
+  }
+  pendingMarkdownBlocks.clear();
+  scrollBottom();
+}
+function scheduleMarkdownRepaint(block) {
+  pendingMarkdownBlocks.add(block);
+  if (markdownRepaintFrame) return;
+  markdownRepaintFrame = requestAnimationFrame(flushMarkdownRepaints);
 }
 
 function cloneJson(value) {
@@ -5113,6 +5298,9 @@ let assistantEvents = []; // non-content SDK events that still explain the AI tu
   }
 
 function resetAssistantState() {
+  /* 攒着的最后一帧必须先落地再清状态。被中途停掉的流不会有 content_block_stop，
+     那一帧只剩这里能把它画出去——漏掉就是回答的最后几个字凭空少掉。 */
+  flushMarkdownRepaints();
   cleanupRunningTools();
   removeGenChip();
   // 上一回合遗留的编队卡不该被下一回合的派生复用
@@ -6240,6 +6428,14 @@ function handleEvent(ev) {
      它们只用来更新会话列表上的状态点和未读标记。
      没带 conversationId 的是连接级事件（init、快照之类），不受此限。 */
   if (ev.conversationId && currentConvId && ev.conversationId !== currentConvId) {
+    if (ev.type === "ask_user_question") renderAskUserQuestion(ev);
+    if (ev.type === "ask_user_question_cancelled" || ev.type === "ask_user_question_error") {
+      clearAskUserQuestion(ev.conversationId, ev.requestId ?? null);
+      sessionsAwaiting.delete(ev.conversationId);
+    }
+    if (ev.type === "done" || ev.type === "stopped" || ev.type === "error") {
+      clearAskUserQuestion(ev.conversationId);
+    }
     noteBackgroundEvent(ev);
     return;
   }
@@ -6285,6 +6481,7 @@ function handleEvent(ev) {
        就成了没人认领的孤儿，还占着标签栏的位置。 */
     if (!currentConvId) { currentConvId = genId(); rememberConvModelPrefs(); }
     currentSessionId = null;
+    currentSessionProvider = null;
     steeringQueue.length = 0;
     steeringRemovalPending.clear();
     steeringEditingId = null;
@@ -6421,6 +6618,11 @@ function handleEvent(ev) {
     return;
   }
 
+  /* 额度用量事件，SDK 每一轮都推一条，不是对话内容。
+     这个空分支看着像能删，删掉就出事：handleEvent 的兜底是 captureAssistantEvent，
+     它对不认识的事件一律建一个 sdk_event 块渲染成「运行事件」卡片，还会在没有
+     回答时凭空造一个 assistant 气泡——于是每条回复后面都挂一张没人看的卡。
+     额度面板走的是 /api/usage-limits，不靠这条事件。 */
   if (ev.type === "rate_limit_event") {
     return;
   }
@@ -6465,14 +6667,18 @@ function handleEvent(ev) {
 
   if (ev.type === "ask_user_question_cancelled") {
     if (!pendingAskUserQuestion || pendingAskUserQuestion.requestId === ev.requestId) {
-      clearAskUserQuestion();
+      clearAskUserQuestion(ev.conversationId || currentConvId, ev.requestId ?? null);
+      sessionsAwaiting.delete(ev.conversationId || currentConvId);
       updateGenChip("");
     }
     return;
   }
 
   if (ev.type === "ask_user_question_error") {
-    if (!pendingAskUserQuestion || pendingAskUserQuestion.requestId === ev.requestId) clearAskUserQuestion();
+    if (!pendingAskUserQuestion || pendingAskUserQuestion.requestId === ev.requestId) {
+      clearAskUserQuestion(ev.conversationId || currentConvId, ev.requestId ?? null);
+      sessionsAwaiting.delete(ev.conversationId || currentConvId);
+    }
     showInlineError(ev.text || "Clarification question expired.");
     return;
   }
@@ -6559,11 +6765,11 @@ function handleEvent(ev) {
 
       if (delta.type === "text_delta" && delta.text) {
         b.accumulated += delta.text;
-        b.el.innerHTML = renderMarkdown(b.accumulated);
+        scheduleMarkdownRepaint(b);
         assistantTxt = [...prevTurnTexts,
           ...Object.values(blockMap).filter(x => x.type === "text").map(x => x.accumulated),
         ].filter(Boolean).join("\n\n");
-        scrollBottom();
+        // 滚动跟着重绘走：内容还没进 DOM 时量高度是白量
       } else if (delta.type === "thinking_delta" && delta.thinking) {
         b.accumulated += delta.thinking;
         const tc = b.el.querySelector(".thinking-content");
@@ -6580,6 +6786,8 @@ function handleEvent(ev) {
 
     // Block complete — finalise tool input, then mark chip as running
     if (event.type === "content_block_stop") {
+      // 这个块写完了，把攒着的最后一帧立刻落下去——后面几步要按最终 DOM 做
+      flushMarkdownRepaints();
       const b = blockMap[event.index];
       if (b?.type === "thinking") {
         // 思考结束：去掉动画，折叠，改回"思考过程"
@@ -6729,6 +6937,7 @@ function handleEvent(ev) {
 
   if (ev.type === "session" && ev.sessionId) {
     currentSessionId = ev.sessionId;
+    currentSessionProvider = ev.provider || "claude";
     return;
   }
 
@@ -6902,7 +7111,60 @@ function updateTypingStatus(text) {
   const el = document.querySelector("#typing .typing-status");
   if (el) el.textContent = text ? ` ${text}` : "";
 }
-function scrollBottom() { messagesEl.scrollTop = messagesEl.scrollHeight; }
+let followLatestMessage = true;
+const jumpToLatestBtn = document.getElementById("jump-to-latest");
+function updateJumpToLatest() {
+  jumpToLatestBtn.hidden = messagesEl.scrollHeight - messagesEl.clientHeight - messagesEl.scrollTop <= 48;
+}
+function scrollBottom(force = false) {
+  if (force === true) followLatestMessage = true;
+  if (followLatestMessage) messagesEl.scrollTop = messagesEl.scrollHeight;
+  updateJumpToLatest();
+}
+/* 观察者驱动的那条路必须合并到一帧里。scrollBottom 要读 scrollHeight，在
+   ResizeObserver 回调里同步读就是强制布局——轻则每个 token 一次重排，重则刷满
+   "ResizeObserver loop completed with undelivered notifications"，把真错误淹掉。
+   显式调用的 scrollBottom() 保持同步：切对话之后要立刻定位，等一帧会闪。 */
+let followScrollFrame = 0;
+function requestFollowScroll() {
+  if (followScrollFrame) return;
+  followScrollFrame = requestAnimationFrame(() => {
+    followScrollFrame = 0;
+    scrollBottom();
+  });
+}
+messagesEl.addEventListener("scroll", () => {
+  followLatestMessage = messagesEl.scrollHeight - messagesEl.clientHeight - messagesEl.scrollTop <= 48;
+  updateJumpToLatest();
+}, { passive: true });
+/* 回答里的链接一律不许就地跳。这一页是被主窗口 iframe 套着的，跳走就等于整个
+   对话界面被换成那个网页，而且没有后退可按——http 链接如此，模型贴的 file://
+   更是如此。真要用系统浏览器打开得让父窗口转一手 Tauri 的 shell，那是另一件事；
+   这里先保证不会把人从对话里弄丢。 */
+messagesEl.addEventListener("click", (e) => {
+  const link = e.target?.closest?.("a[href]");
+  if (!link) return;
+  if ((link.getAttribute("href") || "").startsWith("#")) return;   // 页内锚点照常
+  e.preventDefault();
+  try { window.open(link.href, "_blank", "noopener,noreferrer"); } catch { /* 被拦就算了 */ }
+});
+jumpToLatestBtn.addEventListener("click", () => scrollBottom(true));
+// 图片、代码块和工具展开后的高度变化也遵循同一条跟随规则。
+const messageResizeObserver = new ResizeObserver(requestFollowScroll);
+messageResizeObserver.observe(messagesEl);
+const messageMutationObserver = new MutationObserver((records) => {
+  for (const record of records) {
+    if (record.target !== messagesEl) continue;
+    for (const node of record.removedNodes) {
+      if (node.nodeType === 1) messageResizeObserver.unobserve(node);
+    }
+    for (const node of record.addedNodes) {
+      if (node.nodeType === 1) messageResizeObserver.observe(node);
+    }
+  }
+  requestFollowScroll();
+});
+messageMutationObserver.observe(messagesEl, { childList: true, subtree: true, characterData: true });
 
 
 // ── Composer popup: slash commands + @ note mentions ─────
@@ -7156,7 +7418,7 @@ promptEl.addEventListener("keyup", (e) => {
 });
 
 promptEl.addEventListener("keydown", (e) => {
-  if (e.isComposing) return;
+  if (e.isComposing || e.keyCode === 229) return;
   if (popupEl.classList.contains("open")) {
     if (e.key === "ArrowDown") {
       e.preventDefault();
@@ -7236,6 +7498,7 @@ function takeRequestDraft(textOverride = null, { consumeComposer = textOverride 
   };
 
   if (consumeComposer) {
+    conversationDrafts.delete(currentConvId);
     promptEl.value = "";
     promptEl.style.height = "36px";
     clearMentionNotes();
@@ -7939,9 +8202,10 @@ function dispatchRequestDraft(draft) {
     resetRequested = true;
     if (!sendResetRequest()) return false;
     saveCurrentConversation();
+    clearAskUserQuestion(currentConvId);
     resetAssistantState();
     messagesEl.innerHTML = "";
-    messageLog = []; currentConvId = genId(); currentSessionId = null;
+    messageLog = []; currentConvId = genId(); currentSessionId = null; currentSessionProvider = null;
     rememberConvModelPrefs();   // 新身份继承你此刻用着的模型
     markResetLanding();         // reset 是在换 id 之前发的，落点得改成换完之后这个
     pendingRequestDraft = null;
@@ -7972,6 +8236,7 @@ function dispatchRequestDraft(draft) {
     // appended after this new user message, not inside the old AI bubble.
     resetAssistantState();
     addMessage("user", displayText, imagePreviewUrls);
+    scrollBottom(true);
     messageLog.push({ id: userMessageId, role: "user", text: displayText, cost: null });
     draft.rendered = true;
   }
@@ -8578,9 +8843,12 @@ async function deleteConversation(id) {
   /* 删掉的对话要从所有地方消失，不然它还挂在未读/最近用过里，
      下一轮 switcherEntries 会再给它分配一个槽位，看起来像删不掉。 */
   releaseConvSlot(id);
+  convViewCache.delete(id);
+  conversationDrafts.delete(id);
   sessionUnread.delete(id);
   sessionsRunning.delete(id);
   sessionsAwaiting.delete(id);
+  clearAskUserQuestion(id);
   const recentAt = recentConvIds.indexOf(id);
   if (recentAt >= 0) recentConvIds.splice(recentAt, 1);
   if (currentConvId === id) { currentConvId = genId(); rememberConvModelPrefs(); }
@@ -8619,6 +8887,9 @@ function applySessionsSnapshot(ev) {
   for (const id of nextRunning) sessionsRunning.add(id);
   sessionsAwaiting.clear();
   for (const id of ev.awaiting ?? []) sessionsAwaiting.add(id);
+  for (const id of [...pendingAskUserQuestions.keys()]) {
+    if (!sessionsAwaiting.has(id)) clearAskUserQuestion(id);
+  }
   if (Number.isFinite(ev.limit)) sessionLimit = ev.limit;
   sessionUnread.delete(currentConvId);   // 正看着的那个不该有未读
   renderSessionBadges();
@@ -8712,6 +8983,41 @@ const SWITCHER_MAX_ITEMS = 9;
 const convSlots = [];
 const convViewCache = new Map(); // id -> { html, messageLog, scrollTop, draft }
 const MAX_DOM_CACHE = 12;
+// 草稿独立于 DOM 缓存；后台重建、缓存淘汰都不应该丢掉未发送的内容。
+const conversationDrafts = new Map();
+let conversationSwitchVersion = 0;
+
+function captureComposerDraft() {
+  return {
+    text: promptEl.value,
+    images: pendingImages.map(image => ({ ...image })),
+    mentions: [...selectedMentionNotes.values()],
+    quote: quotedText ? { text: quotedText, section: quotedSection, prefix: quotedPrefix, suffix: quotedSuffix } : null,
+  };
+}
+
+function hasComposerDraft(draft) {
+  return Boolean(draft && (draft.text?.trim() || draft.images?.length || draft.mentions?.length || draft.quote));
+}
+
+function restoreComposerDraft(id) {
+  const draft = conversationDrafts.get(id);
+  promptEl.value = draft?.text || "";
+  pendingImages = (draft?.images || []).map(image => ({ ...image }));
+  renderImageChip();
+  selectedMentionNotes.clear();
+  for (const note of draft?.mentions || []) selectedMentionNotes.set(note.path, note);
+  renderMentionChips();
+  quotedText = draft?.quote?.text ?? null;
+  quotedSection = draft?.quote?.section ?? null;
+  quotedPrefix = draft?.quote?.prefix ?? null;
+  quotedSuffix = draft?.quote?.suffix ?? null;
+  quoteChip.classList.toggle("visible", Boolean(quotedText));
+  quoteTextEl.textContent = quotedText ? (quotedText.length > 55 ? quotedText.slice(0, 55) + "…" : quotedText) : "";
+  quoteLinesEl.textContent = quotedText ? `(${quotedText.split("\n").filter(line => line.trim()).length} 行)` : "";
+  hidePopup();
+  adjustPromptHeight();
+}
 
 /**
  * 把一个对话的「这一轮跑到哪了」装回全局。传 null 表示这个对话没有进行中的回合。
@@ -8742,10 +9048,14 @@ function restoreConversationRuntime(cached) {
 
 function cacheCurrentConversationView() {
   if (!currentConvId) return;
+  const draft = captureComposerDraft();
+  if (hasComposerDraft(draft)) conversationDrafts.set(currentConvId, draft);
+  else conversationDrafts.delete(currentConvId);
   convViewCache.set(currentConvId, {
     html: messagesEl.innerHTML,
     messageLog: [...messageLog],
     scrollTop: messagesEl.scrollTop,
+    followLatest: followLatestMessage,
     draft: promptEl.value,
     /* 「这一轮跑到哪了」也得跟着会话走。尤其是 activeRequestId：事件靠它过滤，
        切回来时它要还指着别的对话那一轮，这个对话的事件会被整条丢掉——
@@ -8935,7 +9245,8 @@ function isBlankConversation(id) {
   if (!id) return false;
   if (sessionsRunning.has(id) || sessionsAwaiting.has(id) || sessionUnread.has(id)) return false;
   if (_historyCache?.some(h => h.id === id)) return false;   // 已经存进历史 = 说过话了
-  if (id === currentConvId) return messageLog.length === 0;
+  if (id === currentConvId) return messageLog.length === 0 && !hasComposerDraft(captureComposerDraft());
+  if (hasComposerDraft(conversationDrafts.get(id))) return false;
   const cached = convViewCache.get(id);
   return !cached || (cached.messageLog?.length ?? 0) === 0;
 }
@@ -8945,11 +9256,13 @@ function forgetConversationLocally(id) {
   if (!id) return;
   releaseConvSlot(id);
   convViewCache.delete(id);
+  conversationDrafts.delete(id);
   convStaleIds.delete(id);
   if (convModelPrefs.delete(id)) persistConvModelPrefs();
   sessionUnread.delete(id);
   sessionsRunning.delete(id);
   sessionsAwaiting.delete(id);
+  clearAskUserQuestion(id);
   const at = recentConvIds.indexOf(id);
   if (at >= 0) recentConvIds.splice(at, 1);
 }
@@ -8975,7 +9288,7 @@ async function closeSessionTab(id) {
 
 /** 切到某个对话；列表里只有 id 时从缓存补出完整记录。 */
 async function switchToConversation(id) {
-  if (!id || id === currentConvId) { closeSwitcher(); return; }
+  if (!id || id === currentConvId) { conversationSwitchVersion++; closeSwitcher(); return; }
   closeSwitcher();
   const conv = _historyCache?.find(h => h.id === id) ?? { id };
   await loadConversation(conv);
@@ -9127,38 +9440,58 @@ function adjustPromptHeight() {
 
 async function loadConversation(conv) {
   if (!conv || !conv.id) return;
+  const switchVersion = ++conversationSwitchVersion;
   if (conv.id === currentConvId) {
     closeSwitcher();
     return;
+  }
+
+  const targetId = conv.id;
+  const cached = convViewCache.get(targetId);
+  const stale = convStaleIds.has(targetId);
+  const wasCached = !!cached && typeof cached.html === "string" && !stale;
+  // 先拿到目标历史再切换身份。加载期间当前会话仍能正常接收回复和编辑草稿；
+  // 较早的请求即使更晚返回，也不能覆盖用户最后选择的会话。
+  if (!wasCached && (!conv.messages || stale)) {
+    try {
+      const res = await fetch(`api/history/${targetId}`);
+      if (res.ok) {
+        const loaded = await res.json();
+        if (loaded.id === targetId && Array.isArray(loaded.messages)) conv = loaded;
+        else conv = { ...conv, messages: null };
+      } else conv = { ...conv, messages: null };
+    } catch { conv = { ...conv, messages: null }; }
+  }
+  if (switchVersion !== conversationSwitchVersion) return;
+  if (!wasCached && !conv.messages && !cached) {
+    // 只有草稿、没有发过消息的会话还没有服务端历史。
+    if (conversationDrafts.has(targetId)) conv = { ...conv, messages: [] };
+    else {
+      showInlineError("暂时无法加载这段对话，请重试。当前内容已保留。");
+      return;
+    }
   }
 
   // 离开一个还没说过话的空对话时不给它留标签——那是占位符，不是对话
   const leavingBlank = isBlankConversation(currentConvId) ? currentConvId : null;
 
   // 1. 缓存当前对话的视图状态，避免切回来时白屏重新渲染
-  await saveCurrentConversation();
+  void saveCurrentConversation();
   cacheCurrentConversationView();
+  hideAskUserQuestion();
   if (leavingBlank) forgetConversationLocally(leavingBlank);
-  clearMentionNotes();
-
-  const targetId = conv.id;
   currentConvId = targetId;
   currentSessionId = conv.sessionId || null;
+  currentSessionProvider = conv.sessionProvider || null;
 
-  const cached = convViewCache.get(targetId);
-  /* 你不在的时候它又出了新内容——缓存停在你切走那一刻，照着渲染就是
-     「回复凭空消失，三个点转到天荒地老」。服务端历史是逐条实时落盘的，
-     重新读一遍才是这个对话真正的样子。 */
-  const stale = convStaleIds.has(targetId);
-  const wasCached = !!cached && typeof cached.html === "string" && !stale;
+  restoreComposerDraft(targetId);
+  followLatestMessage = cached?.followLatest ?? true;
 
   if (wasCached) {
     messagesEl.classList.add("view-crossfade-out");
     messagesEl.innerHTML = cached.html;
     messageLog = [...(cached.messageLog || [])];
     restoreConversationRuntime(cached);
-    promptEl.value = cached.draft || "";
-    adjustPromptHeight();
     messagesEl.scrollTop = cached.scrollTop || 0;
 
     requestAnimationFrame(() => {
@@ -9168,22 +9501,12 @@ async function loadConversation(conv) {
     });
   } else {
     messagesEl.classList.add("view-crossfade-out");
-    /* stale 时必须重新去拿：conv 可能是历史面板给的旧对象，带着切走之前的
-       messages，照着它渲染跟用旧缓存是一回事。 */
-    if (!conv.messages || stale) {
-      try {
-        const res = await fetch(`api/history/${conv.id}`);
-        if (res.ok) conv = await res.json();
-      } catch { }
-    }
     /* 服务端没给回内容（离线、404），而手上还有一份旧缓存——宁可显示旧的，
        也不能把人送进一个空白窗口，那看着就是「我的对话没了」。 */
     if (!conv.messages && cached && typeof cached.html === "string") {
       messagesEl.innerHTML = cached.html;
       messageLog = [...(cached.messageLog || [])];
       restoreConversationRuntime(cached);
-      promptEl.value = cached.draft || "";
-      adjustPromptHeight();
       messagesEl.scrollTop = cached.scrollTop || 0;
       messagesEl.classList.remove("view-crossfade-out");
       finishConversationSwitch(conv, { rebuilt: false });
@@ -9224,10 +9547,8 @@ async function loadConversation(conv) {
       assistantRawMessages = [...(tail.raw || [])];
       assistantEvents = [...(tail.events || [])];
     }
-    promptEl.value = "";
-    adjustPromptHeight();
+    if (cached && !followLatestMessage) messagesEl.scrollTop = cached.scrollTop || 0;
     scrollBottom();
-    cacheCurrentConversationView();
 
     requestAnimationFrame(() => {
       messagesEl.classList.remove("view-crossfade-out");
@@ -9237,6 +9558,7 @@ async function loadConversation(conv) {
   }
 
   finishConversationSwitch(conv, { rebuilt: !wasCached });
+  cacheCurrentConversationView();
 }
 
 /**
@@ -9249,12 +9571,34 @@ async function loadConversation(conv) {
  *   还得再试一次。
  */
 function finishConversationSwitch(conv, { rebuilt = true } = {}) {
-  if (conv.sessionId && ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ setSession: conv.sessionId, conversationId: conv.id }));
+  updateJumpToLatest();
+  /* 必须赶在 applyConvModelPrefs() 之前取：那个函数对还没有记录的对话会当场
+     把「此刻激活的账号」记成它的，取晚了就再也分不清「这个对话自己记着的
+     厂商」和「上一个对话恰好用着的厂商」。 */
+  const rememberedProvider = conversationRememberedProvider(conv.id);
+  applyConvModelPrefs();   // 这个对话自己的模型和档位
+  /* 这次改动之前存的历史不带 sessionProvider，而那时候三家 provider 都往同一个
+     sessionId 字段里写。猜错的代价不对称：把 Claude 的 uuid 当成 codex thread
+     写进去，下一轮 resumeThread 直接报错，而且报的是一句看不懂的话。
+     所以只认两个可靠来源，都没有就不续接——开一条新会话比串台便宜得多。 */
+  const sessionProvider = conv.sessionProvider || rememberedProvider;
+  if (conv.sessionId && sessionProvider) {
+    currentSessionId = conv.sessionId;
+    currentSessionProvider = sessionProvider;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        setSession: conv.sessionId,
+        sessionProvider,
+        conversationId: conv.id,
+      }));
+    }
+  } else if (conv.sessionId) {
+    // 认不出归属的会话 id 就地作废：不发给服务端，也不当成当前会话
+    currentSessionId = null;
+    currentSessionProvider = null;
   }
 
   if (rebuilt) convStaleIds.delete(conv.id);
-  applyConvModelPrefs();   // 这个对话自己的模型和档位
   sessionUnread.delete(conv.id);
   touchRecentConversation(conv.id);
   renderSessionTabs();
@@ -9264,12 +9608,14 @@ function finishConversationSwitch(conv, { rebuilt = true } = {}) {
      该在气泡边上挂 chip，而不是在下面另起三个点——那看着像还有第二条要来。 */
   setGenerating(targetRunning);
   if (!targetRunning) removeTyping();
+  activateAskUserQuestionForConversation(conv.id);
   renderSessionBadges();
   closeHistoryPanel();
   updateBackgroundActivity();
 }
 
 async function startNewConversation() {
+  conversationSwitchVersion++;
   /* 已经站在一个还没说过话的空对话里，再点「新建」只会在标签栏排出
      一串一模一样的空壳。直接把光标送回输入框就是用户真正想要的。 */
   if (isBlankConversation(currentConvId)) {
@@ -9277,7 +9623,7 @@ async function startNewConversation() {
     return;
   }
 
-  await saveCurrentConversation();
+  void saveCurrentConversation();
   cacheCurrentConversationView();
 
   pendingRequestDraft = null;
@@ -9290,7 +9636,7 @@ async function startNewConversation() {
   renderSteeringTray();
   clearTimeout(errorCompletionTimer);
   errorCompletionTimer = null;
-  clearAskUserQuestion();
+  hideAskUserQuestion();
   resetAssistantState();
   setGenerating(false);
   removeTyping();
@@ -9304,6 +9650,9 @@ async function startNewConversation() {
 
   currentConvId = genId();
   currentSessionId = null;
+  currentSessionProvider = null;
+  restoreComposerDraft(currentConvId);
+  scrollBottom(true);
   /* 新窗口继承你此刻用着的那个模型——多半是接着做同一件事，
      不该把人扔回默认再手动切一次。 */
   rememberConvModelPrefs();

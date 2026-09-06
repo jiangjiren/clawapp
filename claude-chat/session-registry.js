@@ -103,8 +103,12 @@ export class SessionRegistry {
   drop(conversationId) {
     const id = String(conversationId ?? "").trim();
     if (!id) return false;
+    const session = this._sessions.get(id);
+    if (!session) return false;
+    try { session.disposeRuntime?.(); } catch { /* 丢弃状态不能被收尾异常卡住 */ }
     this._touchedAt.delete(id);
-    return this._sessions.delete(id);
+    this._sessions.delete(id);
+    return true;
   }
 
   /** 内存里留太多空闲对话时，按最久没碰过的顺序丢掉——在跑的绝不动。 */
@@ -116,6 +120,8 @@ export class SessionRegistry {
       .sort((a, b) => (this._touchedAt.get(a) ?? 0) - (this._touchedAt.get(b) ?? 0));
     for (const id of idle) {
       if (this._sessions.size <= this.maxTracked) break;
+      const session = this._sessions.get(id);
+      try { session?.disposeRuntime?.(); } catch { /* 回收继续 */ }
       this._sessions.delete(id);
       this._touchedAt.delete(id);
     }

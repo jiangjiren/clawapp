@@ -16,10 +16,13 @@ import * as scheduler from "./scheduler.js";
 import { PersistentQueryRuntime, SteeringQueue, isTaskLifecycleEvent } from "./agent-session.js";
 import * as codexProvider from "./providers/codex.js";
 import * as agyProvider from "./providers/antigravity.js";
+import { spawnWithHiddenConsole } from "./hidden-console.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHistoryStore } from "./history-store.js";
 import { ConversationSession } from "./conversation-session.js";
 import { SessionRegistry } from "./session-registry.js";
+import { DispatchAbortRegistry } from "./dispatch-abort-registry.js";
+import { fetchMaybeViaProxy } from "./proxy-fetch.js";
 import { hasSchedulerIntent, hasSchedulerIntentForMessage } from "./scheduler-intent.js";
 import { z } from "zod";
 
@@ -228,6 +231,16 @@ const CODEX_DEFAULT_MODELS = {
   sonnetModel: "gpt-5.6-terra",
   haikuModel: "gpt-5.6-luna",
 };
+const CODEX_PROFILE_NAME = "ChatGPT 会员";
+const LEGACY_CODEX_PROFILE_NAMES = new Set([
+  "Codex（GPT 会员）",
+  "GPT（Codex 会员）",
+  "GPT 会员",
+]);
+function normalizeCodexProfileName(name) {
+  const value = typeof name === "string" ? name.trim() : "";
+  return !value || LEGACY_CODEX_PROFILE_NAMES.has(value) ? CODEX_PROFILE_NAME : value;
+}
 
 // Antigravity CLI（agy）没有 Node SDK，只能起子进程读 stream-json。
 // `agy models` 列出来的 slug 都带推理档位后缀（gemini-3.8-flash-high/low），
@@ -580,14 +593,10 @@ function runAgyOnce({
 
     let proc;
     try {
-      proc = spawn(bin, args, {
+      proc = spawnWithHiddenConsole(bin, args, {
         cwd: cwd || undefined,
         windowsHide: true,
-        // windowsHide 只挡得住 Windows 在建进程时自动开控制台，挡不住 agy.exe
-        // 自己后面主动调 AllocConsole——已经用进程树的父子关系实锤过，那才是
-        // 发消息时黑框一闪的真实来源。这两个变量是常见的"我不是交互式终端"
-        // 信号，赌它内部探测逻辑看到就不去申请控制台了；agy 内部逻辑不透明，
-        // 不保证根治，无效也无副作用。
+        // 隐藏控制台由启动器预先创建，agy 的后续命令可以继承它。
         env: { ...process.env, NO_COLOR: "1", TERM: "dumb" },
       });
     } catch (err) {
@@ -763,7 +772,8 @@ function normalizeProfile(raw) {
   const str = (v) => typeof v === "string" && v.trim() ? v.trim() : "";
   return {
     id:          str(p.id)   || genProfileId(),
-    name:        str(p.name) || provider,
+    // Codex 是实现通道名，用户登录和购买的是 ChatGPT 会员；统一用用户能识别的名称。
+    name:        provider === "codex" ? normalizeCodexProfileName(p.name) : (str(p.name) || provider),
     provider,
     apiKey:      typeof p.apiKey === "string" ? p.apiKey.trim() : "",
     opusModel:   str(p.opusModel)   || legacyModel          || preset.opusModel   || "",
@@ -819,7 +829,7 @@ function migrateOldFormat(old) {
   }
 
   if (isCodexAuthAvailable()) {
-    profiles.push({ id: "p_codex", name: "Codex（GPT 会员）", provider: "codex", apiKey: "", baseUrl: "", goodAt: PROVIDER_GOOD_AT.codex, ...CODEX_DEFAULT_MODELS });
+    profiles.push({ id: "p_codex", name: CODEX_PROFILE_NAME, provider: "codex", apiKey: "", baseUrl: "", goodAt: PROVIDER_GOOD_AT.codex, ...CODEX_DEFAULT_MODELS });
   }
   if (isAgyAuthAvailable()) {
     profiles.push({ id: "p_agy", name: "Gemini（Antigravity）", provider: "antigravity", apiKey: "", baseUrl: "", goodAt: PROVIDER_GOOD_AT.antigravity, ...agyDefaultModels() });
@@ -853,7 +863,7 @@ function normalizeProfiles(raw) {
     if (existingCodex) {
       Object.assign(existingCodex, CODEX_DEFAULT_MODELS);
     } else {
-      profiles.push({ id: "p_codex", name: "Codex（GPT 会员）", provider: "codex", apiKey: "", baseUrl: "", goodAt: PROVIDER_GOOD_AT.codex, ...CODEX_DEFAULT_MODELS });
+      profiles.push({ id: "p_codex", name: CODEX_PROFILE_NAME, provider: "codex", apiKey: "", baseUrl: "", goodAt: PROVIDER_GOOD_AT.codex, ...CODEX_DEFAULT_MODELS });
     }
   }
   // Antigravity 同理：装了并登录过就注入，模型字段同样强制对齐
@@ -1102,7 +1112,11 @@ async function queryCodexSubscriptionLimits() {
     };
     if (auth.accountId) headers["ChatGPT-Account-Id"] = auth.accountId;
 
-    const resp = await fetch("https://chatgpt.com/backend-api/wham/usage", {
+    /* 走 fetchMaybeViaProxy 而不是裸 fetch：chatgpt.com 在很多网络环境下要靠
+       代理才通，而 Node 22 的 fetch 默认不读 HTTP_PROXY，卡满 10 秒连接超时后
+       报一句没头没尾的 "fetch failed"，面板上就永远是取不到额度。
+       没配代理时它就是原生 fetch，行为不变。 */
+    const resp = await fetchMaybeViaProxy("https://chatgpt.com/backend-api/wham/usage", {
       headers,
       signal: controller.signal,
     });
@@ -1192,7 +1206,7 @@ function runAgyModelsQuery() {
 
     let proc;
     try {
-      proc = spawn(bin, ["models"], {
+      proc = spawnWithHiddenConsole(bin, ["models"], {
         cwd: DEFAULT_CWD,
         windowsHide: true,
         env: { ...process.env, NO_COLOR: "1", TERM: "dumb" },
@@ -1268,7 +1282,7 @@ function runAgyUsageQuery() {
 
     let proc;
     try {
-      proc = spawn(bin, ["-p", "/usage", "--output-format", "json"], {
+      proc = spawnWithHiddenConsole(bin, ["-p", "/usage", "--output-format", "json"], {
         cwd: DEFAULT_CWD,
         windowsHide: true,
         env: { ...process.env, NO_COLOR: "1", TERM: "dumb" },
@@ -1885,10 +1899,11 @@ function appendTaskLifecycleHistoryEvent(ev) {
   }
 }
 
-function updateActiveConversationSession(nextSessionId) {
+function updateActiveConversationSession(nextSessionId, provider = "claude") {
   if (!session.activeHistoryConversationId || !nextSessionId) return;
   const conv = ensureHistoryConversation(session.activeHistoryConversationId, { sessionId: nextSessionId });
   conv.sessionId = nextSessionId;
+  conv.sessionProvider = provider;
   conv.date = new Date().toISOString();
   persistHistoryDeferred();
 }
@@ -1904,7 +1919,7 @@ function isOutboundToolResult(type) {
 function persistOutboundAgentEvent(ev) {
   if (!session.activeHistoryConversationId || !ev?.type) return;
   if (ev.type === "session" && ev.sessionId) {
-    updateActiveConversationSession(ev.sessionId);
+    updateActiveConversationSession(ev.sessionId, ev.provider || "claude");
     return;
   }
   if (isTaskLifecycleEvent(ev)) {
@@ -2777,13 +2792,7 @@ export function markDispatchInflight(conversationId, profileId) {
 // 的停止走的是 claudeRuntime.interrupt()，压根不会 abort 那个 ac。两条加起来，
 // 自动派发出去的子进程按停止后会一直跑到自然结束。
 // 改成注册表：停止时统一 abort，不依赖谁捕获了什么。
-const ACTIVE_DISPATCH_ABORTS = new Set();
-
-function abortActiveDispatches() {
-  for (const controller of [...ACTIVE_DISPATCH_ABORTS]) {
-    try { controller.abort(); } catch { /* 已经 abort 过就算了 */ }
-  }
-}
+const ACTIVE_DISPATCH_ABORTS = new DispatchAbortRegistry();
 
 const DISPATCH_GENERATION = new Map();
 
@@ -2841,6 +2850,30 @@ export function forgetDispatchSessions(conversationId) {
   }
   // 还在跑的那些派发之后会回调 onSession，代际一变它们就写不回来了
   bumpDispatchGeneration(String(conversationId).trim());
+}
+
+/**
+ * 用户删掉一个对话：把它在内存里的一切收尾干净。
+ *
+ * 只删磁盘不通知 SessionRegistry 的话，它的 ConversationSession 连同底下那个
+ * SDK 子进程要一直挂到 tracked 数超过 maxTracked 才轮得到被回收——删了五个
+ * 对话，五个子进程照样在跑，用户看不见也停不掉。
+ */
+function disposeConversationState(conversationId) {
+  const id = historyIdOrNull(conversationId);
+  if (!id) return;
+  // 顺序要紧：先掐派出去的子进程和这一轮，再丢状态。反过来的话 drop 之后
+  // 就找不到那个 session，abortCtrl 也就没人去 abort 了。
+  ACTIVE_DISPATCH_ABORTS.abortConversation(id);
+  forgetDispatchSessions(id);
+  const target = sessions.peek(id);
+  if (target?.abortCtrl) {
+    const activeAbort = target.abortCtrl;
+    target.abortCtrl = null;
+    try { activeAbort.abort(); } catch { /* 已经停了就算了 */ }
+  }
+  sessions.drop(id);
+  deliverSessionsSnapshot();
 }
 
 async function executeProviderDispatch({
@@ -3065,7 +3098,7 @@ function _buildDispatchMcpServer({ cwd, permissionMode, profileData, sendStep = 
         const onOuterAbort = () => dispatchController.abort();
         outerSignal?.addEventListener("abort", onOuterAbort, { once: true });
         // 注册进全局表，让停止路径能直接掐掉，不依赖上面那个可能已经陈旧的 signal
-        ACTIVE_DISPATCH_ABORTS.add(dispatchController);
+        ACTIVE_DISPATCH_ABORTS.add(dispatchController, convId);
         let result;
         try {
           result = await executeProviderDispatch({
@@ -3419,6 +3452,31 @@ scheduler.init({
 });
 
 // ── HTTP ──────────────────────────────────────────────────
+/* 这一页是被 Tauri 主窗口用 iframe 加载的，而 CSP 不会跨源继承给子框架——
+   tauri.conf.json 里那份管的是主窗口，管不到这里。模型输出经 marked 渲染后
+   进 innerHTML，净化器是第一道防线，这个头是第二道。
+
+   两条刻意放宽的：
+   - script-src 留着 'unsafe-inline'，因为全部前端逻辑都内联在 index.html 里；
+     真正堵事件属性注入的是 script-src-attr 'none'（页面零内联事件属性）。
+   - img-src 放行 http/https：微信登录二维码由 api.qrserver.com 画，模型也会
+     贴外链图。代价是模型输出理论上能靠图片 URL 外带信息——要堵这条得先把
+     二维码换成本地生成，那是另一件事。
+   frame-ancestors 刻意不写：写死了就等于赌 Tauri 主窗口的源，赌错整页白屏。 */
+const CHAT_PAGE_CSP = [
+  "default-src 'self'",
+  "script-src 'self' 'unsafe-inline'",
+  "script-src-attr 'none'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data: blob: https: http:",
+  "font-src 'self' data:",
+  "connect-src 'self' ws: wss:",
+  "object-src 'none'",
+  "frame-src 'none'",
+  "base-uri 'none'",
+  "form-action 'none'",
+].join("; ");
+
 const http = createServer((req, res) => {
   const url = (req.url ?? "/").split("?")[0];
   const queryParams = new URLSearchParams((req.url ?? "/").split("?")[1] ?? "");
@@ -3646,8 +3704,9 @@ const http = createServer((req, res) => {
   if (url === "/api/history" && method === "GET") {
     const history = readHistory();
     // 列表只返回摘要，不带消息内容，避免传输几MB JSON
-    const summaries = history.map(({ id, title, date, messages }) => ({
-      id, title, date, messageCount: messages ? messages.length : 0,
+    const summaries = history.map(({ id, title, date, sessionId, sessionProvider, messages }) => ({
+      id, title, date, sessionId: sessionId ?? null, sessionProvider: sessionProvider ?? null,
+      messageCount: messages ? messages.length : 0,
     }));
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify(summaries));
@@ -3946,6 +4005,8 @@ const http = createServer((req, res) => {
       // 磁盘上的删除只从这里发生——flush 不再按内存全集去删
       shardStore.remove(id);
       writeHistory(history);
+      // 内存里那份也得跟着走，不然子进程会活得比对话久
+      disposeConversationState(id);
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
       return;
@@ -3965,7 +4026,11 @@ const http = createServer((req, res) => {
   // index.html 里内联了全部前端逻辑，没有 Cache-Control 时 WebView2 会把它当可缓存
   // 资源留在磁盘缓存里——桌面端重启进程不会清这个缓存，改完代码重启 app 还在跑旧版本，
   // 排查起来极容易误判成别的 bug。强制 no-store，保证每次加载都从 server 现读现给。
-  res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+  res.writeHead(200, {
+    "Content-Type": "text/html; charset=utf-8",
+    "Cache-Control": "no-store",
+    "Content-Security-Policy": CHAT_PAGE_CSP,
+  });
   res.end(readFileSync(htmlPath, "utf8"));
 });
 
@@ -4023,6 +4088,7 @@ function makeAbortError(message) {
 // question, turn bookkeeping) now sits on `session`; what stays here is what belongs
 // to the connection or the process, not to any one conversation.
 let activeWs = null;
+let activeQueuedPromptDrainer = null;
 const DETACHED_BUFFER_MAX = 2000;
 let detachedBuffer = [];
 const RESTART_LEASE_MS = 15_000;
@@ -4448,15 +4514,15 @@ function clearAllSteering(reason, conversationId = null) {
   }
 }
 
-function scheduleQueuedClientPromptDrain(delayMs = 0) {
+function scheduleQueuedClientPromptDrain(delayMs = 0, targetSession = sessions.current()) {
   // Never replace the task-wake grace timer with an earlier callback that can
   // only return. This used to strand queued prompts forever after auto-wake.
-  const graceDelay = Math.max(0, session.claudeTaskWakeGraceUntil - Date.now() + 10);
+  const graceDelay = Math.max(0, targetSession.claudeTaskWakeGraceUntil - Date.now() + 10);
   const effectiveDelay = Math.max(delayMs, graceDelay);
-  clearTimeout(session.queuedClientPromptDrainTimer);
-  session.queuedClientPromptDrainTimer = setTimeout(() => {
-    session.queuedClientPromptDrainTimer = null;
-    session.queuedClientPromptDrain?.();
+  clearTimeout(targetSession.queuedClientPromptDrainTimer);
+  targetSession.queuedClientPromptDrainTimer = setTimeout(() => {
+    targetSession.queuedClientPromptDrainTimer = null;
+    activeQueuedPromptDrainer?.(targetSession);
   }, effectiveDelay);
 }
 
@@ -4524,7 +4590,7 @@ async function handlePersistentClaudeEvent(ev) {
   if (ev.type === "system" && ev.subtype === "init") {
     if (session.claudeRuntimeConversationId) session.activeHistoryConversationId = session.claudeRuntimeConversationId;
     saveSession(ev.session_id);
-    send({ type: "session", sessionId: ev.session_id });
+    send({ type: "session", sessionId: ev.session_id, provider: "claude" });
     const skillsFromSdk = Array.isArray(ev.skills) && ev.skills.length > 0
       ? ev.skills
       : (Array.isArray(ev.slash_commands) ? ev.slash_commands : []);
@@ -4651,8 +4717,8 @@ function pickAttachSession() {
     ?? sessions.ambient;
 }
 
-function shouldQueueClientPrompt() {
-  return isForegroundRunActive() || Date.now() < session.claudeTaskWakeGraceUntil;
+function shouldQueueClientPrompt(candidate = sessions.current()) {
+  return foregroundActiveFor(candidate) || Date.now() < candidate.claudeTaskWakeGraceUntil;
 }
 
 /**
@@ -4791,19 +4857,34 @@ wss.on("connection", (ws) => {
   if (isAgentRunActive() || detachedBuffer.length > 0) {
     const backlog = detachedBuffer;
     detachedBuffer = [];
-    let questionInBacklog = false;
+    const questionsInBacklog = new Set();
     for (const obj of backlog) {
-      if (obj?.type === "ask_user_question" && obj.requestId === attachSession.pendingAskUserQuestion?.requestId) {
-        questionInBacklog = true;
+      // ambient 发出的事件本来就没有 conversationId，键要能容下它，
+      // 否则下面那轮补投会把 backlog 里已经有的那条再发一遍
+      if (obj?.type === "ask_user_question" && obj.requestId) {
+        questionsInBacklog.add(`${obj.conversationId ?? ""}:${obj.requestId}`);
       }
       deliver(obj);
     }
-    if (attachSession.pendingAskUserQuestion && !questionInBacklog) {
+    /* ambient 不在 _sessions 里，runningIds() 扫不到它。没带 conversationId 的
+       回合——进程刚起来从磁盘恢复的 sessionId、微信链路——问的那一句就落在它
+       身上。漏掉的话重连后前端收不到任何提示，界面停在等待，而人根本不知道
+       它在等你回话。 */
+    const pendingQuestionOwners = [
+      ...sessions.runningIds().map(id => [id, sessions.peek(id)]),
+      [null, sessions.ambient],
+    ];
+    for (const [conversationId, candidate] of pendingQuestionOwners) {
+      const pending = candidate?.pendingAskUserQuestion;
+      if (!pending) continue;
+      if (questionsInBacklog.has(`${conversationId ?? ""}:${pending.requestId}`)) continue;
       deliver({
         type: "ask_user_question",
-        requestId: attachSession.pendingAskUserQuestion.requestId,
-        toolUseID: attachSession.pendingAskUserQuestion.toolUseID ?? null,
-        questions: attachSession.pendingAskUserQuestion.questions,
+        // 有归属就带上；ambient 那条保持无归属，前端会把它落到当前视图
+        ...(conversationId ? { conversationId } : {}),
+        requestId: pending.requestId,
+        toolUseID: pending.toolUseID ?? null,
+        questions: pending.questions,
       });
     }
   }
@@ -4823,12 +4904,11 @@ wss.on("connection", (ws) => {
   deliverSessionsSnapshot();
 
   let handleClientMessage;
-  const drainThisConnection = () => {
-    if (activeWs !== ws || shouldQueueClientPrompt() || session.queuedClientPrompts.length === 0) return;
-    const next = session.queuedClientPrompts.shift();
+  const drainThisConnection = (targetSession) => {
+    if (activeWs !== ws || shouldQueueClientPrompt(targetSession) || targetSession.queuedClientPrompts.length === 0) return;
+    const next = targetSession.queuedClientPrompts.shift();
     handleClientMessage(JSON.stringify(next), true);
   };
-  session.queuedClientPromptDrain = drainThisConnection;
   handleClientMessage = (raw, fromQueue = false) => {
     if (activeWs !== ws) return;
     let msg;
@@ -4973,7 +5053,9 @@ wss.on("connection", (ws) => {
       // 必须赶在 clearActiveHistoryConversation() 把 id 置空之前取。
       // 这里不能用 normalizeHistoryId：它拿不到合法值时会造一个新 id，
       // 而前端多数 reset 只发 {reset:true}，那样清掉的是个随机键，等于没清。
-      forgetDispatchSessions(historyIdOrNull(msg.conversationId) || session.activeHistoryConversationId);
+      const resetConversationId = historyIdOrNull(msg.conversationId) || session.activeHistoryConversationId;
+      ACTIVE_DISPATCH_ABORTS.abortConversation(resetConversationId);
+      forgetDispatchSessions(resetConversationId);
       clearActiveHistoryConversation();
       clearSession();
       clearCodexThread();
@@ -5006,7 +5088,27 @@ wss.on("connection", (ws) => {
     }
 
     if (msg.setSession != null) {
-      saveSession(String(msg.setSession));
+      const restoredSessionId = String(msg.setSession);
+      const restoredProvider = msg.sessionProvider === "codex" || msg.sessionProvider === "antigravity"
+        ? msg.sessionProvider
+        : "claude";
+      /* 三家的会话 id 存在三个独立字段里。只写目标那个的话，另外两个还留着
+         这个对话上次换厂商之前的旧 id，两条同时「有效」——下一轮走到哪个
+         provider 分支，就接上哪条早就作废的会话。恢复一个就把另外两个清掉。
+         带 if 是为了少写两次盘：这几个 clear 都会同步落 JSON 文件。 */
+      if (restoredProvider === "codex") {
+        saveCodexThread(restoredSessionId);
+        if (session.sessionId) clearSession();
+        if (session.agyConversationId) clearAgyConversation();
+      } else if (restoredProvider === "antigravity") {
+        saveAgyConversation(restoredSessionId);
+        if (session.sessionId) clearSession();
+        if (session.codexThreadId) clearCodexThread();
+      } else {
+        saveSession(restoredSessionId);
+        if (session.codexThreadId) clearCodexThread();
+        if (session.agyConversationId) clearAgyConversation();
+      }
       if (msg.conversationId) {
         const nextConversationId = normalizeHistoryId(msg.conversationId);
         // A generation still streaming into a different conversation owns
@@ -5016,7 +5118,7 @@ wss.on("connection", (ws) => {
           && session.activeHistoryTurnConversationId !== nextConversationId;
         if (!generatingElsewhere) {
           session.activeHistoryConversationId = nextConversationId;
-          updateActiveConversationSession(String(msg.setSession));
+          updateActiveConversationSession(restoredSessionId, restoredProvider);
         }
       }
       return;
@@ -5068,7 +5170,11 @@ wss.on("connection", (ws) => {
       session.claudeTurnEpoch += 1;
       // 派出去的子进程一律先掐。放在分支之前：Claude 主模型那条路走的是
       // claudeRuntime.interrupt()，它只打断主模型，碰不到派发出去的活。
-      abortActiveDispatches();
+      const stoppedConversationId = historyIdOrNull(msg.conversationId)
+        || session.activeForegroundConversationId
+        || session.activeHistoryConversationId
+        || session.conversationId;
+      ACTIVE_DISPATCH_ABORTS.abortConversation(stoppedConversationId);
       if (session.abortCtrl) {
         const stoppedRequestId = session.activeForegroundRequestId;
         const activeAbort = session.abortCtrl;
@@ -5352,7 +5458,7 @@ wss.on("connection", (ws) => {
         : null;
       const releaseDispatchInflight = markDispatchInflight(dispatchConvId, dispatchProfileId);
       const dispatchGeneration = dispatchGenerationOf(dispatchConvId);
-      ACTIVE_DISPATCH_ABORTS.add(ac);
+      ACTIVE_DISPATCH_ABORTS.add(ac, dispatchConvId);
       const dispatchInput = {
         provider: msg.dispatchProvider,
         task: msg.prompt,
@@ -5556,7 +5662,7 @@ wss.on("connection", (ws) => {
             // id 在 init 事件里就有，先记下来——中断时这条会话仍然有效
             onSession: (id) => {
               saveAgyConversation(id);
-              if (isCurrentAgyTurn()) send({ type: "session", sessionId: id });
+              if (isCurrentAgyTurn()) send({ type: "session", sessionId: id, provider: "antigravity" });
             },
             onEvent: emit,
           });
@@ -5594,6 +5700,7 @@ wss.on("connection", (ws) => {
       }
       const codexTurnEpoch = ++session.claudeTurnEpoch;
       session.abortCtrl = ac;
+      const codexTempImagePaths = [];
       const isCurrentCodexTurn = () => (
         codexTurnEpoch === session.claudeTurnEpoch
         && session.abortCtrl === ac
@@ -5620,9 +5727,18 @@ wss.on("connection", (ws) => {
           if (imgList.length > 0) {
             const parts = [];
             for (const img of imgList) {
-              const ext = (img.mediaType || "image/png").split("/")[1] || "png";
+              // 只认得出来的这几种；认不出的一律当 png，别再拿 mediaType 后半段
+              // 直接当扩展名——"image/svg+xml" 那样的会拼出一个非法文件名
+              const ext = ({
+                "image/jpeg": "jpg",
+                "image/jpg": "jpg",
+                "image/png": "png",
+                "image/gif": "gif",
+                "image/webp": "webp",
+              })[String(img.mediaType || "").toLowerCase()] || "png";
               const tmpPath = join(DATA_DIR, `codex-img-${Date.now()}-${crypto.randomBytes(3).toString("hex")}.${ext}`);
               writeFileSync(tmpPath, Buffer.from(img.data, "base64"));
+              codexTempImagePaths.push(tmpPath);
               parts.push({ type: "local_image", path: tmpPath });
             }
             parts.push({ type: "text", text: msg.prompt });
@@ -5638,7 +5754,7 @@ wss.on("connection", (ws) => {
             if (!isCurrentCodexTurn()) return;
             if (ev.type === "thread.started") {
               saveCodexThread(ev.thread_id);
-              send({ type: "session", sessionId: ev.thread_id });
+              send({ type: "session", sessionId: ev.thread_id, provider: "codex" });
             } else if (ev.type === "turn.started") {
               send({ type: "system", subtype: "status", status: "requesting" });
             } else if (ev.type === "item.started" || ev.type === "item.updated" || ev.type === "item.completed") {
@@ -5667,6 +5783,20 @@ wss.on("connection", (ws) => {
             completeClientRequest("error", requestId);
           }
         } finally {
+          /* 这一轮被顶掉时，for-await 是提前 return 出来的，codex 子进程可能还
+             攥着那几张图。先掐了它再删：它的输出反正没人要，留着只是继续烧额度。 */
+          if (!isCurrentCodexTurn()) { try { ac.abort(); } catch { /* 已经停了就算了 */ } }
+          for (const tmpPath of codexTempImagePaths) {
+            try {
+              unlinkSync(tmpPath);
+            } catch {
+              /* Windows 上文件还被子进程占着就删不掉。隔一拍再试一次，
+                 再不行也不能在收尾里抛出去——那会连带 drain 一起断掉。 */
+              setTimeout(() => {
+                try { unlinkSync(tmpPath); } catch { /* 认了 */ }
+              }, 2_000).unref?.();
+            }
+          }
           if (session.abortCtrl === ac) session.abortCtrl = null;
           scheduleQueuedClientPromptDrain();
         }
@@ -5833,13 +5963,18 @@ wss.on("connection", (ws) => {
     });
   };
   ws.on("message", raw => handleClientMessage(raw, false));
-  scheduleQueuedClientPromptDrain();
+  activeQueuedPromptDrainer = drainThisConnection;
+  for (const id of sessions.runningIds()) {
+    const targetSession = sessions.peek(id);
+    if (targetSession?.queuedClientPrompts.length) scheduleQueuedClientPromptDrain(0, targetSession);
+  }
+  if (sessions.ambient.queuedClientPrompts.length) scheduleQueuedClientPromptDrain(0, sessions.ambient);
 
   ws.on("close", () => {
     clearInterval(pingTimer);
     if (activeWs === ws) {
       activeWs = null;
-      if (session.queuedClientPromptDrain === drainThisConnection) session.queuedClientPromptDrain = null;
+      if (activeQueuedPromptDrainer === drainThisConnection) activeQueuedPromptDrainer = null;
       // Do NOT abort or clear the pending question: the run keeps going in the
       // background and reattaches when the client reconnects.
       if (isAgentRunActive()) {

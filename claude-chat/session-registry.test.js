@@ -4,13 +4,13 @@ import assert from "node:assert/strict";
 import { SessionRegistry } from "./session-registry.js";
 
 /** 造一个 registry，busy 状态由外部的 Set 控制，方便测并发。 */
-function makeRegistry({ limit = 10, maxTracked = 50 } = {}) {
+function makeRegistry({ limit = 10, maxTracked = 50, createSession = null } = {}) {
   const busy = new Set();
   let currentId = null;
   const registry = new SessionRegistry({
     limit,
     maxTracked,
-    createSession: (id) => ({ id, marker: null }),
+    createSession: createSession ?? ((id) => ({ id, marker: null })),
     resolveCurrentId: () => currentId,
     isBusy: (s) => busy.has(s.id),
   });
@@ -111,11 +111,26 @@ test("回收不会掉进死循环——全都在跑时就让它超出上限", ()
 });
 
 test("drop 明确丢弃一个对话", () => {
-  const { registry } = makeRegistry();
+  let disposed = 0;
+  const { registry } = makeRegistry({
+    createSession: (id) => ({ id, marker: null, disposeRuntime: () => { disposed += 1; } }),
+  });
   registry.acquire("conv-a");
   assert.equal(registry.drop("conv-a"), true);
+  assert.equal(disposed, 1, "丢弃前必须关闭会话 runtime");
   assert.equal(registry.peek("conv-a"), null);
   assert.equal(registry.drop("conv-a"), false);
+});
+
+test("空闲回收会关闭被淘汰会话的 runtime", () => {
+  const disposed = [];
+  const { registry } = makeRegistry({
+    maxTracked: 1,
+    createSession: (id) => ({ id, disposeRuntime: () => disposed.push(id) }),
+  });
+  registry.acquire("old");
+  registry.acquire("new");
+  assert.deepEqual(disposed, ["old"]);
 });
 
 test("空 id 一律落到 ambient，不会造出一堆匿名会话", () => {

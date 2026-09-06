@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { prepareHiddenConsole } from "../claude-chat/hidden-console.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -95,6 +96,10 @@ prepareNodeRuntime();
 
 fs.rmSync(targetRoot, { recursive: true, force: true });
 copyRecursive(source, target);
+const hiddenConsole = prepareHiddenConsole();
+if (hiddenConsole) {
+  fs.copyFileSync(hiddenConsole, path.join(target, "native", "hidden-console.exe"));
+}
 installSidecarDependencies();
 
 console.log(`[desktop] prepared claude-chat sidecar at ${path.relative(root, target)}`);
